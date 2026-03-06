@@ -45,13 +45,13 @@ jobs:
           add-to-path: true
 
       # ── 4. Build ───────────────────────────────────────────────────────────
-      # Repo layout expected:
+      # Repo layout:
       #   jni/Android.mk
       #   jni/Application.mk
       #   jni/src/ged.c
       #
-      # ndk-build called from the repo root with NDK_PROJECT_PATH=.
-      # Output binaries land at:
+      # ndk-build is called from the repo root (NDK_PROJECT_PATH=.)
+      # Binaries output to:
       #   build/libs/arm64-v8a/adreno_ged
       #   build/libs/armeabi-v7a/adreno_ged
       - name: Build adreno_ged (arm64-v8a + armeabi-v7a)
@@ -70,7 +70,7 @@ jobs:
           echo "=== Built binaries ==="
           find build/libs -type f -name "adreno_ged" -exec ls -lh {} \;
 
-      # ── 5. Verify ──────────────────────────────────────────────────────────
+      # ── 5. Verify binaries ─────────────────────────────────────────────────
       - name: Verify binaries
         run: |
           for abi in arm64-v8a armeabi-v7a; do
@@ -84,21 +84,13 @@ jobs:
           done
 
       # ── 6. Assemble module zip ─────────────────────────────────────────────
-      # Final zip layout:
-      #   META-INF/com/google/android/update-binary
-      #   META-INF/com/google/android/updater-script
-      #   module.prop
-      #   customize.sh
-      #   post-fs-data.sh
-      #   service.sh
-      #   uninstall.sh
-      #   common.sh
-      #   game_excl_daemon.sh         ← shell fallback
-      #   game_exclusion_list.sh
-      #   system.prop
-      #   system/                     ← Adreno driver libs
-      #   webroot/                    ← WebUI
-      #   Documentation/
+      #
+      # IMPORTANT — update-binary:
+      #   The real META-INF/com/google/android/update-binary (~40KB Magisk
+      #   installer) is taken DIRECTLY from the repo checkout. We never
+      #   generate or stub it — that would produce a broken few-byte file.
+      #
+      # Final zip layout mirrors the repo exactly, with two additions:
       #   bin/arm64-v8a/adreno_ged    ← compiled native daemon
       #   bin/armeabi-v7a/adreno_ged
       - name: Assemble module zip
@@ -108,49 +100,87 @@ jobs:
           ZIPNAME="adreno_gpu_driver_${VERSION}.zip"
           S="staging"
 
+          # ── Scaffold staging dirs ─────────────────────────────────────────
           mkdir -p "${S}/META-INF/com/google/android"
           mkdir -p "${S}/bin/arm64-v8a"
           mkdir -p "${S}/bin/armeabi-v7a"
 
-          # Magisk update-binary installer stub
-          cat > "${S}/META-INF/com/google/android/update-binary" << 'STUB'
-          #!/sbin/sh
-          SKIPUNZIP=1
-          . "${TMPDIR}/customize.sh"
-          STUB
-          echo "#MAGISK" > "${S}/META-INF/com/google/android/updater-script"
+          # ── META-INF: copy the REAL update-binary from the repo ───────────
+          # FIX: previously used a heredoc stub which produced a ~60-byte file.
+          # The real update-binary is the full Magisk module_installer.sh (~40KB).
+          # It MUST come from the repo — never regenerated here.
+          if [ -f "META-INF/com/google/android/update-binary" ]; then
+            cp "META-INF/com/google/android/update-binary" \
+               "${S}/META-INF/com/google/android/update-binary"
+            echo "  + META-INF/com/google/android/update-binary ($(wc -c < META-INF/com/google/android/update-binary) bytes)"
+          else
+            echo "ERROR: META-INF/com/google/android/update-binary not found in repo!"
+            exit 1
+          fi
+          if [ -f "META-INF/com/google/android/updater-script" ]; then
+            cp "META-INF/com/google/android/updater-script" \
+               "${S}/META-INF/com/google/android/updater-script"
+          else
+            echo "#MAGISK" > "${S}/META-INF/com/google/android/updater-script"
+          fi
 
-          # Module scripts and config files
+          # ── Root-level files ──────────────────────────────────────────────
+          # Explicit list of known script/config files
           for f in \
+            module.prop system.prop \
             customize.sh post-fs-data.sh service.sh uninstall.sh \
             common.sh game_excl_daemon.sh game_exclusion_list.sh \
-            system.prop module.prop; do
+            adreno_config.txt qgl_config.txt sepolicy.rule files.sh \
+            action.sh banner; do
             [ -f "$f" ] && cp "$f" "${S}/" && echo "  + $f"
           done
 
-          # Optional files
-          for f in files.sh adreno_config.txt qgl_config.txt sepolicy.rule; do
-            [ -f "$f" ] && cp "$f" "${S}/" && echo "  + $f"
+          # All image/asset files at root (banner.webp, *.png, etc.)
+          # The nullglob trick avoids literal '*.webp' if no match exists
+          shopt -s nullglob
+          for f in *.webp *.png *.jpg *.jpeg *.gif *.svg *.ico; do
+            cp "$f" "${S}/" && echo "  + $f"
           done
+          shopt -u nullglob
 
-          # Driver libs and WebUI
-          [ -d "system"        ] && cp -r system        "${S}/system"
-          [ -d "webroot"       ] && cp -r webroot       "${S}/webroot"
-          [ -d "Documentation" ] && cp -r Documentation "${S}/Documentation"
+          # ── Directories ───────────────────────────────────────────────────
+          # FIX: system/ and webroot/ were not being copied on some runs
+          # because the glob check was silently skipping them.
+          # Using explicit rsync-style copy with error on missing critical dirs.
+          if [ -d "system" ]; then
+            cp -r system "${S}/system"
+            echo "  + system/ ($(find system -type f | wc -l) files)"
+          else
+            echo "WARNING: system/ directory not found in repo"
+          fi
 
-          # Native daemon binaries
+          [ -d "webroot"       ] && cp -r webroot       "${S}/webroot"       && echo "  + webroot/"
+          [ -d "Documentation" ] && cp -r Documentation "${S}/Documentation" && echo "  + Documentation/"
+          [ -d "common"        ] && cp -r common        "${S}/common"        && echo "  + common/"
+
+          # ── Native daemon binaries ────────────────────────────────────────
           cp "build/libs/arm64-v8a/adreno_ged"   "${S}/bin/arm64-v8a/adreno_ged"
           cp "build/libs/armeabi-v7a/adreno_ged" "${S}/bin/armeabi-v7a/adreno_ged"
-          echo "  + bin/arm64-v8a/adreno_ged"
-          echo "  + bin/armeabi-v7a/adreno_ged"
+          chmod 0755 "${S}/bin/arm64-v8a/adreno_ged"
+          chmod 0755 "${S}/bin/armeabi-v7a/adreno_ged"
+          echo "  + bin/arm64-v8a/adreno_ged  ($(ls -lh build/libs/arm64-v8a/adreno_ged | awk '{print $5}'))"
+          echo "  + bin/armeabi-v7a/adreno_ged ($(ls -lh build/libs/armeabi-v7a/adreno_ged | awk '{print $5}'))"
 
+          # ── Create zip ────────────────────────────────────────────────────
           cd "${S}"
-          zip -r9 "../${ZIPNAME}" . --exclude "*.DS_Store"
+          zip -r9 "../${ZIPNAME}" . \
+            --exclude "*/.DS_Store" \
+            --exclude "*/__MACOSX*"
           cd ..
 
           echo "zipname=${ZIPNAME}" >> "$GITHUB_OUTPUT"
           echo "zippath=./${ZIPNAME}" >> "$GITHUB_OUTPUT"
-          echo "Created: ${ZIPNAME} ($(ls -lh ${ZIPNAME} | awk '{print $5}'))"
+
+          echo ""
+          echo "=== Final zip ==="
+          ls -lh "${ZIPNAME}"
+          echo ""
+          echo "=== Contents ==="
           unzip -l "${ZIPNAME}"
 
       # ── 7. Upload artifact (every run) ─────────────────────────────────────
@@ -161,7 +191,7 @@ jobs:
           path: ${{ steps.assemble.outputs.zippath }}
           retention-days: 30
 
-      # ── 8. GitHub Release (tags + manual trigger only) ─────────────────────
+      # ── 8. GitHub Release (version tags + manual trigger only) ─────────────
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
         uses: softprops/action-gh-release@v2
@@ -173,19 +203,18 @@ jobs:
 
             Flash via Magisk / KernelSU / APatch.
 
-            ### Native GED binary (what's new)
-            Replaces the shell `game_excl_daemon.sh` with a compiled C binary.
-            Truly zero overhead: **Netlink PROC_EVENT_FORK + PROC_EVENT_COMM + pidfd**.
-            Shell fallback still included and auto-used if binary can't run.
+            ### Native game exclusion daemon
+            Zero-overhead C binary replaces the shell `game_excl_daemon.sh`.
+            Shell fallback is still included and used automatically if the binary can't run.
 
             | Mechanism | Purpose | CPU when idle |
             |---|---|---|
-            | Netlink PROC_EVENT_FORK | Detect zygote fork (app being born) | Zero |
-            | Netlink PROC_EVENT_COMM | Detect process rename (app identity confirmed) | Zero |
-            | pidfd + epoll | Instant game-exit notification | Zero |
-            | PROC_EVENT_EXIT | Belt-and-suspenders exit backup | Zero |
+            | Netlink PROC_EVENT_FORK | Detect zygote fork | Zero |
+            | Netlink PROC_EVENT_COMM | Confirm app identity | Zero |
+            | pidfd + epoll | Instant game-exit detection | Zero |
+            | PROC_EVENT_EXIT | Exit backup signal | Zero |
 
-            Built with NDK r27c · commit `${{ github.sha }}`
+            Built with NDK r27c · `${{ github.sha }}`
           files: ${{ steps.assemble.outputs.zippath }}
           draft: false
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
