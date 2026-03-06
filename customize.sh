@@ -1260,7 +1260,7 @@ else
   log_only "WARNING: No system directory found in module package"
 fi
 
-for file in module.prop post-fs-data.sh service.sh uninstall.sh system.prop sepolicy.rule adreno_config.txt qgl_config.txt common.sh; do
+for file in module.prop post-fs-data.sh service.sh uninstall.sh system.prop sepolicy.rule adreno_config.txt qgl_config.txt common.sh game_excl_daemon.sh game_exclusion_list.sh; do
   if [ -f "$TMPDIR/$file" ]; then
     if cp -f "$TMPDIR/$file" "$MODPATH/" 2>/dev/null; then
       FILES_COPIED=$((FILES_COPIED + 1))
@@ -1293,7 +1293,17 @@ if [ -n "$_GED_ARCH" ]; then
   _GED_DST_DIR="$MODPATH/bin/${_GED_ARCH}"
   _GED_DST="$_GED_DST_DIR/adreno_ged"
 
-  if [ -f "$_GED_SRC" ]; then
+  # Some Magisk forks/versions pre-copy all zip contents to MODPATH before
+  # sourcing customize.sh. If the binary is already in MODPATH, skip the copy
+  # and just ensure it's executable.
+  if [ ! -f "$_GED_SRC" ] && [ -f "$_GED_DST" ]; then
+    log_only "Native GED binary already in MODPATH (pre-copied by installer), skipping cp"
+    if chmod 0755 "$_GED_DST" 2>/dev/null; then
+      FILES_COPIED=$((FILES_COPIED + 1))
+      ui_print "[OK] Native GED binary already installed (${_GED_ARCH})"
+      log_only "Native GED binary permissions confirmed: $_GED_DST"
+    fi
+  elif [ -f "$_GED_SRC" ]; then
     if mkdir -p "$_GED_DST_DIR" 2>/dev/null && \
        cp -f "$_GED_SRC" "$_GED_DST" 2>/dev/null && \
        chmod 0755 "$_GED_DST" 2>/dev/null; then

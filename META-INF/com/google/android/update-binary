@@ -1051,9 +1051,33 @@ export DETECTION_REASON
 
   ui_print "✓ Permissions set (SELinux will auto-restore)"
 
+  # ── Auto PLT detection ────────────────────────────────────────────────────
+  # If PLT is not already enabled by config, check if gpu++.so is present in
+  # the driver source (vendor/lib64 or vendor/lib64/egl). If found, auto-
+  # enable PLT — the library requires a public.libraries entry to be loaded.
+  if [ "${PLT:-n}" != "y" ] && [ -n "${VENDOR_SRC:-}" ]; then
+    _plt_auto=false
+    for _plt_chk in \
+        "$VENDOR_SRC/lib64/gpu++.so" \
+        "$VENDOR_SRC/lib64/egl/gpu++.so" \
+        "$VENDOR_SRC/lib/gpu++.so"; do
+      if [ -f "$_plt_chk" ]; then
+        _plt_auto=true
+        log_only "Auto PLT: gpu++.so found at $_plt_chk"
+        break
+      fi
+    done
+    if [ "$_plt_auto" = "true" ]; then
+      PLT="y"
+      ui_print "[OK] Auto PLT: gpu++.so detected in driver — PLT enabled automatically"
+      log_only "PLT auto-enabled (gpu++.so present in driver)"
+    else
+      log_only "Auto PLT: gpu++.so not found in driver — PLT remains disabled"
+    fi
+    unset _plt_auto _plt_chk
+  fi
+
   if [ "$PLT" = "y" ]; then
-    ui_print " "
-    ui_print "Patching public libraries..."
 
     LINE_TO_ADD='gpu++.so'
     PATCH_COUNT=0
