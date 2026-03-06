@@ -1,0 +1,23 @@
+id=adreno_gpu_driver_unified
+name=Adreno GPU Driver Unified
+version=vx.x.x
+versionCode=xxxxxx
+author=@pica_pica_picachu-module template maker
+description=Unified Adreno GPU Driver module with mounting fixes for KernelSU, Magisk, and APatch. Includes SELinux policy fixes and DSP stability hardening.
+updateJson=
+banner=banner.webp
+webuiIcon=
+# ── Minimum Device Requirements ──────────────────────────────────────────────
+# Leave a field EMPTY to skip that check entirely.
+# If a value is provided, customize.sh enforces it and blocks flashing if
+# the device does not meet the requirement (except Oem= which is warning-only).
+#
+# Android= minimum Android version (e.g. Android=12 → requires Android 12+)
+# Adreno=  minimum Adreno GPU model number (e.g. Adreno=610 → requires 610+)
+# Kernel=  minimum kernel version as major.minor (e.g. Kernel=4.14)
+# Oem=     comma-separated OEM ROM list that may have issues (warning, not block)
+#          (e.g. Oem=miui,hyperos,oneui — user is warned but flash is allowed)
+Android=11
+Adreno=608
+Kernel=4.14
+Oem=miui,hyperos,oneui

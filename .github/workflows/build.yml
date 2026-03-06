@@ -1,0 +1,193 @@
+name: Build and Release Module
+
+on:
+  push:
+    branches: [ main ]
+    tags:     [ 'v*.*.*' ]
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create a GitHub Release'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  build:
+    name: Build Native Daemon + Package Module
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Version ─────────────────────────────────────────────────────────
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Version: ${VERSION}"
+
+      # ── 3. NDK ─────────────────────────────────────────────────────────────
+      - name: Set up Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: true
+
+      # ── 4. Build ───────────────────────────────────────────────────────────
+      # Repo layout expected:
+      #   jni/Android.mk
+      #   jni/Application.mk
+      #   jni/src/ged.c
+      #
+      # ndk-build called from the repo root with NDK_PROJECT_PATH=.
+      # Output binaries land at:
+      #   build/libs/arm64-v8a/adreno_ged
+      #   build/libs/armeabi-v7a/adreno_ged
+      - name: Build adreno_ged (arm64-v8a + armeabi-v7a)
+        run: |
+          NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
+          echo "NDK: ${NDK_PATH}"
+
+          "${NDK_PATH}/ndk-build" \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=jni/Android.mk \
+            NDK_APPLICATION_MK=jni/Application.mk \
+            NDK_OUT=build/obj \
+            NDK_LIBS_OUT=build/libs \
+            -j$(nproc)
+
+          echo "=== Built binaries ==="
+          find build/libs -type f -name "adreno_ged" -exec ls -lh {} \;
+
+      # ── 5. Verify ──────────────────────────────────────────────────────────
+      - name: Verify binaries
+        run: |
+          for abi in arm64-v8a armeabi-v7a; do
+            bin="build/libs/${abi}/adreno_ged"
+            if [ ! -f "$bin" ]; then
+              echo "ERROR: missing $bin"; exit 1
+            fi
+            echo "=== ${abi} ==="
+            file "$bin"
+            ls -lh "$bin"
+          done
+
+      # ── 6. Assemble module zip ─────────────────────────────────────────────
+      # Final zip layout:
+      #   META-INF/com/google/android/update-binary
+      #   META-INF/com/google/android/updater-script
+      #   module.prop
+      #   customize.sh
+      #   post-fs-data.sh
+      #   service.sh
+      #   uninstall.sh
+      #   common.sh
+      #   game_excl_daemon.sh         ← shell fallback
+      #   game_exclusion_list.sh
+      #   system.prop
+      #   system/                     ← Adreno driver libs
+      #   webroot/                    ← WebUI
+      #   Documentation/
+      #   bin/arm64-v8a/adreno_ged    ← compiled native daemon
+      #   bin/armeabi-v7a/adreno_ged
+      - name: Assemble module zip
+        id: assemble
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ZIPNAME="adreno_gpu_driver_${VERSION}.zip"
+          S="staging"
+
+          mkdir -p "${S}/META-INF/com/google/android"
+          mkdir -p "${S}/bin/arm64-v8a"
+          mkdir -p "${S}/bin/armeabi-v7a"
+
+          # Magisk update-binary installer stub
+          cat > "${S}/META-INF/com/google/android/update-binary" << 'STUB'
+          #!/sbin/sh
+          SKIPUNZIP=1
+          . "${TMPDIR}/customize.sh"
+          STUB
+          echo "#MAGISK" > "${S}/META-INF/com/google/android/updater-script"
+
+          # Module scripts and config files
+          for f in \
+            customize.sh post-fs-data.sh service.sh uninstall.sh \
+            common.sh game_excl_daemon.sh game_exclusion_list.sh \
+            system.prop module.prop; do
+            [ -f "$f" ] && cp "$f" "${S}/" && echo "  + $f"
+          done
+
+          # Optional files
+          for f in files.sh adreno_config.txt qgl_config.txt sepolicy.rule; do
+            [ -f "$f" ] && cp "$f" "${S}/" && echo "  + $f"
+          done
+
+          # Driver libs and WebUI
+          [ -d "system"        ] && cp -r system        "${S}/system"
+          [ -d "webroot"       ] && cp -r webroot       "${S}/webroot"
+          [ -d "Documentation" ] && cp -r Documentation "${S}/Documentation"
+
+          # Native daemon binaries
+          cp "build/libs/arm64-v8a/adreno_ged"   "${S}/bin/arm64-v8a/adreno_ged"
+          cp "build/libs/armeabi-v7a/adreno_ged" "${S}/bin/armeabi-v7a/adreno_ged"
+          echo "  + bin/arm64-v8a/adreno_ged"
+          echo "  + bin/armeabi-v7a/adreno_ged"
+
+          cd "${S}"
+          zip -r9 "../${ZIPNAME}" . --exclude "*.DS_Store"
+          cd ..
+
+          echo "zipname=${ZIPNAME}" >> "$GITHUB_OUTPUT"
+          echo "zippath=./${ZIPNAME}" >> "$GITHUB_OUTPUT"
+          echo "Created: ${ZIPNAME} ($(ls -lh ${ZIPNAME} | awk '{print $5}'))"
+          unzip -l "${ZIPNAME}"
+
+      # ── 7. Upload artifact (every run) ─────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: adreno-gpu-driver-${{ steps.version.outputs.version }}
+          path: ${{ steps.assemble.outputs.zippath }}
+          retention-days: 30
+
+      # ── 8. GitHub Release (tags + manual trigger only) ─────────────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: "Adreno GPU Driver ${{ steps.version.outputs.version }}"
+          body: |
+            ## Adreno GPU Driver ${{ steps.version.outputs.version }}
+
+            Flash via Magisk / KernelSU / APatch.
+
+            ### Native GED binary (what's new)
+            Replaces the shell `game_excl_daemon.sh` with a compiled C binary.
+            Truly zero overhead: **Netlink PROC_EVENT_FORK + PROC_EVENT_COMM + pidfd**.
+            Shell fallback still included and auto-used if binary can't run.
+
+            | Mechanism | Purpose | CPU when idle |
+            |---|---|---|
+            | Netlink PROC_EVENT_FORK | Detect zygote fork (app being born) | Zero |
+            | Netlink PROC_EVENT_COMM | Detect process rename (app identity confirmed) | Zero |
+            | pidfd + epoll | Instant game-exit notification | Zero |
+            | PROC_EVENT_EXIT | Belt-and-suspenders exit backup | Zero |
+
+            Built with NDK r27c · commit `${{ github.sha }}`
+          files: ${{ steps.assemble.outputs.zippath }}
+          draft: false
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

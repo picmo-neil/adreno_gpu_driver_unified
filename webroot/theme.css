@@ -1,0 +1,24 @@
+@import url('https://mui.kernelsu.org/internal/insets.css');
+@import url('https://mui.kernelsu.org/internal/colors.css');
+
+:root {
+    --inset-top: var(--window-inset-top, 0px);
+    --inset-bottom: var(--window-inset-bottom, 0px);
+
+    --color-primary: var(--primary, #D0BCFF);
+    --color-on-primary: var(--onPrimary, #381E72);
+    --color-primary-container: var(--primaryContainer, #4F378B);
+    --color-on-primary-container: var(--onPrimaryContainer, #EADDFF);
+    --color-secondary: var(--secondary, #CCC2DC);
+    --color-on-secondary: var(--onSecondary, #332D41);
+    --color-secondary-container: var(--secondaryContainer, #4A4458);
+    --color-on-secondary-container: var(--on-secondaryContainer, #E8DEF8);
+    --color-surface: var(--surface, #141218);
+    --color-on-surface: var(--onSurface, #E6E0E9);
+    --color-surface-variant: var(--surfaceVariant, #49454F);
+    --color-on-surface-variant: var(--onSurfaceVariant, #CAC4D0);
+    --color-outline: var(--outline, #938F99);
+    --color-error: var(--error, #F2B8B5);
+    --color-background: var(--background, #141218);
+    --color-on-background: var(--onBackground, #E6E0E9);
+}

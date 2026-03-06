@@ -1,0 +1,1067 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#09090b">
+    <meta name="description" content="Premium Adreno GPU Driver Manager with advanced configuration tools">
+    <title>Adreno Manager</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <script type="module" src="index.js"></script>
+</head>
+<body>
+
+
+
+
+
+<!-- Decorative background layer — purely visual, no interactivity -->
+<div class="bg-decor" aria-hidden="true">
+    <!-- Ambient blobs -->
+    <div class="bg-blob blob-1"></div>
+    <div class="bg-blob blob-2"></div>
+
+    <!--
+        GPU Die Floorplan — bottom-right, partially off-screen.
+        Modelled on a simplified mobile GPU layout:
+        compute cluster grid, memory interface blocks, display engine.
+        Purely decorative watermark.
+    -->
+    <div class="bg-die">
+        <svg viewBox="0 0 280 280" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <!-- Die outline -->
+            <rect x="1" y="1" width="278" height="278" rx="20" stroke="currentColor" stroke-width="1.2"/>
+
+            <!-- ── Shader Core Grid (6×6) ── -->
+            <!-- Row 0 -->
+            <rect x="12"  y="12"  width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.12"/>
+            <rect x="56"  y="12"  width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.06"/>
+            <rect x="100" y="12"  width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.10"/>
+            <rect x="144" y="12"  width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.06"/>
+            <rect x="188" y="12"  width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.14"/>
+            <rect x="232" y="12"  width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.06"/>
+            <!-- Row 1 -->
+            <rect x="12"  y="56"  width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.06"/>
+            <rect x="56"  y="56"  width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.16"/>
+            <rect x="100" y="56"  width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.06"/>
+            <rect x="144" y="56"  width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.10"/>
+            <rect x="188" y="56"  width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.06"/>
+            <rect x="232" y="56"  width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.12"/>
+            <!-- Row 2 -->
+            <rect x="12"  y="100" width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.10"/>
+            <rect x="56"  y="100" width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.06"/>
+            <rect x="100" y="100" width="82" height="82" rx="6" stroke="currentColor" stroke-width="1.0" fill="currentColor" fill-opacity="0.22"/>
+            <!-- center label lines inside big block -->
+            <line x1="110" y1="130" x2="172" y2="130" stroke="currentColor" stroke-width="0.5" opacity="0.5"/>
+            <line x1="110" y1="142" x2="160" y2="142" stroke="currentColor" stroke-width="0.5" opacity="0.5"/>
+            <line x1="110" y1="154" x2="165" y2="154" stroke="currentColor" stroke-width="0.5" opacity="0.5"/>
+            <rect x="188" y="100" width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.08"/>
+            <rect x="232" y="100" width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.14"/>
+            <!-- Row 3 (100–137 col skipped — part of big block) -->
+            <rect x="12"  y="144" width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.06"/>
+            <rect x="56"  y="144" width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.12"/>
+            <rect x="188" y="144" width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.06"/>
+            <rect x="232" y="144" width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.10"/>
+            <!-- Row 4 -->
+            <rect x="12"  y="188" width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.14"/>
+            <rect x="56"  y="188" width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.06"/>
+            <rect x="100" y="188" width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.10"/>
+            <rect x="144" y="188" width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.18"/>
+            <rect x="188" y="188" width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.06"/>
+            <rect x="232" y="188" width="38" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.12"/>
+            <!-- Row 5 — memory interface (tall narrow blocks) -->
+            <rect x="12"  y="232" width="80" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.08"/>
+            <rect x="100" y="232" width="80" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.06"/>
+            <rect x="188" y="232" width="80" height="38" rx="4" stroke="currentColor" stroke-width="0.7" fill="currentColor" fill-opacity="0.10"/>
+
+            <!-- Cluster separator lines -->
+            <line x1="94"  y1="8"   x2="94"  y2="272" stroke="currentColor" stroke-width="0.4" stroke-dasharray="3 5" opacity="0.35"/>
+            <line x1="182" y1="8"   x2="182" y2="272" stroke="currentColor" stroke-width="0.4" stroke-dasharray="3 5" opacity="0.35"/>
+            <line x1="8"   y1="94"  x2="272" y2="94"  stroke="currentColor" stroke-width="0.4" stroke-dasharray="3 5" opacity="0.35"/>
+            <line x1="8"   y1="182" x2="272" y2="182" stroke="currentColor" stroke-width="0.4" stroke-dasharray="3 5" opacity="0.35"/>
+        </svg>
+    </div>
+
+    <!-- Corner bracket accent — top left -->
+    <div class="bg-corner">
+        <svg viewBox="0 0 90 90" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M80 0 L16 0 Q0 0 0 16 L0 80" stroke="currentColor" stroke-width="1.2" fill="none"/>
+            <path d="M60 0 L16 0 Q0 0 0 16 L0 60" stroke="currentColor" stroke-width="0.7" fill="none" opacity="0.55"/>
+            <path d="M38 0 L16 0 Q0 0 0 16 L0 38" stroke="currentColor" stroke-width="0.5" fill="none" opacity="0.35"/>
+            <!-- corner dot -->
+            <circle cx="4" cy="4" r="2.5" fill="currentColor" opacity="0.50"/>
+        </svg>
+    </div>
+</div>
+
+<canvas id="particleCanvas" class="particle-bg"></canvas>
+<div class="aurora-layer" aria-hidden="true"></div>
+
+<header class="top-bar" role="banner">
+    <div class="header-glow-line"></div>
+    <div class="app-branding">
+        <div class="logo-container">
+            <svg class="snapdragon-logo" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Snapdragon">
+                <!-- Outer chip frame -->
+                <rect x="3" y="3" width="26" height="26" rx="6" stroke="currentColor" stroke-width="1.5" fill="none" opacity="0.35"/>
+                <!-- Chip pins left -->
+                <line x1="0" y1="10" x2="3" y2="10" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                <line x1="0" y1="16" x2="3" y2="16" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                <line x1="0" y1="22" x2="3" y2="22" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                <!-- Chip pins right -->
+                <line x1="29" y1="10" x2="32" y2="10" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                <line x1="29" y1="16" x2="32" y2="16" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                <line x1="29" y1="22" x2="32" y2="22" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                <!-- Chip pins top -->
+                <line x1="10" y1="0" x2="10" y2="3" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                <line x1="22" y1="0" x2="22" y2="3" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                <!-- Chip pins bottom -->
+                <line x1="10" y1="29" x2="10" y2="32" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                <line x1="22" y1="29" x2="22" y2="32" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                <!-- Inner flame / dragon path — Snapdragon-inspired -->
+                <path d="M16 7 C13 9 10 11 10.5 14.5 C11 17.5 13 18 12 21 C13.5 20 14.5 18.5 14 16.5 C16 18 17 20 16.5 23 C18.5 21.5 19.5 18.5 18 15.5 C20 17 21.5 16 21.5 13.5 C21.5 11 19.5 9.5 19 8 C18.5 10 17.5 11.5 16 12.5 C15 10.5 16 8.5 16 7Z" fill="currentColor" opacity="0.95"/>
+                <!-- Glow dot at center -->
+                <circle cx="16" cy="16" r="1.8" fill="currentColor" opacity="0.6"/>
+            </svg>
+            <div class="logo-pulse"></div>
+        </div>
+        <div class="text-col">
+            <h1 class="title-text" data-i18n="title">Adreno</h1>
+            <span class="subtitle-text" data-i18n="subtitle">Manager</span>
+        </div>
+    </div>
+    <div class="actions">
+        <div class="status-indicator" id="statusIndicator">
+            <div class="status-dot"></div>
+            <span class="status-text" data-i18n="statusReady">Ready</span>
+        </div>
+        <div id="loadingSpinner" class="spinner-mini">
+            <div class="spinner-ring"></div>
+        </div>
+        <button class="icon-btn ripple-effect" id="btnThemePicker" aria-label="Theme" title="Change Theme">
+            <span class="icon">🎨</span>
+        </button>
+        <button class="icon-btn ripple-effect" id="btnTopGuide" aria-label="Guide" title="Documentation">
+            <span class="icon">📖</span>
+        </button>
+    </div>
+</header>
+
+<main class="main-content" id="mainScroll" role="main">
+    <div id="errorBanner" class="banner error-banner" role="alert" aria-live="assertive">
+        <span class="banner-icon">⚠️</span>
+        <span class="banner-text"></span>
+        <button class="banner-close" aria-label="Close">&times;</button>
+    </div>
+
+    <div id="successBanner" class="banner success-banner" role="status" aria-live="polite">
+        <span class="banner-icon">✓</span>
+        <span class="banner-text"></span>
+        <button class="banner-close" aria-label="Close">&times;</button>
+    </div>
+
+    <section id="tab-home" class="view-section active" role="tabpanel" aria-labelledby="nav-home">
+        <div class="card glass-panel welcome-card animate-in">
+            <div class="welcome-content">
+                <div class="welcome-emoji">👋</div>
+                <h2 class="welcome-title" data-i18n="welcomeTitle">Welcome Back</h2>
+                <p class="welcome-subtitle" data-i18n="welcomeSubtitle">Manage your GPU driver settings with precision</p>
+            </div>
+        </div>
+
+        <div class="card glass-panel animate-in" style="animation-delay: 0.1s;">
+            <div class="card-header">
+                <span class="header-icon gradient-text animate-bounce">📱</span>
+                <div>
+                    <h2 data-i18n="sysInfo">System Overview</h2>
+                    <span class="header-subtitle" data-i18n="sysInfoSub">Device information and status</span>
+                </div>
+            </div>
+            <div class="info-grid">
+                <div class="info-item slide-in">
+                    <label data-i18n="device">Device</label>
+                    <span class="value skeleton-text" id="device"></span>
+                </div>
+                <div class="info-item slide-in" style="animation-delay: 0.05s;">
+                    <label data-i18n="android">Android</label>
+                    <span class="value skeleton-text" id="android"></span>
+                </div>
+                <div class="info-item highlight slide-in" style="animation-delay: 0.1s;">
+                    <label data-i18n="gpu">GPU Model</label>
+                    <span class="value skeleton-text" id="gpu"></span>
+                </div>
+                <div class="info-item slide-in" style="animation-delay: 0.15s;">
+                    <label data-i18n="modVer">Module</label>
+                    <span class="value skeleton-text" id="modVer"></span>
+                </div>
+            </div>
+            <div class="performance-bar">
+                <div class="performance-fill" id="performanceFill"></div>
+            </div>
+        </div>
+
+        <div class="card glass-panel animate-in" style="animation-delay: 0.15s;">
+            <div class="card-header">
+                <span class="header-icon gradient-text">⚙️</span>
+                <div>
+                    <h2 data-i18n="hardwareTitle">Hardware Details</h2>
+                    <span class="header-subtitle" data-i18n="hardwareSub">Processor and GPU information</span>
+                </div>
+            </div>
+            
+            <div class="hardware-section">
+                <h3 class="section-subtitle" data-i18n="processorLabel">Processor</h3>
+                <div class="info-grid">
+                    <div class="info-item highlight">
+                        <label data-i18n="socLabel">SoC</label>
+                        <span class="value skeleton-text" id="soc">Loading...</span>
+                    </div>
+                    <div class="info-item">
+                        <label data-i18n="cpuLabel">CPU</label>
+                        <span class="value skeleton-text" id="cpu">Loading...</span>
+                    </div>
+                    <div class="info-item highlight">
+                        <label data-i18n="socCodenameLabel">SoC Codename</label>
+                        <span class="value skeleton-text" id="socCodename">Loading...</span>
+                    </div>
+                    <div class="info-item">
+                        <label data-i18n="architectureLabel">Architecture</label>
+                        <span class="value skeleton-text" id="architecture">Loading...</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="divider elegant-divider"></div>
+            
+            <div class="hardware-section">
+                <h3 class="section-subtitle" data-i18n="gpuSectionLabel">GPU</h3>
+                <div class="info-grid">
+                    <div class="info-item highlight">
+                        <label data-i18n="gpuModelLabel">GPU Model</label>
+                        <span class="value skeleton-text" id="gpuModel">Loading...</span>
+                    </div>
+                    <div class="info-item">
+                        <label data-i18n="gpuVendorLabel">Vendor</label>
+                        <span class="value skeleton-text" id="gpuVendor">Loading...</span>
+                    </div>
+                    <div class="info-item">
+                        <label data-i18n="rendererLabel">Renderer</label>
+                        <span class="value skeleton-text" id="renderer">Loading...</span>
+                    </div>
+                    <div class="info-item highlight">
+                        <label data-i18n="driverVersionLabel">Driver Version</label>
+                        <span class="value skeleton-text" id="driverVersion">Loading...</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="divider elegant-divider"></div>
+
+            <div class="hardware-section">
+                <h3 class="section-subtitle" data-i18n="renderStatusLabel">Live Render Status</h3>
+                <div class="info-grid">
+                    <div class="info-item highlight">
+                        <label data-i18n="hwuiRendererLabel">HWUI Renderer</label>
+                        <span class="value skeleton-text" id="hwuiRendererStatus">Loading...</span>
+                    </div>
+                    <div class="info-item">
+                        <label data-i18n="renderEngineLabel">Render Engine</label>
+                        <span class="value skeleton-text" id="renderEngineStatus">Loading...</span>
+                    </div>
+                    <div class="info-item">
+                        <label data-i18n="useVulkanLabel">Vulkan Prop</label>
+                        <span class="value skeleton-text" id="useVulkanStatus">Loading...</span>
+                    </div>
+                </div>
+                <p class="render-status-hint" data-i18n="renderStatusHint">Props applied at boot via resetprop — not system.prop</p>
+            </div>
+        </div>
+
+        <div class="card glass-panel animate-in" style="animation-delay: 0.2s;">
+            <div class="row-center">
+                <div class="text-col">
+                    <h3 data-i18n="langName">Language</h3>
+                    <p class="desc-text" data-i18n="langDesc">Choose interface language</p>
+                </div>
+                <div class="select-wrapper elegant">
+                    <select id="LANG_SELECT" aria-label="Language Selection">
+                        <option value="en">🇺🇸 English</option>
+                        <option value="zh-CN">🇨🇳 简体中文</option>
+                        <option value="zh-TW">🇹🇼 繁體中文</option>
+                        <option value="custom" id="optCustom" disabled>🎨 Custom</option>
+                        <option value="system" data-i18n="langSystem">🌐 System</option>
+                    </select>
+                    <span class="arrow">▼</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="tab-config" class="view-section" role="tabpanel" aria-labelledby="nav-config">
+        <h2 class="section-label" data-i18n="config">Driver Settings</h2>
+
+        <div class="card glass-panel animate-in">
+            <div class="setting-item ripple-target hover-lift">
+                <div class="text-col">
+                    <div class="setting-header">
+                        <div class="setting-title" data-i18n="pltName">PLT Patching</div>
+                        <div class="info-tooltip" data-tooltip="Enables procedure linkage table patching for enhanced compatibility">
+                            <span class="tooltip-icon">ℹ️</span>
+                        </div>
+                    </div>
+                    <div class="setting-desc" data-i18n="pltDesc">Zuras Banch++ to work if available in driver</div>
+                    <div class="badge badge-primary" data-i18n="pltSub">Required for Zuras Banch++</div>
+                </div>
+                <label class="switch modern-switch" aria-label="PLT Patching Toggle">
+                    <input type="checkbox" id="PLT" role="switch">
+                    <span class="slider modern-slider">
+                        <span class="slider-text off">OFF</span>
+                        <span class="slider-text on">ON</span>
+                    </span>
+                </label>
+            </div>
+            
+            <div class="divider elegant-divider"></div>
+
+            <div class="setting-item ripple-target hover-lift">
+                <div class="text-col">
+                    <div class="setting-header">
+                        <div class="setting-title" data-i18n="qglName">QGL Config</div>
+                        <div class="info-tooltip" data-tooltip="Qualcomm Graphics Library configuration for A8xx chipsets">
+                            <span class="tooltip-icon">ℹ️</span>
+                        </div>
+                    </div>
+                    <div class="setting-desc" data-i18n="qglDesc">Configure Qualcomm Graphics Library for A8xx GPUs</div>
+                    <div class="badge badge-warning pulse-subtle" data-i18n="qglSub">A8xx Only</div>
+                </div>
+                <div class="row-end">
+                    <button class="btn-small ripple-effect modern-btn" id="btnEditQGL" aria-label="Edit QGL" style="margin-right: 8px;">
+                        <span class="btn-icon">✏️</span>
+                        <span data-i18n="edit">Edit</span>
+                    </button>
+                    <label class="switch modern-switch" aria-label="QGL Toggle">
+                        <input type="checkbox" id="QGL" role="switch">
+                        <span class="slider modern-slider">
+                            <span class="slider-text off">OFF</span>
+                            <span class="slider-text on">ON</span>
+                        </span>
+                    </label>
+                </div>
+            </div>
+            
+            <div class="divider elegant-divider"></div>
+
+            <div class="setting-item ripple-target hover-lift">
+                <div class="text-col">
+                    <div class="setting-header">
+                        <div class="setting-title" data-i18n="armName">ARM64 Optimization</div>
+                        <div class="info-tooltip" data-tooltip="Remove 32-bit libraries to save space on 64-bit devices">
+                            <span class="tooltip-icon">ℹ️</span>
+                        </div>
+                    </div>
+                    <div class="setting-desc" data-i18n="armDesc">Remove 32-bit libraries to reduce storage usage</div>
+                </div>
+                <label class="switch modern-switch" aria-label="ARM64 Optimization Toggle">
+                    <input type="checkbox" id="ARM64_OPT" role="switch">
+                    <span class="slider modern-slider">
+                        <span class="slider-text off">OFF</span>
+                        <span class="slider-text on">ON</span>
+                    </span>
+                </label>
+            </div>
+            
+            <div class="divider elegant-divider"></div>
+
+            <div class="setting-item ripple-target hover-lift">
+                <div class="text-col">
+                    <div class="setting-header">
+                        <div class="setting-title" data-i18n="verboseName">Verbose Logging</div>
+                        <div class="info-tooltip" data-tooltip="Enable detailed boot logs for debugging">
+                            <span class="tooltip-icon">ℹ️</span>
+                        </div>
+                    </div>
+                    <div class="setting-desc" data-i18n="verboseDesc">Enable detailed logs for troubleshooting</div>
+                </div>
+                <label class="switch modern-switch" aria-label="Verbose Logging Toggle">
+                    <input type="checkbox" id="VERBOSE" role="switch">
+                    <span class="slider modern-slider">
+                        <span class="slider-text off">OFF</span>
+                        <span class="slider-text on">ON</span>
+                    </span>
+                </label>
+            </div>
+            
+            <div class="divider elegant-divider"></div>
+
+            <div class="setting-item ripple-target hover-lift">
+                <div class="text-col">
+                    <div class="setting-header">
+                        <div class="setting-title" data-i18n="daemonName">Game Exclusion Daemon</div>
+                        <div class="info-tooltip" data-tooltip="Auto-switches HWUI to skiagl when a native-Vulkan game is detected. Prevents dual-VkDevice crashes in skiavk mode.">
+                            <span class="tooltip-icon">ℹ️</span>
+                        </div>
+                    </div>
+                    <div class="setting-desc" data-i18n="daemonDesc">Auto-switches HWUI to skiagl when a native-Vulkan game is detected</div>
+                    <div class="badge badge-primary" data-i18n="daemonSub">Required for PUBG / Genshin in skiavk</div>
+                </div>
+                <label class="switch modern-switch" aria-label="Game Exclusion Daemon Toggle">
+                    <input type="checkbox" id="GAME_EXCLUSION_DAEMON" role="switch">
+                    <span class="slider modern-slider">
+                        <span class="slider-text off">OFF</span>
+                        <span class="slider-text on">ON</span>
+                    </span>
+                </label>
+            </div>
+            
+            <div class="divider elegant-divider"></div>
+
+            <div class="setting-item ripple-target hover-lift">
+                <div class="text-col">
+                    <div class="setting-header">
+                        <div class="setting-title" data-i18n="renderName">Rendering Mode</div>
+                        <div class="info-tooltip" data-tooltip="Select graphics rendering backend">
+                            <span class="tooltip-icon">ℹ️</span>
+                        </div>
+                    </div>
+                    <div class="setting-desc mode-desc-text" data-i18n="renderDesc">Default rendering backend with balanced performance</div>
+                </div>
+                <div class="select-wrapper modern">
+                    <select id="RENDER_MODE" aria-label="Rendering Mode">
+                        <option value="normal" data-i18n="renderNormal">Normal</option>
+                        <option value="skiavk">SkiaVK</option>
+                        <option value="skiagl">SkiaGL</option>
+                        <option value="skiavk_all">SkiaVK All</option>
+                    </select>
+                    <span class="arrow">▼</span>
+                </div>
+            </div>
+
+            <div class="divider elegant-divider"></div>
+
+            <div class="apply-now-row">
+                <div class="text-col">
+                    <div class="setting-title" data-i18n="applyNowTitle">Apply Render Mode Now</div>
+                    <div class="setting-desc" data-i18n="applyNowDesc">Apply via resetprop instantly — no reboot needed. Kill &amp; reopen apps to see effect.</div>
+                </div>
+                <button class="btn-apply-now ripple-effect" id="btnApplyRenderNow" aria-label="Apply render mode now without rebooting">
+                    <span class="btn-icon">⚡</span>
+                    <span data-i18n="applyNow">Apply Now</span>
+                </button>
+            </div>
+        </div>
+
+        <div class="card glass-panel animate-in" style="animation-delay: 0.05s;">
+            <div class="info-banner modern-info">
+                <span class="info-icon">ℹ️</span>
+                <p class="info-text" data-i18n="saveRebootInfo">Changes will be applied after saving and rebooting your device. Make sure to backup your current configuration before making changes.</p>
+            </div>
+        </div>
+
+        <!-- ── GAME EXCLUSION LIST ── -->
+        <div class="card glass-panel animate-in" style="animation-delay: 0.08s;">
+            <div class="card-header">
+                <span class="header-icon gradient-text">🎮</span>
+                <div>
+                    <h2 data-i18n="gameExclTitle">Game Exclusion List</h2>
+                    <span class="header-subtitle" data-i18n="gameExclSub">Packages excluded from force-stop during skiavk activation</span>
+                </div>
+            </div>
+
+            <div class="info-banner modern-info" style="margin-bottom:14px;">
+                <span class="info-icon">🔗</span>
+                <p class="info-text" data-i18n="gameExclDesc">Native-Vulkan games listed here are skipped during the boot-time force-stop sequence. The game-compat daemon automatically switches HWUI to skiagl when any listed game is detected running, preventing dual-VkDevice conflicts on custom Adreno drivers.</p>
+            </div>
+
+            <div class="badge badge-primary" style="margin-bottom:14px;" data-i18n="gameExclBadge">Shared · post-fs-data &amp; service</div>
+
+            <!-- Why accordion -->
+            <button class="game-excl-why-btn ripple-effect" id="btnGameExclWhy" aria-expanded="false">
+                <span class="game-excl-why-icon">❓</span>
+                <span data-i18n="gameExclWhyTitle">Why are games excluded?</span>
+                <span class="game-excl-chevron">▾</span>
+            </button>
+            <div id="gameExclWhyBody" class="game-excl-why-body" style="display:none;" data-i18n="gameExclWhyBody">
+                UE4/custom-Vulkan games create their own VkDevice concurrently with HWUI. Custom Adreno drivers cannot handle dual concurrent vkCreateDevice in the same process → SIGSEGV. The game-compat daemon switches HWUI to skiagl within ~1s of detecting a listed game, so HWUI uses GL while the game uses Vulkan — no conflict.
+            </div>
+
+            <!-- Add package row -->
+            <div class="game-excl-add-row">
+                <input type="text"
+                       id="gameExclInput"
+                       class="input-glass premium-input"
+                       data-i18n-placeholder="gameExclPlaceholder"
+                       placeholder="e.g. com.example.game or com.example.*"
+                       autocomplete="off" autocorrect="off" autocapitalize="off"
+                       spellcheck="false"
+                       aria-label="Package name to add">
+                <button class="btn-primary ripple-effect game-excl-add-btn" id="btnGameExclAdd" aria-label="Add package">
+                    <span data-i18n="gameExclAddBtn">Add</span>
+                </button>
+            </div>
+            <p class="game-excl-hint" data-i18n="gameExclWildcard">Wildcards supported (e.g. com.epicgames.*)</p>
+
+            <!-- Package count -->
+            <div class="game-excl-count-row">
+                <span id="gameExclCount" class="game-excl-count">0 packages</span>
+            </div>
+
+            <!-- List -->
+            <div id="gameExclList" class="game-excl-list"></div>
+
+            <!-- Actions -->
+            <div class="button-group" style="margin-top:16px;">
+                <button class="btn-primary full-width ripple-effect modern-btn-large" id="btnGameExclSave">
+                    <span class="btn-icon">💾</span>
+                    <span data-i18n="gameExclSave">Save List</span>
+                </button>
+                <button class="btn-secondary full-width ripple-effect modern-btn-large" id="btnGameExclReset">
+                    <span class="btn-icon">♻️</span>
+                    <span data-i18n="gameExclReset">Reset to Defaults</span>
+                </button>
+            </div>
+        </div>
+
+        <div class="card glass-panel animate-in" style="animation-delay: 0.1s;">
+            <div class="button-group">
+                <button class="btn-primary full-width ripple-effect modern-btn-large" id="btnSave">
+                    <span class="btn-icon">💾</span>
+                    <span data-i18n="save">Save & Reboot</span>
+                </button>
+                <button class="btn-secondary full-width ripple-effect modern-btn-large" id="btnResetConfig">
+                    <span class="btn-icon">♻️</span>
+                    <span data-i18n="resetDefaults">Reset to Defaults</span>
+                </button>
+            </div>
+        </div>
+    </section>
+
+    <section id="tab-utils" class="view-section" role="tabpanel" aria-labelledby="nav-utils">
+        <h2 class="section-label" data-i18n="utilsTitle">Tools & Utilities</h2>
+
+        <div class="card glass-panel animate-in">
+            <div class="card-header">
+                <span class="header-icon gradient-text pulse-glow">🎭</span>
+                <div>
+                    <h2 data-i18n="gpuSpoofLabel">GPU Spoofer</h2>
+                    <span class="header-subtitle" data-i18n="gpuSpoofDesc">Modify GPU identification</span>
+                </div>
+            </div>
+            <div class="wizard-container">
+                <div class="wizard-step fade-in">
+                    <label data-i18n="spoofOriginalId">Original ID</label>
+                    <div class="select-wrapper elegant">
+                        <select id="spoofSourceSelect" aria-label="Source GPU ID">
+                            <option value="" disabled selected data-i18n="spoofSelectSource">Select Source</option>
+                        </select>
+                        <span class="arrow">▼</span>
+                    </div>
+                </div>
+                <div class="wizard-arrow pulse-arrow">
+                    <span class="arrow-line"></span>
+                    <span class="arrow-head">➔</span>
+                </div>
+                <div class="wizard-step fade-in" style="animation-delay: 0.1s;">
+                    <label data-i18n="spoofTargetId">Target ID</label>
+                    <input type="number" id="spoofTargetInput" placeholder="730" class="input-glass premium-input" aria-label="Target GPU ID" maxlength="3">
+                </div>
+            </div>
+            <button class="btn-glass ripple-effect shimmer-btn" id="btnApplySpoof" aria-label="Apply GPU Spoof" style="margin-top: 20px;">
+                <span class="btn-content" data-i18n="applyPatch">Apply Patch</span>
+                <div class="shimmer"></div>
+            </button>
+            <button class="btn-secondary full-width ripple-effect modern-btn-large" id="btnRestoreOriginal" aria-label="Restore original libgsl.so from backup" style="margin-top: 8px;">
+                <span class="btn-icon">🔄</span>
+                <span data-i18n="restoreOriginal">Restore Original</span>
+            </button>
+        </div>
+
+        <div class="card glass-panel animate-in" style="animation-delay: 0.22s;">
+            <div class="card-header">
+                <span class="header-icon gradient-text pulse-glow">🛠️</span>
+                <div>
+                    <h2 data-i18n="customDriverLabel">Custom Driver Changes</h2>
+                    <span class="header-subtitle" data-i18n="customDriverDesc">Spoof or make VKOnly for any driver</span>
+                </div>
+            </div>
+            <p class="desc-text" style="margin-bottom: 14px;" data-i18n="customDriverInfo">Apply custom GPU spoofs or create Vulkan-only driver builds from any driver files.</p>
+            <button class="btn-glass ripple-effect shimmer-btn full-width" id="btnCustomDriverChanges" aria-label="Custom Driver Changes">
+                <span class="btn-content" data-i18n="customDriverOpen">Open Custom Driver Tools</span>
+                <div class="shimmer"></div>
+            </button>
+        </div>
+
+        <h3 class="subsection-label" data-i18n="fixesLabel">Quick Fixes</h3>
+        <div class="grid-3 animate-in">
+            <button class="tile-btn ripple-effect modern-tile" id="btnFixCamera" aria-label="Fix Camera">
+                <span class="tile-icon bounce-in">📷</span>
+                <span class="tile-text" data-i18n="fixCam">Camera</span>
+                <div class="tile-badge">Fix</div>
+            </button>
+            <button class="tile-btn ripple-effect modern-tile" id="btnFixRecorder" aria-label="Fix Screen Recorder" style="animation-delay: 0.05s;">
+                <span class="tile-icon bounce-in">🎥</span>
+                <span class="tile-text" data-i18n="fixRec">Screen Recorder</span>
+                <div class="tile-badge">Fix</div>
+            </button>
+            <button class="tile-btn ripple-effect modern-tile" id="btnFixNight" aria-label="Fix Night Mode" style="animation-delay: 0.1s;">
+                <span class="tile-icon bounce-in">🌙</span>
+                <span class="tile-text" data-i18n="fixNight">Night Mode</span>
+                <div class="tile-badge">Fix</div>
+            </button>
+        </div>
+
+        <h3 class="subsection-label" data-i18n="maintenanceTitle">System Maintenance</h3>
+        <div class="card glass-panel animate-in">
+            <div class="maintenance-grid">
+                <button class="maintenance-btn ripple-effect" id="btnClearGPUCache" aria-label="Clear GPU caches">
+                    <span class="maintenance-icon">🗑️</span>
+                    <div class="maintenance-content">
+                        <h4 data-i18n="clearGPUCacheTitle">Clear GPU Caches</h4>
+                        <p data-i18n="clearGPUCacheDesc">Remove shader and graphics caches</p>
+                    </div>
+                </button>
+
+                <button class="maintenance-btn ripple-effect" id="btnTrimStorage" aria-label="Trim storage">
+                    <span class="maintenance-icon">⚡</span>
+                    <div class="maintenance-content">
+                        <h4 data-i18n="trimStorageTitle">Trim Storage</h4>
+                        <p data-i18n="trimStorageDesc">Optimize filesystem performance</p>
+                    </div>
+                </button>
+
+                <button class="maintenance-btn ripple-effect" id="btnClearCustomLang" aria-label="Clear custom language">
+                    <span class="maintenance-icon">🌐</span>
+                    <div class="maintenance-content">
+                        <h4 data-i18n="clearCustomLangTitle">Clear Custom Language</h4>
+                        <p data-i18n="clearCustomLangDesc">Remove custom.js and README.md</p>
+                    </div>
+                </button>
+            </div>
+        </div>
+    </section>
+
+    <section id="tab-data" class="view-section" role="tabpanel" aria-labelledby="nav-data">
+        <h2 class="section-label" data-i18n="dataSection">Data & Logs</h2>
+
+        <div class="card glass-panel animate-in">
+            <div class="card-header">
+                <span class="header-icon gradient-text">📊</span>
+                <div>
+                    <h2 data-i18n="statsTitle">Statistics</h2>
+                    <span class="header-subtitle" data-i18n="statsSub">Usage metrics</span>
+                </div>
+            </div>
+            <div class="stats-grid-modern">
+                <div class="stat-card-modern">
+                    <div class="stat-icon-wrapper">
+                        <span class="stat-icon-modern">⚙️</span>
+                    </div>
+                    <div class="stat-details">
+                        <div class="stat-value-modern" id="configChanges">0</div>
+                        <div class="stat-name-modern" data-i18n="statConfigs">Configs</div>
+                    </div>
+                </div>
+                <div class="stat-card-modern">
+                    <div class="stat-icon-wrapper">
+                        <span class="stat-icon-modern">🔧</span>
+                    </div>
+                    <div class="stat-details">
+                        <div class="stat-value-modern" id="fixesApplied">0</div>
+                        <div class="stat-name-modern" data-i18n="statFixes">Fixes</div>
+                    </div>
+                </div>
+                <div class="stat-card-modern">
+                    <div class="stat-icon-wrapper">
+                        <span class="stat-icon-modern">🎭</span>
+                    </div>
+                    <div class="stat-details">
+                        <div class="stat-value-modern" id="spoofCount">0</div>
+                        <div class="stat-name-modern" data-i18n="statSpoofs">Spoofs</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card glass-panel animate-in" style="animation-delay: 0.1s;">
+            <div class="card-header row-between">
+                <div class="row-start">
+                    <span class="header-icon gradient-text">📋</span>
+                    <div>
+                        <h2 data-i18n="logs">System Logs</h2>
+                        <span class="header-subtitle" data-i18n="logsSub">Real-time activity monitor</span>
+                    </div>
+                </div>
+                <div class="row-end">
+                    <button class="btn-text ripple-effect" id="btnCopyLogs" aria-label="Copy Logs">
+                        <span class="btn-icon">📋</span>
+                        <span data-i18n="copy">Copy</span>
+                    </button>
+                    <button class="btn-text danger ripple-effect" id="btnClearLogs" aria-label="Clear Logs">
+                        <span class="btn-icon">🗑️</span>
+                        <span data-i18n="clearLogs">Clear</span>
+                    </button>
+                </div>
+            </div>
+            <div id="logArea" class="terminal modern-terminal">
+                <div class="log-line log-info">
+                    <span class="log-timestamp">[00:00:00]</span>
+                    <span class="log-message">🚀 Initializing Adreno Manager...</span>
+                </div>
+            </div>
+            <div class="terminal-footer">
+                <span class="terminal-status">
+                    <span class="status-dot active"></span>
+                    <span data-i18n="connected">Connected</span>
+                </span>
+                <span class="log-count"><span data-i18n="logsLines">Lines:</span> <span id="logCount">1</span></span>
+                <button class="btn-text ripple-effect" id="btnExportLogs" style="font-size: 11px; padding: 2px 8px;">
+                    <span data-i18n="exportLogs">Export</span>
+                </button>
+            </div>
+        </div>
+
+
+        <div class="card glass-panel animate-in" style="animation-delay: 0.2s;">
+            <div class="card-header">
+                <span class="header-icon gradient-text">💾</span>
+                <div>
+                    <h2 data-i18n="autoBackupTitle">Auto-Backup Info</h2>
+                    <span class="header-subtitle" data-i18n="autoBackupSub">Configuration persistence</span>
+                </div>
+            </div>
+            
+            <div class="auto-backup-section">
+                <div class="backup-icon-large">🔄</div>
+                <h3 data-i18n="autoBackupInfoTitle">Automatic Configuration Backup</h3>
+                
+                <div class="info-box success-box">
+                    <div class="info-icon">📂</div>
+                    <div class="info-content">
+                        <p class="info-title" data-i18n="autoBackupPath1">All your settings are automatically saved to:</p>
+                        <p class="info-path" data-i18n="autoBackupPath2">/sdcard/Adreno_Driver/</p>
+                    </div>
+                </div>
+                
+                <div class="info-box info-box-primary">
+                    <div class="info-icon">✅</div>
+                    <div class="info-content">
+                        <p class="info-title" data-i18n="autoBackupNote">This folder is directly connected to the module and persists across:</p>
+                        <ul class="check-list">
+                            <li>✓ <span data-i18n="autoBackupBullet1">Module updates</span></li>
+                            <li>✓ <span data-i18n="autoBackupBullet2">Module reinstalls</span></li>
+                            <li>✓ <span data-i18n="autoBackupBullet3">System reboots</span></li>
+                        </ul>
+                    </div>
+                </div>
+                
+                <div class="divider elegant-divider"></div>
+                
+                <div class="manual-config-section">
+                    <h4 data-i18n="autoBackupManualTitle">Manual Configuration Management</h4>
+                    <p class="desc-text" data-i18n="autoBackupManualDesc">If you want to reset or modify your configuration before reinstalling:</p>
+                    
+                    <div class="step-list">
+                        <div class="step-item">
+                            <div class="step-number">1</div>
+                            <p data-i18n="autoBackupStep1">Navigate to /sdcard/Adreno_Driver/Config/</p>
+                        </div>
+                        <div class="step-item">
+                            <div class="step-number">2</div>
+                            <p data-i18n="autoBackupStep2">Delete or modify adreno_config.txt</p>
+                        </div>
+                        <div class="step-item">
+                            <div class="step-number">3</div>
+                            <p data-i18n="autoBackupStep3">Reinstall module for fresh configuration</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card glass-panel animate-in" style="animation-delay: 0.3s;">
+            <div class="about-header">
+                <div class="about-logo">
+                    <svg class="snapdragon-logo about-snapdragon" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <rect x="3" y="3" width="26" height="26" rx="6" stroke="currentColor" stroke-width="1.5" fill="none" opacity="0.35"/>
+                        <line x1="0" y1="10" x2="3" y2="10" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                        <line x1="0" y1="16" x2="3" y2="16" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                        <line x1="0" y1="22" x2="3" y2="22" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                        <line x1="29" y1="10" x2="32" y2="10" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                        <line x1="29" y1="16" x2="32" y2="16" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                        <line x1="29" y1="22" x2="32" y2="22" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                        <line x1="10" y1="0" x2="10" y2="3" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                        <line x1="22" y1="0" x2="22" y2="3" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                        <line x1="10" y1="29" x2="10" y2="32" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                        <line x1="22" y1="29" x2="22" y2="32" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
+                        <path d="M16 7 C13 9 10 11 10.5 14.5 C11 17.5 13 18 12 21 C13.5 20 14.5 18.5 14 16.5 C16 18 17 20 16.5 23 C18.5 21.5 19.5 18.5 18 15.5 C20 17 21.5 16 21.5 13.5 C21.5 11 19.5 9.5 19 8 C18.5 10 17.5 11.5 16 12.5 C15 10.5 16 8.5 16 7Z" fill="currentColor" opacity="0.95"/>
+                        <circle cx="16" cy="16" r="1.8" fill="currentColor" opacity="0.6"/>
+                    </svg>
+                </div>
+                <h2 data-i18n="aboutAppName">Adreno Manager</h2>
+            </div>
+
+            <div class="about-section">
+                <h3 data-i18n="aboutFeatures">Features</h3>
+                <ul class="feature-list">
+                    <li><span data-i18n="feature1">PLT Patching for Banch++</span></li>
+                    <li><span data-i18n="feature2">QGL Configuration (A8xx)</span></li>
+                    <li><span data-i18n="feature3">ARM64 Optimization</span></li>
+                    <li><span data-i18n="feature4">Rendering Options (Vulkan/OpenGL)</span></li>
+                    <li><span data-i18n="feature5">GPU Cache Management</span></li>
+                    <li><span data-i18n="feature6">Storage Optimization</span></li>
+                    <li><span data-i18n="feature7">Backup & Restore (ZIP)</span></li>
+                    <li><span data-i18n="feature8">Hardware Detection</span></li>
+                </ul>
+            </div>
+
+            <div class="about-footer">
+                <p class="desc-text" data-i18n="aboutCredit">Created with ❤️ for the Adreno community</p>
+            </div>
+        </div>
+    </section>
+</main>
+
+<nav class="bottom-nav modern-nav" role="navigation" aria-label="Main Navigation">
+    <button class="nav-item active ripple-effect" data-target="tab-home" id="nav-home" role="tab" aria-selected="true" aria-controls="tab-home">
+        <div class="nav-pill">
+            <span class="nav-icon">🏠</span>
+        </div>
+        <span class="nav-label" data-i18n="tabHome">Home</span>
+        <div class="nav-indicator"></div>
+    </button>
+    <button class="nav-item ripple-effect" data-target="tab-config" id="nav-config" role="tab" aria-selected="false" aria-controls="tab-config">
+        <div class="nav-pill">
+            <span class="nav-icon">⚙️</span>
+        </div>
+        <span class="nav-label" data-i18n="tabConfig">Config</span>
+        <div class="nav-indicator"></div>
+    </button>
+    <button class="nav-item ripple-effect" data-target="tab-utils" id="nav-utils" role="tab" aria-selected="false" aria-controls="tab-utils">
+        <div class="nav-pill">
+            <span class="nav-icon">🔨</span>
+        </div>
+        <span class="nav-label" data-i18n="tabUtils">Utils</span>
+        <div class="nav-indicator"></div>
+    </button>
+    <button class="nav-item ripple-effect" data-target="tab-data" id="nav-data" role="tab" aria-selected="false" aria-controls="tab-data">
+        <div class="nav-pill">
+            <span class="nav-icon">📂</span>
+        </div>
+        <span class="nav-label" data-i18n="tabData">Data</span>
+        <div class="nav-indicator"></div>
+    </button>
+</nav>
+
+<div id="qglModal" class="modal" role="dialog" aria-labelledby="qglModalTitle" aria-modal="true">
+    <div class="modal-overlay" id="qglOverlay"></div>
+    <div class="modal-container full-height modal-animate">
+        <div class="modal-header">
+            <div>
+                <h2 id="qglModalTitle" data-i18n="qglModalTitle">QGL Editor</h2>
+                <p class="modal-subtitle" data-i18n="qglModalSub">Qualcomm Graphics Library Configuration</p>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-text ripple-effect" id="btnSaveQGL" aria-label="Save QGL Config">
+                    <span class="btn-icon">💾</span>
+                    <span data-i18n="qglSave">Save</span>
+                </button>
+                <button class="icon-btn close-btn ripple-effect" id="closeQGL" aria-label="Close">✕</button>
+            </div>
+        </div>
+        <div class="editor-container">
+            <div class="editor-toolbar">
+                <button class="editor-btn ripple-effect" id="btnFormatQGL" title="Format Code">
+                    <span>📐</span> <span data-i18n="qglFormat">Format</span>
+                </button>
+                <button class="editor-btn ripple-effect" id="btnResetQGL" title="Reset to Default">
+                    <span>♻️</span> <span data-i18n="qglReset">Reset</span>
+                </button>
+                <div class="editor-info">
+                    <span class="line-count"><span data-i18n="qglLines">Lines:</span> <span id="qglLineCount">0</span></span>
+                </div>
+            </div>
+            <textarea id="qglEditor" 
+                      spellcheck="false" 
+                      placeholder="Loading configuration..." 
+                      aria-label="QGL Configuration Editor"
+                      autocomplete="off"
+                      autocorrect="off"
+                      autocapitalize="off"></textarea>
+        </div>
+    </div>
+</div>
+
+<div id="docModal" class="modal" role="dialog" aria-labelledby="docModalTitle" aria-modal="true">
+    <div class="modal-overlay" id="docOverlay"></div>
+    <div class="modal-container modal-animate">
+        <div class="modal-header">
+            <div>
+                <h2 id="docModalTitle" data-i18n="docTitle">Documentation</h2>
+                <p class="modal-subtitle" data-i18n="docModalSub">User guide and manual</p>
+            </div>
+            <div class="modal-actions">
+                <button id="btnTransDocs" class="btn-small ripple-effect modern-btn" aria-label="Translate Documentation">
+                    <span class="btn-icon">🌐</span>
+                    <span data-i18n="docTranslate">Translate</span>
+                </button>
+                <button class="icon-btn close-btn ripple-effect" id="closeDocs" aria-label="Close">✕</button>
+            </div>
+        </div>
+        <div class="doc-container">
+            <div id="docContent" class="markdown-body">
+                <div class="loading-skeleton">
+                    <div class="skeleton-line"></div>
+                    <div class="skeleton-line"></div>
+                    <div class="skeleton-line short"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="toastContainer" class="toast-container" role="status" aria-live="polite"></div>
+
+<div id="confirmDialog" class="modal" role="dialog" aria-labelledby="confirmTitle" aria-modal="true">
+    <div class="modal-overlay"></div>
+    <div class="confirm-container modal-animate">
+        <div class="confirm-icon" id="confirmIcon">⚠️</div>
+        <h3 id="confirmTitle">Confirm Action</h3>
+        <p id="confirmMessage">Are you sure you want to proceed?</p>
+        <div class="confirm-actions">
+            <button class="btn-secondary ripple-effect" id="confirmCancel" aria-label="Cancel"><span data-i18n="confirmCancel">Cancel</span></button>
+            <button class="btn-primary ripple-effect" id="confirmOk" aria-label="Confirm"><span data-i18n="confirmOk">Confirm</span></button>
+        </div>
+    </div>
+</div>
+
+<!-- Theme Picker Modal -->
+<div id="themeModal" class="theme-modal" role="dialog" aria-label="Theme Picker" aria-modal="true">
+    <div class="theme-modal-overlay" id="themeOverlay"></div>
+    <div class="theme-sheet">
+        <h3 data-i18n="themePickerTitle">🎨 Choose Theme</h3>
+        <p data-i18n="themePickerSub">Saved to configuration automatically</p>
+        <div class="theme-grid" id="themeGrid">
+            <button class="theme-swatch" data-theme="purple" style="--swatch-color:#a78bfa" aria-label="Aurora Purple">
+                <div class="swatch-circle swatch-purple"></div>
+                <span class="swatch-label" data-i18n="swatchPurple">Purple</span>
+            </button>
+            <button class="theme-swatch" data-theme="amber" style="--swatch-color:#f59e0b" aria-label="Ember Amber">
+                <div class="swatch-circle swatch-amber"></div>
+                <span class="swatch-label" data-i18n="swatchAmber">Amber</span>
+            </button>
+            <button class="theme-swatch" data-theme="ocean" style="--swatch-color:#22d3ee" aria-label="Ocean Teal">
+                <div class="swatch-circle swatch-ocean"></div>
+                <span class="swatch-label" data-i18n="swatchOcean">Ocean</span>
+            </button>
+            <button class="theme-swatch" data-theme="rose" style="--swatch-color:#f472b6" aria-label="Sakura Rose">
+                <div class="swatch-circle swatch-rose"></div>
+                <span class="swatch-label" data-i18n="swatchRose">Rose</span>
+            </button>
+            <button class="theme-swatch" data-theme="forest" style="--swatch-color:#4ade80" aria-label="Forest">
+                <div class="swatch-circle swatch-forest"></div>
+                <span class="swatch-label" data-i18n="swatchForest">Forest</span>
+            </button>
+        </div>
+
+        <!-- Color Mode 4-Way Selector -->
+        <div class="colormode-section">
+            <div class="colormode-section-label" data-i18n="displayStyleLabel">Display Style</div>
+            <div class="colormode-grid" id="colorModeGrid">
+                <button class="colormode-btn active" data-mode="glass" aria-label="Glass Mode">
+                    <span class="colormode-btn-icon">🌙</span>
+                    <span class="colormode-btn-name" data-i18n="colorModeGlass">Glass</span>
+                    <span class="colormode-btn-desc" data-i18n="colorModeGlassDesc">Frosted blur</span>
+                    <div class="colormode-btn-check">✓</div>
+                </button>
+                <button class="colormode-btn" data-mode="blur" aria-label="Blur Mode">
+                    <span class="colormode-btn-icon">💧</span>
+                    <span class="colormode-btn-name" data-i18n="colorModeBlur">Blur</span>
+                    <span class="colormode-btn-desc" data-i18n="colorModeBlurDesc">Heavy blur</span>
+                    <div class="colormode-btn-check">✓</div>
+                </button>
+                <button class="colormode-btn" data-mode="transparent" aria-label="Clear Mode">
+                    <span class="colormode-btn-icon">🪟</span>
+                    <span class="colormode-btn-name" data-i18n="colorModeClear">Clear</span>
+                    <span class="colormode-btn-desc" data-i18n="colorModeClearDesc">See-through</span>
+                    <div class="colormode-btn-check">✓</div>
+                </button>
+                <button class="colormode-btn" data-mode="vivid" aria-label="Vivid Mode">
+                    <span class="colormode-btn-icon">✨</span>
+                    <span class="colormode-btn-name" data-i18n="colorModeVivid">Vivid</span>
+                    <span class="colormode-btn-desc" data-i18n="colorModeVividDesc">Full color</span>
+                    <div class="colormode-btn-check">✓</div>
+                </button>
+            </div>
+        </div>
+
+        <!-- Quality Mode Toggle -->
+        <div class="colormode-section">
+            <div class="colormode-section-label" data-i18n="visualEffectsLabel">Visual Effects</div>
+            <button class="quality-toggle-row" id="btnQualityToggle" aria-label="Toggle Quality Mode">
+                <div class="quality-toggle-left">
+                    <span class="quality-toggle-icon" id="qualityIcon">⚡</span>
+                    <div class="quality-toggle-text">
+                        <span class="quality-toggle-name" id="qualityName">Performance Mode</span>
+                        <span class="quality-toggle-desc" id="qualityDesc">Smooth on all devices</span>
+                    </div>
+                </div>
+                <div class="quality-toggle-pill" id="qualityPill">
+                    <div class="quality-toggle-thumb"></div>
+                </div>
+            </button>
+            <p class="quality-mode-hint" id="qualityHint">Enable for aurora, animations &amp; backdrop blur — may lag on older devices</p>
+        </div>
+    </div>
+</div>
+
+<!-- Custom Driver Changes Wizard Modal -->
+<div id="customDriverModal" class="modal" role="dialog" aria-labelledby="customWizardTitle" aria-modal="true">
+    <div class="modal-overlay" id="customDriverOverlay"></div>
+    <div class="modal-container modal-animate custom-wizard-modal">
+        <div class="modal-header">
+            <div>
+                <h2 id="customWizardTitle" data-i18n="customDriverModalTitle">Custom Driver Tools</h2>
+                <p class="modal-subtitle" id="customWizardSubtitle" data-i18n="customDriverModalSub">Advanced driver modification</p>
+            </div>
+            <div class="modal-actions">
+                <button class="icon-btn close-btn ripple-effect" id="closeCustomDriver" aria-label="Close">✕</button>
+            </div>
+        </div>
+        <!-- Step indicator -->
+        <div class="wizard-steps-bar" id="wizardStepsBar" aria-hidden="true">
+            <div class="wizard-step-dot active" data-step="0"></div>
+            <div class="wizard-step-line"></div>
+            <div class="wizard-step-dot" data-step="1"></div>
+            <div class="wizard-step-line"></div>
+            <div class="wizard-step-dot" data-step="2"></div>
+        </div>
+        <!-- Dynamic content area -->
+        <div id="customWizardContent" class="wizard-content-area"></div>
+        <!-- Navigation buttons -->
+        <div class="wizard-nav-row" id="wizardNavRow">
+            <button class="btn-secondary ripple-effect modern-btn" id="wizardBtnBack" style="display:none;">
+                <span class="btn-icon">‹</span>
+                <span data-i18n="wizardBack">Back</span>
+            </button>
+            <button class="btn-primary ripple-effect modern-btn" id="wizardBtnNext" style="display:none;">
+                <span data-i18n="wizardNext">Next</span>
+                <span class="btn-icon">›</span>
+            </button>
+        </div>
+    </div>
+</div>
+
+<div id="loadingOverlay" class="modal" style="display: none; z-index: 2000;">
+    <div class="modal-overlay" style="background: rgba(0,0,0,0.9);"></div>
+    <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center;">
+        <div class="spinner-mini active" style="width: 48px; height: 48px; border-width: 4px; margin: 0 auto 16px;">
+            <div class="spinner-ring"></div>
+        </div>
+        <p style="color: white; font-weight: 600;" data-i18n="loading">Loading...</p>
+    </div>
+</div>
+
+</body>
+</html>

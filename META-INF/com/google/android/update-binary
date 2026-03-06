@@ -1,0 +1,1188 @@
+#!/sbin/sh
+# ========================================
+# Adreno GPU Driver - Universal Installer
+# Supports: Magisk, KernelSU, and Recovery
+# ========================================
+
+umask 022
+set -u
+
+# ========================================
+# Global Variables
+# ========================================
+OUTFD="${2:-}"
+ZIPFILE="${3:-}"
+TMPDIR="/dev/tmp/adreno_install_$$"
+NVBASE="/data/adb"
+LOGFILE="/data/local/tmp/adreno_install_$(date +%Y%m%d_%H%M%S 2>/dev/null || echo 'unknown').log"
+
+# ========================================
+# Core Functions
+# ========================================
+
+: > "$LOGFILE" 2>/dev/null || LOGFILE="/tmp/adreno_install.log"
+
+ui_print() {
+  if [ -n "${1:-}" ]; then
+    echo "$1" >> "$LOGFILE" 2>/dev/null || true
+    echo "$1"
+    if [ -n "$OUTFD" ] && [ -e "/proc/self/fd/$OUTFD" ]; then
+      echo "ui_print $1" > "/proc/self/fd/$OUTFD" 2>/dev/null || true
+      echo "ui_print" > "/proc/self/fd/$OUTFD" 2>/dev/null || true
+    fi
+  fi
+}
+
+ui_printfile() {
+  [ -f "$1" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    ui_print "$line"
+  done < "$1"
+}
+
+log_only() {
+  [ -n "${1:-}" ] && echo "$1" >> "$LOGFILE" 2>/dev/null || true
+}
+
+abort() {
+  ui_print " "
+  ui_print "! ERROR: ${1:-Installation failed}"
+  ui_print "! Check log: $LOGFILE"
+  ui_print " "
+  cleanup
+  exit 1
+}
+
+cleanup() {
+  rm -rf "$TMPDIR" 2>/dev/null || true
+}
+
+trap cleanup EXIT INT TERM
+
+# ========================================
+# System Detection Functions
+# ========================================
+
+# OPT: while-read /proc/mounts — zero forks
+# (was: grep -q + readlink -f = 2+ forks per call)
+is_mounted() {
+  local _target="$1" _ml
+  while IFS= read -r _ml; do
+    case "$_ml" in *" $_target "*|*" $_target"[[:space:]]*) return 0 ;; esac
+  done < /proc/mounts 2>/dev/null
+  return 1
+}
+
+setup_mountpoint() {
+  # IMPORTANT: Do NOT move/destroy symlinks. On devices where /vendor is a
+  # symlink into /system/vendor, moving it breaks the mount point entirely.
+  # Only create the directory if it doesn't exist at all.
+  if [ ! -e "$1" ] && [ ! -L "$1" ]; then
+    mkdir -p "$1"
+  elif [ -L "$1" ] && [ ! -d "$1" ]; then
+    # Dangling symlink — remove and create real dir
+    rm -f "$1" 2>/dev/null
+    mkdir -p "$1"
+  fi
+  # If it's already a real directory or valid symlink-to-dir, leave it alone
+}
+
+# Fallback function if util_functions.sh not available
+# OPT: case-based arch+IS64BIT detection — zero forks
+# (was: echo "$ABI" | cut -c-3 = 2 forks, plus a separate IS64BIT case)
+api_level_arch_detect() {
+  API=$(getprop ro.build.version.sdk 2>/dev/null || echo 0)
+  ABI=$(getprop ro.product.cpu.abi 2>/dev/null || echo unknown)
+  IS64BIT=false
+  case "$ABI" in
+    arm64*|aarch64*) ARCH=arm64; IS64BIT=true ;;
+    arm*)            ARCH=arm ;;
+    x86_64*)         ARCH=x86;   IS64BIT=true ;;
+    x86*)            ARCH=x86 ;;
+    *64*)            ARCH="${ABI%${ABI#???}}"; IS64BIT=true ;;
+    *)               ARCH="${ABI%${ABI#???}}" ;;
+  esac
+  ANDROID=$(getprop ro.build.version.release 2>/dev/null || echo unknown)
+}
+
+# Helper to read prop files (fallback if grep_prop not available)
+read_prop() {
+  local prop_file="$1"
+  local prop_key="$2"
+  # OPT: Single awk replaces grep|head|cut|tr (was 4 forks, now 1)
+  awk -F= -v k="^${prop_key}=" '$0 ~ k {gsub(/[ \t\n\r]/,"",$2); print $2; exit}' "$prop_file" 2>/dev/null
+}
+
+# ========================================
+# Banner Display
+# ========================================
+ui_print " "
+ui_print "       _                         "
+ui_print "       \`*-.                      "
+ui_print "        )  _\`-.                   "
+ui_print "       .  : \`. .                  "
+ui_print "       : _   '  \\                 "
+ui_print "       ; *\` _.   \`*-._            "
+ui_print "       \`-.-'          \`-.         "
+ui_print "         ;       \`       \`.       "
+ui_print "         :.       .        \\      "
+ui_print "         . \\  .   :   .-'   .     "
+ui_print "         '  \`+.;  ;  '      :     "
+ui_print "         :  '  |    ;       ;-.   "
+ui_print "         ; '   : :\`-:     _.\`* ;  "
+ui_print " [bug] .*' /  .*' ; .*\`- +'  \`*' "
+ui_print "      \`*-*   \`*-*  \`*-*'         "
+ui_print " "
+ui_print "    ASCII art by Blazej Kozlowski"
+ui_print " "
+
+# ========================================
+# Mode Detection
+# ========================================
+ui_print "Detecting installation mode..."
+
+# OPT: while-read + case — zero grep forks (was: ps|grep -v|grep -q = 3 forks + 2 pipes)
+BOOTMODE=false
+while IFS= read -r _psline; do
+  case "$_psline" in *zygote*) BOOTMODE=true; break ;; esac
+done << _PS_OUT
+$(ps 2>/dev/null)
+_PS_OUT
+if ! $BOOTMODE; then
+  while IFS= read -r _psline; do
+    case "$_psline" in *zygote*) BOOTMODE=true; break ;; esac
+  done << _PS_OUT2
+$(ps -A 2>/dev/null)
+_PS_OUT2
+fi
+
+if $BOOTMODE; then
+  MODE="Magisk/KernelSU"
+  ui_print "✓ Mode: Magisk/KernelSU (Module Installation)"
+else
+  MODE="Recovery"
+  ui_print "✓ Mode: Recovery (Direct Installation)"
+fi
+
+ui_print " "
+
+# ========================================
+# Load Magisk Utilities (if in BOOTMODE)
+# ========================================
+if $BOOTMODE; then
+  ui_print "Loading Magisk utilities..."
+
+  if [ -f "$NVBASE/magisk/util_functions.sh" ]; then
+    . "$NVBASE/magisk/util_functions.sh"
+    ui_print "✓ Magisk utilities loaded"
+  else
+    ui_print "⚠ util_functions.sh not found, using fallback"
+    api_level_arch_detect
+
+    if ! command -v grep_prop >/dev/null 2>&1; then
+      grep_prop() { read_prop "$1" "$2"; }
+    fi
+  fi
+
+  ui_print " "
+fi
+
+# ========================================
+# Preparation: Extract ZIP
+# ========================================
+ui_print "===================================="
+ui_print "Preparing Installation"
+ui_print "===================================="
+ui_print " "
+
+rm -rf "$TMPDIR" 2>/dev/null || true
+mkdir -p "$TMPDIR" || abort "Failed to create temp directory"
+
+ui_print "Extracting module files..."
+unzip -o -q "$ZIPFILE" -d "$TMPDIR" || abort "Failed to extract ZIP"
+
+[ -f "$TMPDIR/module.prop" ] || abort "module.prop not found in ZIP"
+
+if command -v grep_prop >/dev/null 2>&1; then
+  MODID=$(grep_prop "$TMPDIR/module.prop" id)
+  MODNAME=$(grep_prop "$TMPDIR/module.prop" name)
+  MODVER=$(grep_prop "$TMPDIR/module.prop" version)
+else
+  MODID=$(read_prop "$TMPDIR/module.prop" id)
+  MODNAME=$(read_prop "$TMPDIR/module.prop" name)
+  MODVER=$(read_prop "$TMPDIR/module.prop" version)
+fi
+
+[ -n "$MODID" ] || abort "Invalid module.prop (missing id)"
+
+ui_print "Module: $MODNAME"
+ui_print "Version: $MODVER"
+ui_print "ID: $MODID"
+ui_print " "
+
+# ========================================
+# LOAD VERBOSE CONFIGURATION
+# ========================================
+
+VERBOSE="n"
+
+# OPT: IFS='= ' read + case — zero forks (was: printf '%s' | awk = 1 fork per line)
+if [ -f "$TMPDIR/adreno_config.txt" ]; then
+  while IFS='= ' read -r _k _v; do
+    case "$_k" in
+      '#'*|'') continue ;;
+      VERBOSE)
+        _v="${_v%$'\r'}"
+        case "$_v" in [Yy]|[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|1) VERBOSE="y" ;; esac
+        break ;;
+    esac
+  done < "$TMPDIR/adreno_config.txt"
+fi
+
+if [ "$VERBOSE" != "y" ]; then
+  LOGFILE="/dev/null"
+fi
+
+ui_print "Verbose logging: $VERBOSE"
+ui_print " "
+
+# ========================================
+# BOOTMODE: Module Installation
+# ========================================
+if $BOOTMODE; then
+  ui_print "===================================="
+  ui_print "Module Installation (Magisk/KSU)"
+  ui_print "===================================="
+  ui_print " "
+
+  MODPATH="$NVBASE/modules/$MODID"
+
+  rm -rf "$MODPATH" 2>/dev/null || true
+  mkdir -p "$MODPATH" || abort "Failed to create module directory"
+
+  ui_print "Module path: $MODPATH"
+  ui_print " "
+
+  export TMPDIR
+  export MODPATH
+  export MODID
+  export OUTFD
+  export ZIPFILE
+  export NVBASE
+  export BOOTMODE
+
+  if [ -f "$TMPDIR/customize.sh" ]; then
+    ui_print "Running customize.sh..."
+    ui_print " "
+    . "$TMPDIR/customize.sh" || abort "customize.sh execution failed"
+  else
+    ui_print "⚠ customize.sh not found, using basic installation"
+    ui_print " "
+    ui_print "Copying module files..."
+    cp -af "$TMPDIR"/* "$MODPATH"/ 2>/dev/null || {
+      for f in "$TMPDIR"/*; do
+        [ -e "$f" ] && cp -af "$f" "$MODPATH"/ 2>/dev/null || true
+      done
+    }
+    find "$MODPATH" -type d -exec chmod 0755 {} + 2>/dev/null || true
+    find "$MODPATH" -type f -exec chmod 0644 {} + 2>/dev/null || true
+    chmod 0755 "$MODPATH"/*.sh 2>/dev/null || true
+    ui_print "✓ Basic installation complete"
+  fi
+
+  ui_print " "
+  ui_print "Finalizing module..."
+
+  [ -f "$MODPATH/module.prop" ] || cp -f "$TMPDIR/module.prop" "$MODPATH/module.prop"
+
+  rm -f "$MODPATH/disable" "$MODPATH/remove" 2>/dev/null || true
+  : > "$MODPATH/update"
+
+  ui_print "✓ Module installed successfully"
+  ui_print " "
+  ui_print "===================================="
+  ui_print "Installation Complete!"
+  ui_print "===================================="
+  ui_print " "
+  ui_print "Module will be active after reboot."
+
+else
+  # ========================================
+  # RECOVERY MODE: Direct Installation
+  # ========================================
+  ui_print "===================================="
+  ui_print "Recovery Direct Installation"
+  ui_print "===================================="
+  ui_print " "
+
+  ui_print " "
+  ui_print "===================================="
+  ui_print "Collecting Previous Boot Crash Logs"
+  ui_print "===================================="
+  ui_print " "
+
+  LOG_BASE_DIR="/sdcard/Adreno_Driver"
+  mkdir -p "${LOG_BASE_DIR}/Recovery" "${LOG_BASE_DIR}/Bootloop" 2>/dev/null || {
+    LOG_BASE_DIR="/data/local/tmp/Adreno_Driver"
+    mkdir -p "${LOG_BASE_DIR}/Recovery" "${LOG_BASE_DIR}/Bootloop" 2>/dev/null || true
+  }
+
+  # OPT: shell read from /proc/uptime — zero extra forks in fallback
+  # (was: cat /proc/uptime | cut -d. -f1 = 2 forks + pipe)
+  { read _rt_fb _; } < /proc/uptime 2>/dev/null || _rt_fb='0'
+  RECOVERY_TIMESTAMP=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "recovery_${_rt_fb%%.*}")
+  unset _rt_fb
+
+  if [ -f /proc/last_kmsg ]; then
+    ui_print "→ Collecting /proc/last_kmsg (PREVIOUS boot crash data)..."
+    if cp /proc/last_kmsg "${LOG_BASE_DIR}/Bootloop/last_kmsg_${RECOVERY_TIMESTAMP}.log" 2>/dev/null; then
+      ui_print "  ✓ last_kmsg saved (contains crash information)"
+    else
+      ui_print "  ⚠ Failed to collect last_kmsg"
+    fi
+  else
+    ui_print "  ℹ /proc/last_kmsg not available (no previous boot data)"
+  fi
+
+  if [ -d /sys/fs/pstore ]; then
+    # OPT: glob count — zero forks (was: ls -1|wc -l = 2 forks + pipe)
+    pstore_count=0
+    for _pf in /sys/fs/pstore/*; do [ -e "$_pf" ] && pstore_count=$((pstore_count+1)); done
+
+    if [ "$pstore_count" -gt 0 ]; then
+      ui_print "→ Collecting pstore crash dumps ($pstore_count files)..."
+      mkdir -p "${LOG_BASE_DIR}/Bootloop/pstore_${RECOVERY_TIMESTAMP}" 2>/dev/null
+      if cp -r /sys/fs/pstore/* "${LOG_BASE_DIR}/Bootloop/pstore_${RECOVERY_TIMESTAMP}/" 2>/dev/null; then
+        ui_print "  ✓ pstore crash data collected"
+      else
+        ui_print "  ⚠ Failed to collect pstore"
+      fi
+    else
+      ui_print "  ℹ pstore empty (no crash data from previous boot)"
+    fi
+  else
+    ui_print "  ℹ /sys/fs/pstore not available"
+  fi
+
+  ui_print "→ Collecting dmesg (current recovery kernel log)..."
+  if dmesg > "${LOG_BASE_DIR}/Recovery/dmesg_${RECOVERY_TIMESTAMP}.log" 2>&1; then
+    ui_print "  ✓ dmesg collected"
+  else
+    ui_print "  ⚠ Failed to collect dmesg"
+  fi
+
+  if command -v logcat >/dev/null 2>&1; then
+    ui_print "→ Collecting logcat..."
+    if timeout 5 logcat -d > "${LOG_BASE_DIR}/Recovery/logcat_${RECOVERY_TIMESTAMP}.txt" 2>&1; then
+      ui_print "  ✓ logcat collected"
+    else
+      ui_print "  ℹ logcat unavailable in recovery"
+    fi
+  fi
+
+  ui_print " "
+  ui_print "✓ Crash log collection complete"
+  ui_print "  Logs saved to: ${LOG_BASE_DIR}/Bootloop/"
+  ui_print " "
+
+  # ========================================
+  # Mount System Partitions
+  # ========================================
+  ui_print "Mounting system partitions..."
+
+  slot=$(getprop ro.boot.slot_suffix 2>/dev/null)
+
+  # OPT: shell read + parameter expansion — zero forks
+  # (was: grep -o 'androidboot.slot_suffix=...' /proc/cmdline | cut -d= -f2 = 2 forks + pipe)
+  if [ -z "$slot" ]; then
+    _cmdline=""
+    { IFS= read -r _cmdline; } < /proc/cmdline 2>/dev/null
+    case "$_cmdline" in
+      *androidboot.slot_suffix=*)
+        slot="${_cmdline##*androidboot.slot_suffix=}"
+        slot="${slot%%[[:space:]]*}" ;;
+    esac
+    unset _cmdline
+  fi
+
+  # OPT: store getprop result + shell prefix — eliminates sed fork
+  # (was: getprop ro.boot.slot | sed 's/^/_/' = 2 forks + pipe)
+  if [ -z "$slot" ]; then
+    _boot_slot=$(getprop ro.boot.slot 2>/dev/null)
+    [ -n "$_boot_slot" ] && slot="_${_boot_slot}"
+    unset _boot_slot
+  fi
+
+  [ -z "$slot" ] && slot=""
+
+  ui_print "Slot: ${slot:-none (A-only)}"
+
+  # OPT: glob loop + parameter expansion — zero forks
+  # (was: find /dev/block/platform -type d -name by-name | head -n1 | cut -d/ -f4- = 3 forks + 2 pipes)
+  byname="bootdevice/by-name"
+  [ -d "/dev/block/$byname" ] || {
+    for _byd in /dev/block/platform/*/by-name /dev/block/platform/*/*/by-name; do
+      [ -d "$_byd" ] && { byname="${_byd#/dev/block/}"; break; }
+    done
+    unset _byd
+  }
+
+  if [ -e "/dev/block/mapper/vendor$slot" ] || [ -e "/dev/block/$byname/super" ]; then
+    byname="mapper"
+    ui_print "✓ Dynamic partitions detected"
+  fi
+
+  ui_print " "
+  ui_print "Mounting /vendor..."
+  setup_mountpoint /vendor
+
+  if ! is_mounted /vendor; then
+    if [ -e "/dev/block/mapper/vendor$slot" ]; then
+      mount -o rw "/dev/block/mapper/vendor$slot" /vendor 2>/dev/null && ui_print "  ✓ Mounted via mapper" || true
+    fi
+    if ! is_mounted /vendor && [ -e "/dev/block/$byname/vendor$slot" ]; then
+      mount -o rw "/dev/block/$byname/vendor$slot" /vendor 2>/dev/null && ui_print "  ✓ Mounted via by-name" || true
+    fi
+    if ! is_mounted /vendor; then
+      mount -o rw /vendor 2>/dev/null && ui_print "  ✓ Mounted generically" || true
+    fi
+  fi
+
+  if ! is_mounted /vendor; then
+    abort "Failed to mount /vendor partition"
+  fi
+
+  # ── Force vendor read-write ────────────────────────────────────────────────
+  # Some recoveries (OFRP, some TWRP builds, LineageOS recovery) mount vendor
+  # read-only before our script runs. "vendor not writable" is ROM-specific:
+  # certain OEM recoveries enforce ro mounts to preserve AVB chain-of-trust.
+  # We try four escalating strategies to get rw access.
+
+  # Strategy 1: Plain remount (works on most recoveries)
+  mount -o rw,remount /vendor 2>/dev/null || true
+
+  # Strategy 2: Remount with explicit block device (more reliable on some
+  # kernels where the kernel ignores mount-point-only remount)
+  if ! touch /vendor/.adreno_rwtest 2>/dev/null; then
+    VENDOR_BLKDEV=""
+    if   [ -e "/dev/block/mapper/vendor$slot" ]; then
+      VENDOR_BLKDEV="/dev/block/mapper/vendor$slot"
+    elif [ -e "/dev/block/$byname/vendor$slot" ]; then
+      VENDOR_BLKDEV="/dev/block/$byname/vendor$slot"
+    else
+      # Read actual block device from /proc/mounts
+      while read -r _mdev _mpt _mfs _mopts _; do
+        if [ "$_mpt" = "/vendor" ]; then VENDOR_BLKDEV="$_mdev"; break; fi
+      done < /proc/mounts 2>/dev/null
+    fi
+
+    if [ -n "$VENDOR_BLKDEV" ]; then
+      mount -o rw,remount "$VENDOR_BLKDEV" /vendor 2>/dev/null || true
+    fi
+  fi
+
+  # Strategy 3: blockdev --setrw — needed on some kernels where dm-verity or
+  # a read-only block flag prevents remount even as root. Only safe in
+  # recovery (we're not in a running Android system).
+  if ! touch /vendor/.adreno_rwtest 2>/dev/null; then
+    if [ -n "$VENDOR_BLKDEV" ] && command -v blockdev >/dev/null 2>&1; then
+      blockdev --setrw "$VENDOR_BLKDEV" 2>/dev/null || true
+      mount -o rw,remount /vendor 2>/dev/null || true
+    fi
+  fi
+
+  # Strategy 4: For dynamic partitions (dm-X devices), the underlying real
+  # block device may differ from the dm device. Try to find and set it rw.
+  if ! touch /vendor/.adreno_rwtest 2>/dev/null; then
+    if echo "$VENDOR_BLKDEV" | grep -q "^/dev/block/dm-" 2>/dev/null; then
+      # Get the underlying device from dm-table
+      DM_NUM="${VENDOR_BLKDEV##/dev/block/dm-}"
+      REAL_DEV=$(cat "/sys/block/dm-${DM_NUM}/slaves" 2>/dev/null | awk '{print $1}')
+      if [ -n "$REAL_DEV" ] && [ -b "/dev/block/$REAL_DEV" ]; then
+        blockdev --setrw "/dev/block/$REAL_DEV" 2>/dev/null || true
+        mount -o rw,remount /vendor 2>/dev/null || true
+      fi
+    fi
+  fi
+
+  rm -f /vendor/.adreno_rwtest 2>/dev/null || true
+
+  ui_print "✓ Vendor mounted successfully"
+
+  ui_print " "
+  ui_print "Mounting /system..."
+  setup_mountpoint /system_root
+
+  SYSTEM_MOUNT_POINT=""
+
+  if ! is_mounted /system_root && ! is_mounted /system; then
+    if [ -e "/dev/block/mapper/system$slot" ]; then
+      mount -o rw "/dev/block/mapper/system$slot" /system_root 2>/dev/null || true
+    fi
+    if ! is_mounted /system_root && [ -e "/dev/block/$byname/system$slot" ]; then
+      mount -o rw "/dev/block/$byname/system$slot" /system_root 2>/dev/null || true
+    fi
+    if ! is_mounted /system_root; then
+      mount -o rw /system_root 2>/dev/null || mount -o rw /system 2>/dev/null || true
+    fi
+    if is_mounted /system_root; then
+      mount -o rw,remount /system_root 2>/dev/null || true
+      SYSTEM_MOUNT_POINT="/system_root"
+      ui_print "✓ System mounted at /system_root"
+    elif is_mounted /system; then
+      mount -o rw,remount /system 2>/dev/null || true
+      SYSTEM_MOUNT_POINT="/system"
+      ui_print "✓ System mounted at /system"
+    else
+      ui_print "⚠ System mount failed (may not be needed)"
+    fi
+  else
+    if is_mounted /system_root; then
+      # Always remount rw regardless of whether already mounted
+      mount -o rw,remount /system_root 2>/dev/null || true
+      SYSTEM_MOUNT_POINT="/system_root"
+      ui_print "✓ System already mounted at /system_root"
+    elif is_mounted /system; then
+      mount -o rw,remount /system 2>/dev/null || true
+      SYSTEM_MOUNT_POINT="/system"
+      ui_print "✓ System already mounted at /system"
+    fi
+  fi
+
+  ui_print " "
+  ui_print "Testing vendor write access..."
+  touch /vendor/.adreno_test 2>/dev/null
+  if [ -f /vendor/.adreno_test ]; then
+    rm -f /vendor/.adreno_test
+    ui_print "✓ Vendor is writable"
+  else
+    ui_print "! ERROR: Vendor partition is not writable"
+    ui_print "! This is ROM/recovery-specific. Common fixes:"
+    ui_print "!   1) In TWRP: Advanced > Terminal > mount -o rw,remount /vendor"
+    ui_print "!   2) Use a recovery that supports rw vendor (OFRP, OrangeFox)"
+    ui_print "!   3) For AVB2 devices: disable verity before flashing"
+    abort "Vendor partition is not writable. See instructions above."
+  fi
+
+  # ========================================
+  # Load Configuration
+  # ========================================
+  ui_print " "
+  ui_print "Loading configuration..."
+
+  PLT="n"
+  QGL="n"
+  ARM64_OPT="n"
+  VERBOSE="n"
+
+  # OPT: IFS='= ' read + case — zero awk forks (was: printf '%s' | awk per line = 1 fork/line)
+  if [ -f "$TMPDIR/adreno_config.txt" ]; then
+    while IFS='= ' read -r _k _v; do
+      case "$_k" in '#'*|'') continue ;; esac
+      _v="${_v%$'\r'}"
+      case "$_k" in
+        PLT)       case "$_v" in [Yy]|[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|1) PLT="y" ;;       esac ;;
+        QGL)       case "$_v" in [Yy]|[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|1) QGL="y" ;;       esac ;;
+        ARM64_OPT) case "$_v" in [Yy]|[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|1) ARM64_OPT="y" ;; esac ;;
+        VERBOSE)   case "$_v" in [Yy]|[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|1) VERBOSE="y" ;;   esac ;;
+      esac
+    done < "$TMPDIR/adreno_config.txt"
+    ui_print "✓ Configuration loaded"
+  else
+    ui_print "⚠ No config found, using defaults"
+  fi
+
+  ui_print " "
+  ui_print "Settings:"
+  ui_print "  • PLT Patching: $PLT"
+  ui_print "  • QGL Config: $QGL"
+  ui_print "  • ARM64 Opt: $ARM64_OPT"
+  ui_print "  • Verbose: $VERBOSE"
+
+  IS_ARM64=false
+  CPU_ABI="$(getprop ro.product.cpu.abi 2>/dev/null || echo unknown)"
+  case "$CPU_ABI" in
+    *arm64*|*aarch64*)
+      IS_ARM64=true
+      ui_print "  • Architecture: ARM64"
+      ;;
+    *)
+      ui_print "  • Architecture: $CPU_ABI"
+      ;;
+  esac
+
+
+ui_print " "
+ui_print "========================================"
+ui_print "32-BIT ARCHITECTURE ANALYSIS "
+ui_print "========================================"
+ui_print " "
+
+LINKER_PRESENT=false
+LINKER64_PRESENT=false
+TANGO_PRESENT=false
+SYSLIB_PRESENT=false
+VENDORLIB_PRESENT=false
+
+log_only "=== SYSTEM MOUNT DETECTION ==="
+log_only "SYSTEM_MOUNT_POINT: ${SYSTEM_MOUNT_POINT:-NOT SET}"
+log_only "Mount information:"
+# OPT: /proc/mounts read — zero forks (was: mount|grep = 2 forks)
+while IFS= read -r _mnt; do
+  case "$_mnt" in */system*|*/system_root*) log_only "$_mnt" ;; esac
+done < /proc/mounts 2>/dev/null
+log_only "==========================="
+
+if [ -n "$SYSTEM_MOUNT_POINT" ]; then
+  if [ "$SYSTEM_MOUNT_POINT" = "/system_root" ]; then
+    if [ -d "/system_root/system" ]; then
+      ACTUAL_SYSTEM_PATH="/system_root/system"
+      ui_print "Detected: System-as-root (SAR) layout"
+      log_only "Using system path: /system_root/system"
+    else
+      ACTUAL_SYSTEM_PATH="/system_root"
+      ui_print "Detected: Non-standard system-root layout"
+      log_only "Using system path: /system_root"
+    fi
+  else
+    ACTUAL_SYSTEM_PATH="/system"
+    ui_print "Detected: Traditional /system layout"
+    log_only "Using system path: /system"
+  fi
+else
+  if [ -d "/system_root/system" ]; then
+    ACTUAL_SYSTEM_PATH="/system_root/system"
+    ui_print "Fallback: Using /system_root/system"
+  elif [ -d "/system" ]; then
+    ACTUAL_SYSTEM_PATH="/system"
+    ui_print "Fallback: Using /system"
+  else
+    ACTUAL_SYSTEM_PATH="/system"
+    ui_print "⚠ Warning: Could not detect system path, using /system"
+  fi
+fi
+
+ui_print "System path: $ACTUAL_SYSTEM_PATH"
+ui_print " "
+
+ui_print "Checking for 32-bit linker support..."
+
+LINKER_PATHS="
+${ACTUAL_SYSTEM_PATH}/bin/linker
+/system/bin/linker
+/system_root/system/bin/linker
+/sbin/linker
+/apex/com.android.runtime/bin/linker
+/apex/com.android.art/bin/linker
+/system/apex/com.android.runtime/bin/linker
+/system/apex/com.android.art/bin/linker
+/system_root/system/apex/com.android.runtime/bin/linker
+/system_root/system/apex/com.android.art/bin/linker
+"
+
+for linker_path in $LINKER_PATHS; do
+  if [ -f "$linker_path" ] && [ -x "$linker_path" ]; then
+    LINKER_PRESENT=true
+    LINKER_LOCATION="$linker_path"
+    ui_print "  ✅ Found native 32-bit linker: $linker_path"
+    log_only "32-bit linker found at: $linker_path"
+    break
+  fi
+done
+
+if ! $LINKER_PRESENT; then
+  for linker_path in $LINKER_PATHS; do
+    if [ -L "$linker_path" ]; then
+      target=$(readlink "$linker_path" 2>/dev/null)
+      if [ -n "$target" ]; then
+        # OPT: case instead of echo|grep -q; ${.%/*} instead of dirname (2 forks saved)
+        case "$target" in
+          /*)  resolved_target="$target" ;;
+          *)   resolved_target="${linker_path%/*}/$target" ;;
+        esac
+        if [ -f "$resolved_target" ] || [ -c "$resolved_target" ]; then
+          LINKER_PRESENT=true
+          LINKER_LOCATION="$linker_path → $resolved_target"
+          ui_print "  ✅ Found symlinked 32-bit linker: $linker_path"
+          ui_print "     → Points to: $resolved_target"
+          log_only "32-bit linker symlink: $linker_path -> $resolved_target"
+          break
+        fi
+      fi
+    fi
+  done
+fi
+
+if ! $LINKER_PRESENT; then
+  ui_print "  ❌ No native 32-bit linker found"
+  LINKER_LOCATION="Not found"
+fi
+
+ui_print " "
+ui_print "Checking for 64-bit linker support..."
+
+LINKER64_PATHS="
+${ACTUAL_SYSTEM_PATH}/bin/linker64
+/system/bin/linker64
+/system_root/system/bin/linker64
+/sbin/linker64
+/apex/com.android.runtime/bin/linker64
+/apex/com.android.art/bin/linker64
+/system/apex/com.android.runtime/bin/linker64
+/system/apex/com.android.art/bin/linker64
+/system_root/system/apex/com.android.runtime/bin/linker64
+/system_root/system/apex/com.android.art/bin/linker64
+"
+
+for linker64_path in $LINKER64_PATHS; do
+  if [ -f "$linker64_path" ] || [ -L "$linker64_path" ]; then
+    LINKER64_PRESENT=true
+    LINKER64_LOCATION="$linker64_path"
+    ui_print "  ✅ Found 64-bit linker: $linker64_path"
+    log_only "64-bit linker found at: $linker64_path"
+    break
+  fi
+done
+
+if ! $LINKER64_PRESENT; then
+  ui_print "  ❌ No 64-bit linker found (unusual!)"
+  LINKER64_LOCATION="Not found"
+fi
+
+ui_print " "
+ui_print "Checking for Tango translator..."
+
+TANGO_PATHS="/dev/tango32 /dev/tango"
+
+for tango_path in $TANGO_PATHS; do
+  if [ -c "$tango_path" ]; then
+    TANGO_PRESENT=true
+    TANGO_LOCATION="$tango_path"
+    ui_print "  ✅ Tango translator detected: $tango_path"
+    log_only "Tango found: $tango_path"
+    break
+  fi
+done
+
+if ! $TANGO_PRESENT; then
+  ui_print "  ❌ Tango translator not found"
+  TANGO_LOCATION="Not found"
+fi
+
+ui_print " "
+ui_print "Checking for 32-bit library directories..."
+
+SYSLIB_PATHS="
+${ACTUAL_SYSTEM_PATH}/lib
+/system/lib
+/system_root/system/lib
+"
+
+for syslib_path in $SYSLIB_PATHS; do
+  if [ -d "$syslib_path" ]; then
+    # OPT: glob existence + count — zero forks (was: ls -A|head + ls|wc = 4 forks + 2 pipes)
+    _has_files=false
+    for _sf in "$syslib_path"/*; do [ -e "$_sf" ] && { _has_files=true; break; }; done
+    if [ "$_has_files" = "true" ]; then
+      SYSLIB_COUNT=0
+      for _sf in "$syslib_path"/*; do [ -e "$_sf" ] && SYSLIB_COUNT=$((SYSLIB_COUNT+1)); done
+      SYSLIB_PRESENT=true
+      SYSLIB_LOCATION="$syslib_path"
+      ui_print "  ✅ System 32-bit libs: $syslib_path ($SYSLIB_COUNT files)"
+      log_only "System 32-bit libs at: $syslib_path with $SYSLIB_COUNT files"
+      break
+    fi
+  fi
+done
+
+if ! $SYSLIB_PRESENT; then
+  ui_print "  ❌ System 32-bit lib directory missing/empty"
+  SYSLIB_LOCATION="Not found"
+  SYSLIB_COUNT=0
+fi
+
+# OPT: glob existence and count — zero forks (was: ls -A|head + ls|wc = 4 forks + 2 pipes)
+_vlib_has=false
+for _sf in /vendor/lib/*; do [ -e "$_sf" ] && { _vlib_has=true; break; }; done
+if [ -d "/vendor/lib" ] && [ "$_vlib_has" = "true" ]; then
+  VENDORLIB_COUNT=0
+  for _sf in /vendor/lib/*; do [ -e "$_sf" ] && VENDORLIB_COUNT=$((VENDORLIB_COUNT+1)); done
+  VENDORLIB_PRESENT=true
+  VENDORLIB_LOCATION="/vendor/lib"
+  ui_print "  ✅ Vendor 32-bit libs: /vendor/lib ($VENDORLIB_COUNT files)"
+  log_only "Vendor 32-bit libs: $VENDORLIB_COUNT files"
+else
+  ui_print "  ❌ Vendor 32-bit lib directory missing/empty"
+  VENDORLIB_LOCATION="Not found"
+  VENDORLIB_COUNT=0
+fi
+
+ui_print " "
+ui_print "========================================"
+ui_print "DETECTION SUMMARY"
+ui_print "========================================"
+ui_print " "
+ui_print "32-bit Native Linker: $(if $LINKER_PRESENT; then echo '✅ FOUND'; else echo '❌ MISSING'; fi)"
+ui_print "  Location: $LINKER_LOCATION"
+ui_print " "
+ui_print "64-bit Linker:        $(if $LINKER64_PRESENT; then echo '✅ FOUND'; else echo '❌ MISSING'; fi)"
+ui_print "  Location: $LINKER64_LOCATION"
+ui_print " "
+ui_print "Tango Translator:     $(if $TANGO_PRESENT; then echo '✅ ACTIVE'; else echo '❌ NOT FOUND'; fi)"
+ui_print "  Location: $TANGO_LOCATION"
+ui_print " "
+ui_print "System 32-bit Libs:   $(if $SYSLIB_PRESENT; then echo "✅ EXISTS ($SYSLIB_COUNT files)"; else echo '❌ MISSING'; fi)"
+ui_print "  Location: $SYSLIB_LOCATION"
+ui_print " "
+ui_print "Vendor 32-bit Libs:   $(if $VENDORLIB_PRESENT; then echo "✅ EXISTS ($VENDORLIB_COUNT files)"; else echo '❌ MISSING'; fi)"
+ui_print "  Location: $VENDORLIB_LOCATION"
+ui_print " "
+ui_print "========================================"
+ui_print " "
+
+AUTO_ARM64_OPT="n"
+DETECTION_REASON=""
+RECOMMENDATION=""
+SAFETY_LEVEL=""
+
+if [ "$LINKER_PRESENT" = "true" ]; then
+  AUTO_ARM64_OPT="n"
+  DETECTION_REASON="Native 32-bit linker found"
+  RECOMMENDATION="KEEP 32-bit libs (native support detected)"
+  SAFETY_LEVEL="✅ SAFE"
+  ui_print "🔍 RESULT: NATIVE 32-BIT SUPPORT DETECTED"
+  ui_print " "
+  ui_print "Your device has native 32-bit support."
+  ui_print "You can safely install both 32-bit and 64-bit driver modules."
+  ui_print " "
+elif [ "$TANGO_PRESENT" = "true" ]; then
+  AUTO_ARM64_OPT="y"
+  DETECTION_REASON="Tango translator detected (translation layer only)"
+  RECOMMENDATION="REMOVE 32-bit libs (driver modules need 64-bit only)"
+  SAFETY_LEVEL="⚠️  CRITICAL"
+  ui_print "🔍 RESULT: TRANSLATION-ONLY SYSTEM (64-bit + Tango)"
+  ui_print " "
+  ui_print "Your device uses Tango translator for 32-bit apps."
+  ui_print "32-bit apps work via translation, but DRIVER MODULES"
+  ui_print "must be 64-bit only to prevent BOOTLOOP!"
+  ui_print " "
+  ui_print "⚠️  Installing 32-bit driver libs will cause BOOTLOOP!"
+  ui_print " "
+elif [ "$SYSLIB_PRESENT" = "true" ] || [ "$VENDORLIB_PRESENT" = "true" ]; then
+  AUTO_ARM64_OPT="y"
+  DETECTION_REASON="32-bit lib directories found (no linker)"
+  RECOMMENDATION="Still remove 32-bit libs for safety"
+  SAFETY_LEVEL="⚠️  UNCERTAIN"
+  ui_print "🔍 RESULT: PARTIAL 32-BIT SUPPORT (Unusual Configuration)"
+  ui_print " "
+  ui_print "32-bit library directories exist, but native linker not found."
+  ui_print "This is an unusual configuration. Keeping 32-bit libs as safety measure."
+  ui_print " "
+else
+  AUTO_ARM64_OPT="y"
+  DETECTION_REASON="Pure 64-bit system (no 32-bit support)"
+  RECOMMENDATION="REMOVE 32-bit libs (pure 64-bit system)"
+  SAFETY_LEVEL="✅ SAFE"
+  ui_print "🔍 RESULT: PURE 64-BIT SYSTEM"
+  ui_print " "
+  ui_print "No 32-bit support detected at all."
+  ui_print "32-bit driver libs will be automatically excluded."
+  ui_print " "
+fi
+
+ui_print "Decision Logic:"
+ui_print "─────────────────────────────────────"
+ui_print "Reason: $DETECTION_REASON"
+ui_print "Action: $RECOMMENDATION"
+ui_print "Safety: $SAFETY_LEVEL"
+ui_print "─────────────────────────────────────"
+ui_print " "
+
+if [ "$AUTO_ARM64_OPT" = "y" ] && [ "${ARM64_OPT}" = "n" ]; then
+  ui_print "🔧 AUTO-CONFIGURATION APPLIED"
+  ui_print " "
+  ui_print "Original ARM64_OPT setting: n (from config)"
+  ui_print "Detected ARM64_OPT setting: y (auto-detected)"
+  ui_print " "
+  ui_print "⚙️  Overriding config → ARM64_OPT=y"
+  ui_print " "
+  ui_print "Reason: Prevents bootloop on 64-bit-only/Tango systems"
+  ui_print " "
+
+  ARM64_OPT="y"
+
+  # OPT: single awk — 1 fork (was: grep -q + grep -v + mv = 3 forks)
+  if [ -n "${CONFIG_FILE:-}" ] && [ -f "${CONFIG_FILE}" ]; then
+    awk 'BEGIN{found=0} /^ARM64_OPT=/{print "ARM64_OPT=y"; found=1; next} {print} END{if(!found) print "ARM64_OPT=y"}' \
+      "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" 2>/dev/null && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE" 2>/dev/null || true
+    ui_print "✓ Configuration file updated: ARM64_OPT=y"
+    ui_print " "
+  fi
+
+  log_only "AUTO-CONFIGURATION: ARM64_OPT overridden from 'n' to 'y'"
+  log_only "Detection reason: $DETECTION_REASON"
+  log_only "Linker present: $LINKER_PRESENT"
+  log_only "Linker location: $LINKER_LOCATION"
+  log_only "Tango present: $TANGO_PRESENT"
+  log_only "System lib present: $SYSLIB_PRESENT"
+
+elif [ "$AUTO_ARM64_OPT" = "n" ] && [ "${ARM64_OPT}" = "y" ]; then
+  ui_print "⚠️  CONFIGURATION OVERRIDE NOTICE"
+  ui_print " "
+  ui_print "Your config says: ARM64_OPT=y (64-bit only)"
+  ui_print "Detection result: ARM64_OPT=n (32-bit support found)"
+  ui_print " "
+  ui_print "⚙️  Keeping your manual configuration: ARM64_OPT=y"
+  ui_print " "
+  ui_print "This may cause issues if you run 32-bit apps!"
+  ui_print "To use auto-detection, set ARM64_OPT=n in config"
+  ui_print " "
+  log_only "User manual override: ARM64_OPT=y (despite 32-bit support detected)"
+
+else
+  ui_print "✓ Configuration validated: ARM64_OPT=$ARM64_OPT"
+  ui_print "  (matches auto-detection result)"
+  ui_print " "
+fi
+
+ui_print "Final ARM64_OPT Setting: $ARM64_OPT"
+ui_print " "
+
+if [ "$ARM64_OPT" = "y" ]; then
+  ui_print "📦 32-bit libraries will be EXCLUDED from installation"
+  ui_print "📦 Only 64-bit libraries will be installed"
+else
+  ui_print "📦 Both 32-bit and 64-bit libraries will be installed"
+fi
+
+ui_print " "
+ui_print "========================================"
+ui_print "32-BIT ANALYSIS COMPLETE"
+ui_print "========================================"
+ui_print " "
+
+export ARM64_OPT
+export AUTO_ARM64_OPT
+export DETECTION_REASON
+
+  ui_print " "
+  ui_print "Installing driver files..."
+  ui_print " "
+
+  # Support both system/vendor/ (zip layout) and top-level vendor/ layouts
+  VENDOR_SRC=""
+  if [ -d "$TMPDIR/system/vendor" ]; then
+    VENDOR_SRC="$TMPDIR/system/vendor"
+  elif [ -d "$TMPDIR/vendor" ]; then
+    VENDOR_SRC="$TMPDIR/vendor"
+  fi
+
+  if [ -n "$VENDOR_SRC" ]; then
+    if [ -d "$VENDOR_SRC/lib" ] && [ "$ARM64_OPT" != "y" ]; then
+      mkdir -p /vendor/lib 2>/dev/null || true
+      cp -af "$VENDOR_SRC"/lib/* /vendor/lib/ 2>/dev/null && ui_print "✓ Vendor lib (32-bit)" || true
+    elif [ "$ARM64_OPT" = "y" ] && [ -d "$VENDOR_SRC/lib" ]; then
+      ui_print "⊘ Skipping 32-bit libs (ARM64 opt)"
+    fi
+    if [ -d "$VENDOR_SRC/lib64" ]; then
+      mkdir -p /vendor/lib64 2>/dev/null || true
+      cp -af "$VENDOR_SRC"/lib64/* /vendor/lib64/ 2>/dev/null && ui_print "✓ Vendor lib64" || true
+    fi
+    if [ -d "$VENDOR_SRC/firmware" ]; then
+      mkdir -p /vendor/firmware 2>/dev/null || true
+      cp -af "$VENDOR_SRC"/firmware/* /vendor/firmware/ 2>/dev/null && ui_print "✓ Firmware" || true
+    fi
+    if [ -d "$VENDOR_SRC/etc" ]; then
+      mkdir -p /vendor/etc 2>/dev/null || true
+      cp -af "$VENDOR_SRC"/etc/* /vendor/etc/ 2>/dev/null && ui_print "✓ Vendor configs" || true
+    fi
+    if [ -d "$VENDOR_SRC/gpu" ]; then
+      mkdir -p /vendor/gpu 2>/dev/null || true
+      cp -af "$VENDOR_SRC"/gpu/* /vendor/gpu/ 2>/dev/null && ui_print "✓ GPU profiles" || true
+    fi
+  else
+    ui_print "⚠ No vendor source directory found in zip"
+  fi
+
+  if [ -d "$TMPDIR/system/lib" ] && [ "$ARM64_OPT" != "y" ]; then
+    if [ -n "$ACTUAL_SYSTEM_PATH" ] && [ -d "$ACTUAL_SYSTEM_PATH" ]; then
+      mkdir -p "${ACTUAL_SYSTEM_PATH}/lib" 2>/dev/null || true
+      cp -af "$TMPDIR"/system/lib/* "${ACTUAL_SYSTEM_PATH}/lib/" 2>/dev/null && ui_print "✓ System lib (${ACTUAL_SYSTEM_PATH})" || true
+    elif [ -d /system_root/system ]; then
+      mkdir -p /system_root/system/lib 2>/dev/null || true
+      cp -af "$TMPDIR"/system/lib/* /system_root/system/lib/ 2>/dev/null && ui_print "✓ System lib" || true
+    elif [ -d /system ]; then
+      mkdir -p /system/lib 2>/dev/null || true
+      cp -af "$TMPDIR"/system/lib/* /system/lib/ 2>/dev/null && ui_print "✓ System lib" || true
+    fi
+  fi
+
+  if [ -d "$TMPDIR/system/lib64" ]; then
+    if [ -n "$ACTUAL_SYSTEM_PATH" ] && [ -d "$ACTUAL_SYSTEM_PATH" ]; then
+      mkdir -p "${ACTUAL_SYSTEM_PATH}/lib64" 2>/dev/null || true
+      cp -af "$TMPDIR"/system/lib64/* "${ACTUAL_SYSTEM_PATH}/lib64/" 2>/dev/null && ui_print "✓ System lib64 (${ACTUAL_SYSTEM_PATH})" || true
+    elif [ -d /system_root/system ]; then
+      mkdir -p /system_root/system/lib64 2>/dev/null || true
+      cp -af "$TMPDIR"/system/lib64/* /system_root/system/lib64/ 2>/dev/null && ui_print "✓ System lib64" || true
+    elif [ -d /system ]; then
+      mkdir -p /system/lib64 2>/dev/null || true
+      cp -af "$TMPDIR"/system/lib64/* /system/lib64/ 2>/dev/null && ui_print "✓ System lib64" || true
+    fi
+  fi
+
+  ui_print " "
+  ui_print "Setting permissions..."
+
+  # Batch chmod — O(1) forks instead of O(n)
+  find /vendor/lib* -type f -name "*.so" -exec chmod 0644 {} + 2>/dev/null || true
+  find /vendor/firmware -type f \( -name "*.fw" -o -name "*.bin" -o -name "*.mbn" \) -exec chmod 0644 {} + 2>/dev/null || true
+  find /vendor/etc/permissions -type f -name "*.xml" -exec chmod 0644 {} + 2>/dev/null || true
+  find /vendor/etc -type f -name "*.txt" -exec chmod 0644 {} + 2>/dev/null || true
+  find /system*/lib* -type f -name "*.so" -exec chmod 0644 {} + 2>/dev/null || true
+  if [ -n "$ACTUAL_SYSTEM_PATH" ]; then
+    find "${ACTUAL_SYSTEM_PATH}"/lib* -type f -name "*.so" -exec chmod 0644 {} + 2>/dev/null || true
+  fi
+
+  # Run the dedicated permissions script if present (handles firmware, etc.)
+  if [ -f "$TMPDIR/files.sh" ]; then
+    sh "$TMPDIR/files.sh" 2>/dev/null || true
+    ui_print "✓ Extended permissions applied (files.sh)"
+  fi
+
+  ui_print "✓ Permissions set (SELinux will auto-restore)"
+
+  if [ "$PLT" = "y" ]; then
+    ui_print " "
+    ui_print "Patching public libraries..."
+
+    LINE_TO_ADD='gpu++.so'
+    PATCH_COUNT=0
+
+    for f in /vendor/etc/public.libraries*.txt; do
+      [ -f "$f" ] || continue
+      ui_print "  Processing: $(basename "$f")"
+      [ -s "$f" ] && [ -n "$(tail -c1 "$f" 2>/dev/null)" ] && echo >> "$f"
+      if ! grep -qF -- "$LINE_TO_ADD" "$f" 2>/dev/null; then
+        echo "$LINE_TO_ADD" >> "$f" && ui_print "    ✓ Added: '$LINE_TO_ADD'" && PATCH_COUNT=$((PATCH_COUNT + 1))
+      else
+        ui_print "    - Already patched"
+      fi
+    done
+
+    if [ "$PATCH_COUNT" -gt 0 ]; then
+      ui_print "✓ Patched $PATCH_COUNT file(s)"
+    else
+      ui_print "✓ No patching needed"
+    fi
+  else
+    ui_print " "
+    ui_print "⊘ Public libraries patching disabled"
+  fi
+
+  if [ "$QGL" = "y" ] && [ -f "$TMPDIR/qgl_config.txt" ]; then
+    ui_print " "
+    ui_print "Installing QGL configuration..."
+    mkdir -p /data/vendor/gpu 2>/dev/null || true
+    chmod 0755 /data/vendor/gpu 2>/dev/null || true
+    if cp -f "$TMPDIR/qgl_config.txt" /data/vendor/gpu/qgl_config.txt 2>/dev/null; then
+      chmod 0644 /data/vendor/gpu/qgl_config.txt 2>/dev/null || true
+      ui_print "✓ QGL config installed"
+    else
+      ui_print "⚠ QGL installation failed"
+    fi
+  elif [ "$QGL" = "y" ]; then
+    ui_print " "
+    ui_print "⚠ QGL enabled but config file missing"
+  else
+    ui_print " "
+    ui_print "⊘ QGL configuration disabled"
+  fi
+
+  ui_print " "
+  ui_print "===================================="
+  ui_print "GPU Cache Cleaning"
+  ui_print "===================================="
+  ui_print " "
+  ui_print "This may take 30-60 seconds..."
+
+  {
+    find /data/user_de -type d \( \
+      -iname '*shader*' -o -iname '*gpucache*' -o \
+      -iname '*graphitecache*' -o -iname '*pipeline*' \
+    \) -exec rm -rf {} + 2>/dev/null || true
+  } &
+
+  {
+    find /data/data -type d \( \
+      -iname '*shader*' -o -iname '*gpucache*' -o \
+      -iname '*graphitecache*' -o -iname '*pipeline*' -o -iname '*program*cache*' \
+    \) -exec rm -rf {} + 2>/dev/null || true
+  } &
+
+  {
+    find /data_mirror/data_ce /data_mirror/data_de -type d \( \
+      -iname '*shader*' -o -iname '*gpucache*' -o -iname '*graphitecache*' \
+    \) -exec rm -rf {} + 2>/dev/null || true
+  } &
+
+  wait
+
+  ui_print "✓ App shader caches cleaned"
+
+  rm -rf /data/system/graphicsstats/* 2>/dev/null || true
+  rm -rf /data/dalvik-cache/* 2>/dev/null || true
+  rm -rf /data/cache/* 2>/dev/null || true
+  rm -rf /data/system/package_cache/* 2>/dev/null || true
+  rm -rf /data/resource-cache/* 2>/dev/null || true
+
+  ui_print "✓ System caches cleaned"
+
+  find /data/data/* -type d \( -iname "*camera*" -o -iname "*snapcam*" \) -exec sh -c 'rm -rf "$1"/*' _ {} \; 2>/dev/null || true
+
+  ui_print "✓ All caches cleaned"
+
+  ui_print " "
+  ui_print "===================================="
+  ui_print "Installation Complete!"
+  ui_print "===================================="
+  ui_print " "
+  ui_print "Drivers installed directly to system!"
+  ui_print "Changes are permanent until uninstalled."
+  ui_print " "
+  ui_print "NOTE: SELinux contexts will auto-restore on boot"
+fi
+
+# ========================================
+# Final Summary (Both Modes)
+# ========================================
+ui_print " "
+ui_print "===================================="
+ui_print "Summary"
+ui_print "===================================="
+ui_print " "
+ui_print "Installation Mode: $MODE"
+
+if ! $BOOTMODE; then
+  ui_print " "
+  ui_print "Configuration Applied:"
+  ui_print "  • PLT Patching: $PLT"
+  ui_print "  • QGL Config: $QGL"
+  ui_print "  • ARM64 Opt: $ARM64_OPT"
+  ui_print " "
+  ui_print "Crash Logs Location:"
+  ui_print "  ${LOG_BASE_DIR:-/sdcard/Adreno_Driver}/Bootloop/"
+  ui_print " "
+  ui_print "→ last_kmsg: Previous boot kernel log"
+  ui_print "→ pstore: Console crash dumps"
+  ui_print "→ dmesg: Current recovery kernel log"
+fi
+
+ui_print " "
+ui_print "===================================="
+ui_print "IMPORTANT: Reboot your device now"
+ui_print "===================================="
+ui_print " "
+ui_print "Log saved to: $LOGFILE"
+ui_print " "
+
+exit 0

@@ -1,0 +1,91 @@
+# ========================================
+# Adreno GPU Driver Module Configuration
+# ========================================
+# Edit these values to customize module behavior
+# y = enabled, n = disabled
+
+# Public Libraries Patching
+# Patches /vendor/etc/public.libraries*.txt files to expose gpu++.so
+# Required for zuras banch++ to work properly if available 
+# Recommended: n
+PLT=n
+
+# QGL Configuration
+# Installs qgl_config.txt to /data/vendor/gpu/
+# Enables additional Vulkan extensions and features
+# Recommended: n (only for A8xx GPUs)
+QGL=n
+
+# ========================================
+# Advanced Options
+# ========================================
+
+# ARM64 Optimization
+# Automatically removes 32-bit vendor libs on ARM64-only devices
+# Saves storage space and reduces conflicts
+# Recommended: n (set to y if your device is ARM64-only with no 32-bit apps)
+ARM64_OPT=n
+
+# Verbose Logging
+# Enables detailed logging during installation
+# Useful for troubleshooting installation issues
+# Recommended: n (set to y if having issues)
+VERBOSE=n
+
+# ========================================
+# Rendering Options
+# ========================================
+
+# Render Mode
+# Controls the graphics rendering backend used by Android
+# Options:
+#   normal      - Default Android rendering (balanced, most compatible)
+#   skiavk      - Skia with Vulkan backend (better performance on modern GPUs)
+#   skiagl      - Skia with OpenGL backend (better compatibility with older apps/games)
+#   skiavk_all  - Aggressive SkiaVK mode with forced app restarts (maximum performance, may cause issues)
+#
+# Details:
+#   normal      - Standard Android renderer, no modifications
+#   skiavk      - Sets debug.hwui.renderer=skiavk for improved GPU performance
+#   skiagl      - Sets debug.hwui.renderer=skiagl for OpenGL compatibility
+#   skiavk_all  - Forces SkiaVK + threaded backend + force-stops all apps on boot
+#
+# Recommended: normal (change only if you experience rendering issues or want better performance)
+# Advanced users: Try skiavk for performance, skiagl for compatibility
+RENDER_MODE=normal
+
+# ========================================
+# Game Exclusion Daemon
+# ========================================
+# Automatically switches debug.hwui.renderer between skiavk and skiagl
+# depending on whether a game from the exclusion list is currently running.
+#
+# ONLY effective when RENDER_MODE=skiavk or RENDER_MODE=skiavk_all.
+# Has no effect in normal or skiagl modes (ignored silently).
+#
+# WHY THIS EXISTS:
+#   Native-Vulkan games (PUBG, Genshin Impact, CoD Mobile, etc.) create their
+#   own VkDevice from a native thread. If HWUI also holds a VkDevice (skiavk),
+#   the custom Adreno driver cannot handle two concurrent vkCreateDevice calls
+#   in the same process → SIGSEGV / GPU fault (dual-VkDevice crash).
+#   This daemon keeps HWUI on skiagl while any such game is running, then
+#   restores skiavk when all listed games have exited.
+#
+# HOW IT WORKS (zero-overhead event-driven architecture):
+#   1. A single main daemon streams logcat -b events, blocking in the kernel
+#      (epoll/read syscall) between events — zero CPU while no apps are opening.
+#   2. On detecting an am_proc_start event matching an excluded package, the
+#      renderer is switched to skiagl and a sub-daemon is spawned for that PID.
+#   3. The sub-daemon checks /proc/$PID once per second (sleep 1 =
+#      TASK_INTERRUPTIBLE kernel state — effectively zero CPU overhead).
+#      When the game closes, /proc/$PID disappears and the sub-daemon wakes
+#      immediately, decrements the active game counter, and restores skiavk
+#      if no other listed games remain open.
+#   4. Between gaming sessions: no sub-daemons exist. Main daemon is asleep
+#      in kernel. Total overhead = zero.
+#
+# Packages monitored: defined in game_exclusion_list.sh (Groups 1 and 2).
+# Edit the list via Adreno Manager WebUI → Config → Game Exclusion List.
+#
+# Recommended: y when RENDER_MODE=skiavk or skiavk_all
+GAME_EXCLUSION_DAEMON=n
