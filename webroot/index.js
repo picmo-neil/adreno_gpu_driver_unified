@@ -2646,37 +2646,57 @@ async function applyRenderNow() {
             }
 
             // Check auto-degrade marker (post-fs-data degraded this boot already)
+            // NOTE: post-fs-data.sh now only degrades on risky+no_driver (driver .so absent).
+            // blocked is no longer a degrade trigger there, but old state files may exist.
             const _degradeResult = await exec('cat /data/local/tmp/adreno_skiavk_degraded 2>/dev/null || echo ""');
             const _degradeReason = (_degradeResult.stdout || '').trim();
             if (_degradeReason) {
-                logToTerminal(`⛔ [GATE-2] Auto-degrade active this boot: "${_degradeReason}"`, 'error');
-                logToTerminal('    post-fs-data.sh degraded skiavk → skiagl for structural incompatibility.', 'error');
-                logToTerminal('    Force-stop ABORTED. Prop-only mode applied.', 'error');
-                _vkForceStopAllowed = false;
-                _vkPropOnlyMode     = true;
-                _vkGateAbortReason  = `Boot-time auto-degrade: ${_degradeReason}`;
+                // Check if it's a no-driver degrade (hard) vs old blocked degrade (warn only now)
+                const _isNoDriver = _degradeReason.includes('no_driver');
+                if (_isNoDriver) {
+                    logToTerminal(`⛔ [GATE-2] Boot auto-degrade: "${_degradeReason}"`, 'error');
+                    logToTerminal('    No Vulkan driver .so found — skiavk cannot function.', 'error');
+                    logToTerminal('    Force-stop ABORTED. Props applied in skiagl mode.', 'error');
+                    _vkForceStopAllowed = false;
+                    _vkPropOnlyMode     = true;
+                    _vkGateAbortReason  = `No Vulkan driver: ${_degradeReason}`;
+                } else {
+                    // Old blocked/risky degrade — warn but proceed (user chose skiavk)
+                    logToTerminal(`⚠️  [GATE-2] Stale boot auto-degrade marker: "${_degradeReason}"`, 'warn');
+                    logToTerminal('    This was set by an older/stricter check. Applying skiavk anyway as requested.', 'warn');
+                    logToTerminal('    If Vulkan fails silently, HWUI falls back to GL automatically.', 'warn');
+                }
             } else if (_structLevel === 'blocked') {
-                logToTerminal(`⛔ [GATE-2] Structural score BLOCKED (${_structScore}/100): ${_structReasons || 'see boot log'}`, 'error');
-                logToTerminal('    This device cannot safely run Vulkan with the current driver/kernel/vendor.', 'error');
-                logToTerminal('    Applying skiavk prop only — force-stop ABORTED.', 'error');
-                _vkForceStopAllowed = false;
-                _vkPropOnlyMode     = true;
-                _vkGateAbortReason  = `Structural VK score: BLOCKED (${_structScore}/100)`;
+                // LENIENT: blocked is now a warning, not an abort.
+                // Many real devices that work fine with skiavk score "blocked" due to
+                // conservative heuristics (old vendor partition, gralloc version mismatch, etc).
+                logToTerminal(`⚠️  [GATE-2] Compat score BLOCKED (${_structScore}/100) — applying skiavk anyway`, 'warn');
+                logToTerminal(`    Reasons: ${_structReasons || 'see boot log'}`, 'warn');
+                logToTerminal('    If Vulkan fails HWUI falls back to GL automatically — no crash, just GL rendering.', 'warn');
+                logToTerminal('    Disable skiavk only if you see visual corruption or persistent black screen.', 'warn');
             } else if (_structLevel === 'risky' || _structLevel === 'marginal') {
-                logToTerminal(`⚠️  [GATE-2] Structural score ${_structLevel.toUpperCase()} (${_structScore}/100) — force-stop DISABLED.`, 'warn');
-                logToTerminal('    skiavk prop applied. Run a full boot to validate Vulkan before using skiavk_all.', 'warn');
-                // risky/marginal: service.sh downgrades skiavk_all → skiavk (no force-stop).
-                // Mirror that decision here.
+                logToTerminal(`⚠️  [GATE-2] Compat score ${_structLevel.toUpperCase()} (${_structScore}/100)`, 'warn');
+                logToTerminal('    skiavk prop applied. Force-stop disabled as precaution on risky/marginal devices.', 'warn');
                 if (renderMode === 'skiavk_all') {
                     _vkForceStopAllowed = false;
                     _vkPropOnlyMode     = true;
-                    _vkGateAbortReason  = `Structural VK score: ${_structLevel} (${_structScore}/100) — force-stop too risky`;
+                    _vkGateAbortReason  = `Compat score ${_structLevel} (${_structScore}/100) — force-stop disabled`;
                 }
             } else {
                 logToTerminal(`✅ [GATE-2] Structural score OK (${_structScore}/100, level="${_structLevel || 'no score yet'}")`, 'success');
             }
 
-            // ── Check 3: ro.hwui.use_vulkan gate ─────────────────────────────────
+            // ── Info: skiavkthreaded vs debug.hwui.renderer=skiavk ───────────────
+            // These are different things. Clarify so the user isn't confused when
+            // they see "skiavkthreaded" in dumpsys gfxinfo Pipeline output.
+            logToTerminal('ℹ️  [INFO] Renderer notes:', 'info');
+            logToTerminal('    debug.hwui.renderer=skiavk → tells HWUI to use the Skia Vulkan backend.', 'info');
+            logToTerminal('    debug.renderengine.backend=skiavkthreaded → tells SurfaceFlinger RenderEngine to use threaded Vulkan compositing.', 'info');
+            logToTerminal('    Both are set by this module. They are independent props for different subsystems.', 'info');
+            logToTerminal('    If Vulkan init fails, HWUI silently falls back to GL — the prop stays "skiavk" but apps run on GL.', 'info');
+            logToTerminal('    Use: dumpsys gfxinfo <pkg> | grep Pipeline   to verify actual runtime renderer.', 'info');
+
+
             // Some device trees set this to "false" to explicitly disable HWUI Vulkan.
             // HWUI checks this BEFORE vkCreateInstance — if false, the skiavk prop
             // is silently ignored and all apps run on GL. Force-stop would then:
@@ -3193,8 +3213,11 @@ async function applyRenderNow() {
                     // [1] GAME_EXCLUSION_PKGS (written with separate printf for JS interpolation)
                     `GAME_EXCLUSION_PKGS="${exclPkgs}"`,
                     // [2..] body lines (appended in one printf call)
-                    '_RESTORE=$(getprop debug.hwui.renderer 2>/dev/null || echo skiavk)',
-                    '[ -n "$_RESTORE" ] || _RESTORE=skiavk',
+                    // FIX: hardcode _RESTORE=skiavk. Reading live prop captures 'skiavk_all'
+                    // (invalid renderer value) if a prior daemon exit left that stale prop,
+                    // causing a bad restore on the next game exit. This daemon is only
+                    // spawned for skiavk/skiavk_all modes; restore target is always 'skiavk'.
+                    '_RESTORE=skiavk',
                     '_SF=/data/local/tmp/adreno_daemon_active',
                     'printf "0\\n" > "$_SF" 2>/dev/null || true',
                     // /proc scanner — returns 0 if any excluded pkg is alive
@@ -3209,10 +3232,12 @@ async function applyRenderNow() {
                     '      case "$_rb" in *"${_gb}"*) return 0;; esac',
                     '    done',
                     '  done; return 1; }',
-                    // fast pre-filter: string-only match, no /proc scan
-                    '_ie() { local _p="$1" _ge _gb; for _ge in $GAME_EXCLUSION_PKGS; do',
-                    '  _gb="${_ge%\\*}"; case "$_p" in *"${_gb}"*) return 0;; esac',
-                    '  done; return 1; }',
+                     // FIX: _ie() now uses exact glob matching, same as _game_pkg_excluded().
+                     // Prior substring match (*"${_gb}"*) caused false positives:
+                     // e.g. com.tencent.ig pattern would match com.tencent.igplugin.
+                     '_ie() { local _p="$1" _ge; for _ge in $GAME_EXCLUSION_PKGS; do',
+                     '  case "$_p" in $_ge) return 0;; esac',
+                     '  done; return 1; }',
                     // startup scan: handle pkg already running when daemon starts
                     '_ae && { resetprop debug.hwui.renderer skiagl 2>/dev/null || true;',
                     '  printf "1\\n" > "$_SF" 2>/dev/null || true;',
@@ -3221,30 +3246,40 @@ async function applyRenderNow() {
                     'while true; do',
                     '  logcat -b events -v tag am_proc_start:I am_proc_died:I 2>/dev/null |',
                     '  while IFS= read -r _ln; do',
-                    '    _ga=$(cat "$_SF" 2>/dev/null || printf 0)',
-                    '    _f="${_ln#*[}"; _pkg=$(printf "%s" "${_f%%]*}" | cut -d, -f4 | tr -d " ")',
-                    '    [ -n "$_pkg" ] || continue',
-                    '    case "$_ln" in',
-                    '      *am_proc_start*)',
-                    '        [ "$_ga" = 1 ] && continue',
-                    '        _ie "$_pkg" || continue',
-                    '        _ae || continue',  // verify live (guards stale logcat buffer entries)
-                    '        resetprop debug.hwui.renderer skiagl 2>/dev/null || true',
-                    '        printf "1\\n" > "$_SF" 2>/dev/null || true',
-                    '        printf "[ADRENO][DAEMON] start:%s->skiagl\\n" "$_pkg" > /dev/kmsg 2>/dev/null || true',
-                    '        ;;',
-                    '      *am_proc_died*)',
-                    '        [ "$_ga" = 0 ] && continue',
-                    '        _ie "$_pkg" || continue',
-                    '        _ae && continue',  // other excluded pkgs still running
-                    '        resetprop debug.hwui.renderer "$_RESTORE" 2>/dev/null || true',
-                    '        printf "0\\n" > "$_SF" 2>/dev/null || true',
-                    '        printf "[ADRENO][DAEMON] died:%s->%s\\n" "$_pkg" "$_RESTORE" > /dev/kmsg 2>/dev/null || true',
-                    '        ;;',
-                    '    esac',
-                    '  done',
-                    '  sleep 2',  // logcat exited (OEM quirk) — restart
-                    'done',
+                     '    _ga=$(cat "$_SF" 2>/dev/null || printf 0)',
+                     // FIX: extract _fb (raw fields) here; extract _pkg per-branch.
+                     // am_proc_start: [userId,pid,uid,processName,type,component] f4=pkg
+                     // am_proc_died:  [userId,pid,processName,adj,procState]      f3=pkg
+                     // Prior shared cut -d,-f4 for both events = BUG: am_proc_died f4 is
+                     // the adj integer (e.g. '18'), not the package name. _ie('18') never
+                     // matched, so _SF was never reset to 0 after app exit. Next open:
+                     // _ga=1 -> continue -> entire am_proc_start event SKIPPED -> no switch.
+                     '    _f="${_ln#*[}"; _fb="${_f%%]*}"',
+                     '    case "$_ln" in',
+                     '      *am_proc_start*)',
+                     '        _pkg=$(printf "%s" "$_fb" | cut -d, -f4 | tr -d " ")',
+                     '        [ -n "$_pkg" ] || continue',
+                     '        [ "$_ga" = 1 ] && continue',
+                     '        _ie "$_pkg" || continue',
+                     '        _ae || continue',  // verify live (guards stale logcat buffer entries)
+                     '        resetprop debug.hwui.renderer skiagl 2>/dev/null || true',
+                     '        printf "1\\n" > "$_SF" 2>/dev/null || true',
+                     '        printf "[ADRENO][DAEMON] start:%s->skiagl\\n" "$_pkg" > /dev/kmsg 2>/dev/null || true',
+                     '        ;;',
+                     '      *am_proc_died*)',
+                     '        _pkg=$(printf "%s" "$_fb" | cut -d, -f3 | tr -d " ")',
+                     '        [ -n "$_pkg" ] || continue',
+                     '        [ "$_ga" = 0 ] && continue',
+                     '        _ie "$_pkg" || continue',
+                     '        _ae && continue',  // other excluded pkgs still running
+                     '        resetprop debug.hwui.renderer "$_RESTORE" 2>/dev/null || true',
+                     '        printf "0\\n" > "$_SF" 2>/dev/null || true',
+                     '        printf "[ADRENO][DAEMON] died:%s->%s\\n" "$_pkg" "$_RESTORE" > /dev/kmsg 2>/dev/null || true',
+                     '        ;;',
+                     '    esac',
+                     '  done',
+                     '  sleep 2',  // logcat exited (OEM quirk) -- restart
+                     'done',
                 ];
 
                 // Write shebang → create/truncate file

@@ -533,129 +533,137 @@ esac
 if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
   if cmd_exists resetprop; then
 
-    # Detect whether Zygisk is active.
-    # Used only for the log message — PATH B runs regardless.
-    _ZYGISK_ACTIVE=false
-    if getprop ro.zygisk.enabled 2>/dev/null | grep -q '1\|true'; then
-      _ZYGISK_ACTIVE=true
-    elif [ -f "${MODDIR}/zygisk/arm64-v8a.so" ] || [ -f "${MODDIR}/zygisk/armeabi-v7a.so" ]; then
-      # .so present but Zygisk might not be loaded — companion handles this.
-      _ZYGISK_ACTIVE=true
-    fi
-
-    log_service "========================================"
-    log_service "GAME COMPAT DAEMON: launching"
-    if [ "$_ZYGISK_ACTIVE" = "true" ]; then
-      log_service "  Launch detection: Zygisk companion (zero overhead)"
-    else
-      log_service "  Launch detection: /proc polling at 3s (Zygisk not active)"
-      log_service "  Enable ReZygisk/ZygiskNext for zero-overhead launch detection"
-    fi
-    log_service "  Death detection + GOS watchdog: /proc polling at 3s"
-    log_service "========================================"
-    unset _ZYGISK_ACTIVE
-
-    (
-      # ── Restore target ──────────────────────────────────────────────────
-      # Hardcode from config RENDER_MODE rather than reading the live prop.
-      # Reading getprop at daemon start (boot+2s) is racy: vendor watchdogs
-      # (MIUI/HyperOS prop watchers, hardware-composer restarts) can override
-      # debug.hwui.renderer between this capture and the game exit restore,
-      # causing restore to a stale intermediate value instead of the intended
-      # mode. RENDER_MODE is the authoritative configured value; use it directly.
-      _RESTORE="skiavk"
-      case "$RENDER_MODE" in skiavk_all) _RESTORE="skiavk_all" ;; esac
-
-      # State file path — shared with Zygisk companion (main.cpp)
-      _SF="/data/local/tmp/adreno_daemon_active"
-
-      # ── _any_excl_running ──────────────────────────────────────────────
-      # Scan /proc for any running process whose base package name matches
-      # the exclusion list. Returns 0 (true) if any found.
-      #
-      # /proc/<pid>/cmdline on Android: "com.pkg\0processname\0...\0"
-      # IFS= read -r stops at the first NUL → reads argv[0] = package name.
-      # Strip :subprocess suffix before matching.
-      _any_excl_running() {
-        local _cf _rb _rbase
-        for _cf in /proc/[0-9]*/cmdline; do
-          [ -f "$_cf" ] || continue
-          { IFS= read -r _rb; } < "$_cf" 2>/dev/null || continue
-          [ -n "$_rb" ] || continue
-          _rbase="${_rb%%:*}"
-          _game_pkg_excluded "$_rbase" && return 0
-        done
-        return 1
-      }
-
-      # ── Startup scan ───────────────────────────────────────────────────
-      # Handle the edge case where a listed game was already running when
-      # this daemon started (e.g. opened during early boot before service.sh
-      # reached this point). Zygisk companion fires at Zygote fork time —
-      # before boot_completed — so this only catches games that were already
-      # in /proc when service.sh reached this block.
-      { IFS= read -r _sf_val; } < "$_SF" 2>/dev/null || _sf_val="0"
-      if [ "$_sf_val" != "1" ] && _any_excl_running; then
-        resetprop debug.hwui.renderer skiagl 2>/dev/null || true
-        printf '1\n' > "$_SF" 2>/dev/null || true
-        printf '[ADRENO][DAEMON] startup: excl pkg already running → skiagl (restore=%s)\n' \
-          "$_RESTORE" > /dev/kmsg 2>/dev/null || true
+    # ── Check if adreno_ged (native binary) is already running ─────────────
+    # post-fs-data.sh launches adreno_ged and writes its PID to adreno_ged_pid.
+    # adreno_ged handles ALL detection via kernel interfaces (zero overhead):
+    #   - Launch: netlink PROC_EVENT_FORK + PROC_EVENT_COMM
+    #   - Death:  pidfd_open + epoll
+    #   - Startup scan at daemon start
+    # If it's alive, the full /proc polling subshell below is completely
+    # redundant — it would scan /proc every second for no reason AND create a
+    # second concurrent writer to debug.hwui.renderer.
+    # In that case we only need a slim GOS watchdog that re-applies skiagl
+    # if Samsung GOS / OEM perf daemons reset the prop mid-session.
+    _GED_PID_FILE="/data/local/tmp/adreno_ged_pid"
+    _GED_ACTIVE_FILE="/data/local/tmp/adreno_ged_active"
+    _GED_RUNNING=false
+    _ged_pid=""
+    if [ -f "$_GED_PID_FILE" ]; then
+      { IFS= read -r _ged_pid; } < "$_GED_PID_FILE" 2>/dev/null || _ged_pid=""
+      if [ -n "$_ged_pid" ] && kill -0 "$_ged_pid" 2>/dev/null; then
+        _GED_RUNNING=true
       fi
-      unset _sf_val
+    fi
 
-      # ── Polling loop ────────────────────────────────────────────────────
-      # Single unified loop. Fixed 3s interval — no adaptive logic needed
-      # because there is no logcat health file to measure.
-      #
-      # STATE=0 (no game active):
-      #   Check if any excluded pkg launched (fallback for when Zygisk is
-      #   not active, or for the rare case where Zygisk companion failed).
-      #
-      # STATE=1 (game active — renderer = skiagl):
-      #   GOS/OEM watchdog: Samsung GOS and OEM perf daemons reset
-      #   debug.hwui.renderer during game sessions. Re-apply skiagl
-      #   immediately if the prop was changed.
-      #   Death detection: when all excluded pkgs exit, restore renderer.
-      #
-      # COST: ~1-3ms per 3s cycle (one /proc glob walk).
-      # Between cycles the process sleeps — zero CPU.
-      while true; do
-        sleep 3
+    log_service "========================================"
+    log_service "GAME COMPAT DAEMON"
+    if [ "$_GED_RUNNING" = "true" ]; then
+      log_service "  adreno_ged running (PID=${_ged_pid}) — all detection delegated to binary"
+      log_service "  Launch: netlink PROC_EVENT_FORK+COMM (zero overhead)"
+      log_service "  Death : pidfd_open + epoll (zero overhead)"
+      log_service "  service.sh: GOS prop watchdog only (no /proc scan)"
+    else
+      log_service "  adreno_ged not running — launching /proc polling fallback"
+    fi
+    log_service "========================================"
+    unset _ged_pid _GED_PID_FILE
 
-        { IFS= read -r _ps; } < "$_SF" 2>/dev/null || _ps="0"
+    if [ "$_GED_RUNNING" = "true" ]; then
 
-        if [ "$_ps" = "0" ]; then
-          # STATE=0: no game running. Detect if one launched without Zygisk.
-          if _any_excl_running; then
+      # ── GOS/OEM prop watchdog — slim, no /proc scan ─────────────────────
+      # When adreno_ged state file shows a game is active (value "1"), re-apply
+      # skiagl immediately if Samsung GOS or an OEM perf daemon resets the prop.
+      # Sleeps 3s per cycle; does nothing (no getprop, no /proc) when no game
+      # is running — truly zero overhead between game sessions.
+      # Reads adreno_ged's own state file (adreno_ged_active) so there is no
+      # confusion between the two binaries' state files.
+      (
+        _GOS_SF="$_GED_ACTIVE_FILE"  # same state file adreno_ged writes
+        while true; do
+          sleep 3
+          { IFS= read -r _gs; } < "$_GOS_SF" 2>/dev/null || _gs="0"
+          [ "$_gs" != "1" ] && continue  # no game active — nothing to watch
+          _gc=$(getprop debug.hwui.renderer 2>/dev/null || echo '')
+          if [ -n "$_gc" ] && [ "$_gc" != "skiagl" ]; then
             resetprop debug.hwui.renderer skiagl 2>/dev/null || true
-            printf '1\n' > "$_SF" 2>/dev/null || true
-            printf '[ADRENO][POLL] excl pkg detected (no Zygisk event) → skiagl (restore=%s)\n' \
-              "$_RESTORE" > /dev/kmsg 2>/dev/null || true
+            printf '[ADRENO][SVC-GOS] renderer reset by GOS/OEM (%s→skiagl) re-applied\n' \
+              "$_gc" > /dev/kmsg 2>/dev/null || true
           fi
-        else
-          # STATE=1: game running, renderer should be skiagl.
+        done
+      ) >/dev/null 2>&1 &
+      log_service "[OK] GOS prop watchdog PID=$! — 3s check while game active; zero /proc scanning (adreno_ged owns detection)"
 
-          # GOS/OEM prop watchdog: re-apply skiagl if something reset it.
-          # Guard: only act if getprop returned a non-empty value.
-          _cur=$(getprop debug.hwui.renderer 2>/dev/null || echo '')
-          if [ -n "$_cur" ] && [ "$_cur" != "skiagl" ]; then
-            resetprop debug.hwui.renderer skiagl 2>/dev/null || true
-            printf '[ADRENO][POLL] renderer reset by GOS/OEM (%s→skiagl) re-applied\n' \
-              "$_cur" > /dev/kmsg 2>/dev/null || true
-          fi
-          unset _cur
+    else
 
-          # Death detection: restore renderer when all excluded pkgs have exited.
-          if ! _any_excl_running; then
-            resetprop debug.hwui.renderer "$_RESTORE" 2>/dev/null || true
-            printf '0\n' > "$_SF" 2>/dev/null || true
-            printf '[ADRENO][POLL] all excl pkgs gone → %s\n' \
-              "$_RESTORE" > /dev/kmsg 2>/dev/null || true
-          fi
+      # ── Full /proc polling daemon — fallback when binary is absent ───────
+      # This path only runs if adreno_ged couldn't start (binary missing,
+      # SELinux denial, kernel too old for netlink, etc.).
+      # Handles launch detection + death detection + GOS watchdog itself.
+      (
+        # FIX: restore target is always "skiavk", never "skiavk_all".
+        # "skiavk_all" is not a valid debug.hwui.renderer value — HWUI silently
+        # falls back to the device default for any unrecognised string.
+        # skiavk_all is a boot-time force-stop mode, not a renderer name.
+        _RESTORE="skiavk"
+
+        # Fallback uses adreno_daemon_active (no ged binary, so no ged_active)
+        _SF="/data/local/tmp/adreno_daemon_active"
+
+        _any_excl_running() {
+          local _cf _rb _rbase
+          for _cf in /proc/[0-9]*/cmdline; do
+            [ -f "$_cf" ] || continue
+            { IFS= read -r _rb; } < "$_cf" 2>/dev/null || continue
+            [ -n "$_rb" ] || continue
+            _rbase="${_rb%%:*}"
+            _game_pkg_excluded "$_rbase" && return 0
+          done
+          return 1
+        }
+
+        # Startup scan
+        { IFS= read -r _sf_val; } < "$_SF" 2>/dev/null || _sf_val="0"
+        if [ "$_sf_val" != "1" ] && _any_excl_running; then
+          resetprop debug.hwui.renderer skiagl 2>/dev/null || true
+          printf '1\n' > "$_SF" 2>/dev/null || true
+          printf '[ADRENO][POLL-FB] startup: excl pkg running → skiagl\n' \
+            > /dev/kmsg 2>/dev/null || true
         fi
-      done
-    ) >/dev/null 2>&1 &
-    log_service "[OK] Game compat daemon PID=$! — Zygisk launch hook + 3s poll (death/GOS watchdog), skiagl↔${RENDER_MODE}"
+        unset _sf_val
+
+        # Poll every 1s — tighter window than old 3s to catch HWUI init in time
+        while true; do
+          sleep 1
+          { IFS= read -r _ps; } < "$_SF" 2>/dev/null || _ps="0"
+          if [ "$_ps" = "0" ]; then
+            if _any_excl_running; then
+              resetprop debug.hwui.renderer skiagl 2>/dev/null || true
+              printf '1\n' > "$_SF" 2>/dev/null || true
+              printf '[ADRENO][POLL-FB] excl pkg detected → skiagl\n' \
+                > /dev/kmsg 2>/dev/null || true
+            fi
+          else
+            _cur=$(getprop debug.hwui.renderer 2>/dev/null || echo '')
+            if [ -n "$_cur" ] && [ "$_cur" != "skiagl" ]; then
+              resetprop debug.hwui.renderer skiagl 2>/dev/null || true
+              printf '[ADRENO][POLL-FB] GOS reset (%s→skiagl)\n' \
+                "$_cur" > /dev/kmsg 2>/dev/null || true
+            fi
+            unset _cur
+            if ! _any_excl_running; then
+              resetprop debug.hwui.renderer "$_RESTORE" 2>/dev/null || true
+              printf '0\n' > "$_SF" 2>/dev/null || true
+              printf '[ADRENO][POLL-FB] all excl pkgs gone → %s\n' \
+                "$_RESTORE" > /dev/kmsg 2>/dev/null || true
+            fi
+          fi
+        done
+      ) >/dev/null 2>&1 &
+      log_service "[OK] Fallback game compat daemon PID=$! — 1s /proc poll (adreno_ged not running), skiagl↔skiavk"
+
+    fi
+
+    unset _GED_RUNNING _GED_ACTIVE_FILE
   fi
 fi
 

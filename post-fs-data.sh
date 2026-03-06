@@ -1414,29 +1414,35 @@ if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
   _DEGRADE_REASON=""
 
   if [ "$VK_COMPAT_LEVEL" = "blocked" ]; then
-    if [ -f "$_FORCE_OVERRIDE_MARKER" ]; then
-      log_boot "[OVERRIDE] compat=blocked but force-override marker present — keeping $RENDER_MODE"
-      log_boot "  WARNING: Vulkan will likely fail silently on this device."
-    else
-      _DEGRADE_REASON="compat_blocked(score=${VK_COMPAT_SCORE})"
-      log_boot "[AUTO-DEGRADE] score=${VK_COMPAT_SCORE} (blocked) → skiagl"
-      log_boot "  Reason: ${VK_COMPAT_REASONS}"
-      log_boot "  To override: touch $_FORCE_OVERRIDE_MARKER && reboot"
-    fi
+    # LENIENT: blocked no longer auto-degrades to skiagl.
+    # The probe is a conservative heuristic — many real devices hit "blocked"
+    # (e.g. old vendor + gralloc mismatch) and run skiavk perfectly fine.
+    # Silently overriding the user's explicit choice is worse than a warning.
+    # We log clearly and proceed. Only risky+no_driver (driver .so absent)
+    # still degrades, because Vulkan is structurally impossible without it.
+    log_boot "========================================="
+    log_boot "[WARNING] compat=blocked (score=${VK_COMPAT_SCORE}/100) — proceeding with $RENDER_MODE anyway"
+    log_boot "  Reasons: ${VK_COMPAT_REASONS:-none recorded}"
+    log_boot "  Vulkan may fail silently on this ROM/vendor; if it does HWUI falls back to GL automatically."
+    log_boot "  To force skiagl regardless: echo skiagl > /sdcard/Adreno_Driver/Config/adreno_config.txt"
+    log_boot "========================================="
 
   elif [ "$VK_COMPAT_LEVEL" = "risky" ]; then
     if [ -f "$_FORCE_OVERRIDE_MARKER" ]; then
       log_boot "[OVERRIDE] compat=risky but force-override present — keeping $RENDER_MODE"
     elif [ "$VK_DRIVER_FOUND" = "false" ]; then
+      # No vulkan.*.so anywhere — Vulkan is structurally impossible.
+      # This is the only remaining hard auto-degrade trigger.
       _DEGRADE_REASON="compat_risky_no_driver(score=${VK_COMPAT_SCORE})"
-      log_boot "[AUTO-DEGRADE] score=${VK_COMPAT_SCORE} (risky) + no driver → skiagl"
+      log_boot "[AUTO-DEGRADE] score=${VK_COMPAT_SCORE} (risky) + no Vulkan driver .so found → skiagl"
+      log_boot "  Cannot use skiavk: no vulkan.*.so found in vendor/system paths"
     else
-      log_boot "[RISKY] score=${VK_COMPAT_SCORE} — keeping $RENDER_MODE with mitigations"
-      log_boot "  Reason: ${VK_COMPAT_REASONS}"
-      log_boot "  If skiavk causes black screen: rm $_VK_SCORE_FILE && reboot"
+      log_boot "[RISKY] score=${VK_COMPAT_SCORE} — keeping $RENDER_MODE (driver present)"
+      log_boot "  Reasons: ${VK_COMPAT_REASONS}"
+      log_boot "  If skiavk causes black screen: rm /data/local/tmp/adreno_vk_compat_score && reboot"
       if [ "$RENDER_MODE" = "skiavk_all" ]; then
         RENDER_MODE="skiavk"
-        log_boot "  [AUTO] skiavk_all → skiavk (risky: force-stop disabled)"
+        log_boot "  [AUTO] skiavk_all → skiavk (risky: force-stop disabled as precaution)"
       fi
     fi
 
@@ -1444,7 +1450,7 @@ if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
     log_boot "[MARGINAL] score=${VK_COMPAT_SCORE} — keeping $RENDER_MODE with watchdog"
     if [ "$RENDER_MODE" = "skiavk_all" ]; then
       RENDER_MODE="skiavk"
-      log_boot "  [AUTO] skiavk_all → skiavk (marginal: force-stop disabled)"
+      log_boot "  [AUTO] skiavk_all → skiavk (marginal: force-stop disabled as precaution)"
     fi
 
   else

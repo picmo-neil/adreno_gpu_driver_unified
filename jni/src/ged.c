@@ -609,8 +609,14 @@ static void startup_scan(void) {
  * main
  * ═══════════════════════════════════════════════════════════════════════════ */
 int main(int argc, char *argv[]) {
-    if (argc >= 2 && strcmp(argv[1],"skiavk_all")==0)
-        strncpy(g_restore_mode, "skiavk_all", sizeof(g_restore_mode)-1);
+    /* FIX: normalize "skiavk_all" → "skiavk".
+     * "skiavk_all" is NOT a valid debug.hwui.renderer value — HWUI silently
+     * falls back to the device default (which is skiavk on Vulkan-capable
+     * devices) when it reads an unrecognized string.  The compat daemon's
+     * only job here is to restore the Vulkan renderer after a game exits;
+     * the correct restore value is always plain "skiavk". */
+    if (argc >= 2 && (strcmp(argv[1],"skiavk")==0 || strcmp(argv[1],"skiavk_all")==0))
+        strncpy(g_restore_mode, "skiavk", sizeof(g_restore_mode)-1);
     if (argc >= 3)
         strncpy(g_moddir, argv[2], sizeof(g_moddir)-1);
 
