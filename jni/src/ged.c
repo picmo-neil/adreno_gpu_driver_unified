@@ -523,6 +523,12 @@ static void proc_scan_for_games(void) {
         char pkg[MAX_PKG_LEN];
         if(!read_cmdline(pid,pkg,sizeof(pkg))) continue;
         if(!pkg_matches(pkg)) continue;
+        /* BUG2 FIX: skip Meta background services in /proc fallback scan too.
+         * Same rationale as startup_scan and COMM handler. */
+        if (strncmp(pkg, "com.facebook.", 13) == 0 ||
+            strncmp(pkg, "com.instagram.", 14) == 0 ||
+            strcmp(pkg,  "com.whatsapp") == 0 ||
+            strcmp(pkg,  "com.whatsapp.w4b") == 0) continue;
         game_open(pkg,pid);
     }
     closedir(d);
@@ -665,42 +671,56 @@ static void handle_netlink(void) {
                 break;
             }
 
-            /* comm_could_be_app: pre-filter before the more expensive read_cmdline.
-             * Rejects: "usap64", "usap32", "<pre-initialized>", kernel threads,
-             * native daemon names.  Only names with a '.' or ≥15 chars pass —
-             * these are the only cases that could be a Java package name.
-             * This preserves the pending entry until the real package-name COMM fires.
-             */
-            if (!comm_could_be_app(comm_str)) break;   /* keep entry alive in pending */
+            /* comm_could_be_app: pre-filter. Rejects usap64/usap32, <pre-initialized>,
+             * kernel threads, native daemons. Only names with '.' or ≥15 chars pass. */
+            if (!comm_could_be_app(comm_str)) break;
 
-            /* BUG A FIX — USAP pool detection.
-             *
-             * Android Q+ USAP pool: Zygote pre-forks "unspecialized app process"
-             * instances (named "usap64"/"usap32") that sit idle in a pool. When
-             * an app launches, the system specializes an existing USAP in-place —
-             * no second fork. The PROC_EVENT_FORK fires at PRE-FORK time, which
-             * can be MINUTES before specialization. With PENDING_TIMEOUT_S=20 the
-             * pending entry expires, pending_remove() returns 0, and the game
-             * launch is missed permanently.
-             *
-             * OLD CODE:
-             *   if (!pending_remove(tgid)) break;  // ← gate: misses USAP games
-             *
-             * FIX: Use pending_remove() only for cleanup (non-blocking), then
-             * always call read_cmdline() + pkg_matches() directly. The pending
-             * table is no longer a detection gate. read_cmdline() is ~3 syscalls
-             * and only runs when comm_could_be_app() returns true (i.e. the comm
-             * has a '.' or is ≥15 chars — only Java app launches). Total overhead
-             * added: ~3 syscalls per Java app launch on this device. Negligible.
-             *
-             * Double-open protection: game_open() checks `g_active[i].pid == pid`
-             * for all active entries before adding, so re-detecting the same PID
-             * (e.g. from a race between netlink and startup_scan) is safe.
-             */
-            (void)pending_remove(tgid);  /* clean up table; not a gate */
+            /* USAP FIX: pending_remove is cleanup only, not a detection gate.
+             * Android Q+ USAP pool pre-forks processes minutes before specialization.
+             * With PENDING_TIMEOUT_S=20 the entry expires before the package-name COMM
+             * fires. Old gate: "if (!pending_remove(tgid)) break" missed all USAP games.
+             * Fix: always read_cmdline + pkg_matches after comm_could_be_app passes.
+             * game_open() guards against double-registration (pid already in g_active). */
+            (void)pending_remove(tgid);
 
             char pkg[MAX_PKG_LEN];
             if (!read_cmdline(tgid, pkg, sizeof(pkg))) break;
+
+            /* BUG2 FIX: skip Meta background services in COMM detection.
+             * Meta apps are on the exclusion list for UBWC artifact on active HWUI
+             * surfaces. Their background processes rename themselves via prctl at
+             * service bind — this COMM event is NOT a foreground launch. Treating it
+             * as one would set skiagl and never restore (background services live forever).
+             * am_proc_start (shell daemon) and PROC_EVENT_FORK+real-package-COMM (here)
+             * handle the actual foreground open correctly via read_cmdline at that point.
+             * Skip Meta in COMM handler; they are correctly detected at FORK+COMM
+             * for genuine user-initiated foreground launches only. */
+            {
+                const char *_skip = NULL;
+                if (strncmp(pkg, "com.facebook.", 13) == 0 ||
+                    strncmp(pkg, "com.instagram.", 14) == 0 ||
+                    strcmp(pkg,  "com.whatsapp") == 0 ||
+                    strcmp(pkg,  "com.whatsapp.w4b") == 0)
+                    _skip = pkg;
+                if (_skip) {
+                    /* Only act if this was a genuine fresh fork from zygote — i.e.,
+                     * the pending entry existed (process was just created, not a
+                     * background service rename). Since we already called pending_remove
+                     * above (cleanup), re-check by asking if /proc/$tgid/cmdline
+                     * was JUST created (process age < 5s). */
+                    struct stat _st;
+                    char _ppath[64];
+                    snprintf(_ppath, sizeof(_ppath), "/proc/%d", (int)tgid);
+                    time_t _now = time(NULL);
+                    if (stat(_ppath, &_st) == 0 && (_now - _st.st_ctime) > 5) {
+                        /* Process is older than 5s — background service rename, not fresh launch */
+                        klog("COMM: skip Meta background rename %s PID=%d (age>5s)", pkg, (int)tgid);
+                        break;
+                    }
+                    /* Fresh process (<5s old) — genuine foreground open → fall through */
+                }
+            }
+
             if (pkg_matches(pkg)) game_open(pkg, tgid);
             break;
         }
@@ -883,6 +903,16 @@ int main(int argc, char *argv[]) {
     }
 
     startup_scan();
+    /* BUG B FIX: write_state(0) after startup_scan completes.
+     * If startup_scan found no games, g_active_cnt=0 but write_state() is
+     * only called from game_open/close_game_at — never from startup_scan
+     * itself. A stale state file (value "1") from a previous crash/OOM-kill
+     * would leave the GOS watchdog in service.sh enforcing skiagl forever.
+     * Write state=0 now unless startup_scan actually found active games.
+     * If it did find games, g_active_cnt>0 and write_state(1) was already
+     * called from game_open() — writing 0 here would be wrong, so guard it.
+     */
+    if (g_active_cnt == 0) write_state(0);
     klog("loop: %s", g_nl_failed ? "proc-poll 1s" : "netlink+pidfd (zero overhead)");
 
     struct epoll_event events[MAX_EPOLL_EVENTS];

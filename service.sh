@@ -255,21 +255,6 @@ if cmd_exists resetprop; then
   ) &
   TIMEOUT_PID=$!
 
-  # BUG FIX: resetprop -w semantics — the VALUE argument is the value to wait
-  # FROM (i.e. "wait until the property changes away from this value"), not the
-  # value to wait FOR. Maps to Android's __system_property_wait() which blocks
-  # on the property serial changing from old_serial.
-  #
-  # WRONG (was here): resetprop -w sys.boot_completed 1
-  #   At boot time sys.boot_completed = "0". "Wait until it changes FROM 1" →
-  #   current value 0 ≠ 1 already → RETURNS IMMEDIATELY. service.sh proceeds
-  #   mid-boot before GMS/OEM init. In skiavk_all: force-stop fires during GMS
-  #   first-init → system_server watchdog → ROM logo → reboot. This was the
-  #   freeze/bootloop bug.
-  #
-  # CORRECT: resetprop -w sys.boot_completed 0
-  #   "Wait until it changes FROM 0" → blocks until sys.boot_completed = "1".
-  #   Documented in Magisk's official developer guides exactly as this.
   resetprop -w sys.boot_completed 0 2>/dev/null
 
   kill $TIMEOUT_PID 2>/dev/null || true
@@ -2718,14 +2703,18 @@ if cmd_exists resetprop; then
   # written an auto-degraded mode (e.g., skiavk → skiagl) to the state file.
   # Without re-reading, the original RENDER_MODE would be re-enforced here,
   # defeating the auto-degrade and re-applying skiavk on an incompatible device.
+  # BUG FIX: adreno_skiavk_degraded stores the REASON string written by
+  # post-fs-data.sh (e.g. "compat_risky_no_driver(score=45)"), not the mode.
+  # The old code set RENDER_MODE directly to that string → matched "normal|*"
+  # in the case statement → system.prop was silently emptied every boot after
+  # a degrade. Fix: presence of the file means "degraded to skiagl", regardless
+  # of content. Set RENDER_MODE="skiagl" unconditionally when the file exists.
   _degrade_marker="/data/local/tmp/adreno_skiavk_degraded"
   if [ -f "$_degrade_marker" ]; then
-    { IFS= read -r _degraded_mode; } < "$_degrade_marker" 2>/dev/null || _degraded_mode=""
-    if [ -n "$_degraded_mode" ] && [ "$_degraded_mode" != "$RENDER_MODE" ]; then
-      log_service "[BUG3-FIX] RENDER_MODE re-read: compat gate degraded '$RENDER_MODE' → '$_degraded_mode'"
-      RENDER_MODE="$_degraded_mode"
-    fi
-    unset _degraded_mode
+    { IFS= read -r _degraded_reason; } < "$_degrade_marker" 2>/dev/null || _degraded_reason=""
+    log_service "[BUG3-FIX] degrade marker present (reason: ${_degraded_reason:-unknown}) — overriding RENDER_MODE to skiagl"
+    RENDER_MODE="skiagl"
+    unset _degraded_reason
   fi
   unset _degrade_marker
 

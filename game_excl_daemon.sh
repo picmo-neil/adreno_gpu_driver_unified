@@ -333,6 +333,21 @@ _startup_scan() {
 
     _game_pkg_excluded "$_pkg" || continue
 
+    # BUG2 FIX: skip Meta background services in startup scan.
+    # Meta apps (Facebook/WhatsApp/Instagram/Messenger) are on the exclusion
+    # list for GROUP 2 (UBWC green line artifact on active HWUI surfaces).
+    # Their background service processes live in /proc permanently — detecting
+    # them here would set skiagl forever since they never exit.
+    # am_proc_start (main loop) handles Meta correctly: it fires only when the
+    # user opens the app and a new process is created, not for pre-existing
+    # background services. Skip them in the startup scan entirely.
+    case "$_pkg" in
+      com.facebook.*|com.instagram.*|com.whatsapp|com.whatsapp.w4b)
+        echo "[ADRENO-GED] startup scan: skipping Meta background service ${_pkg} (PID=${_pid})" \
+          > /dev/kmsg 2>/dev/null || true
+        continue ;;
+    esac
+
     echo "[ADRENO-GED] startup scan: found running game ${_pkg} (PID=${_pid})" \
       > /dev/kmsg 2>/dev/null || true
     _game_open "$_pkg" "$_pid"
@@ -368,33 +383,17 @@ rmdir "$_LOCK_DIR" 2>/dev/null || true  # clear any stale lock from a previous c
 echo "[ADRENO-GED] Started (PID=$$, restore_mode=${_SKIAVK_MODE})" \
   > /dev/kmsg 2>/dev/null || true
 
-# ── Main monitoring loop — survives logcat/logd restarts ───────────────────────
-#
-# BUG 1 FIX: The previous code called:
-#   exec /system/bin/sh "$0" "$_SKIAVK_MODE" "${MODDIR:-}"
-# at the logcat pipe exit path. exec() keeps the SAME PID. The duplicate-
-# instance guard then read its own PID from the PID file, called kill -0 on
-# itself (always succeeds), and exited: "Already running as PID $$".
-# The daemon could never restart after a logd crash.
-#
-# Fix: outer while-true loop around the logcat pipe. The daemon process
-# stays alive (same PID, PID file valid, all sub-daemons intact). After
-# each logcat exit we call _startup_scan before restarting logcat to catch
-# any games that launched during the brief down window.
-#
-# _startup_scan double-invocation safety (game was already running when
-# logcat died): _game_open increments counter 1→2 (no skiagl re-switch since
-# cnt!=1). Two _wait_game_death sub-daemons for the same PID (old + new)
-# both call _game_closed when game exits: 2→1 (no restore) then 1→0
-# (restore). Renderer behaviour is correct.
+# ── Main monitoring loop — survives logcat/logd restarts ──────────────────────────
+# BUG1 FIX: was "exec /system/bin/sh $0" at pipe exit — exec keeps same PID,
+# duplicate guard killed the restart immediately. Now a while-true outer loop
+# keeps the daemon alive; _startup_scan re-runs after each logcat restart to
+# catch games that launched during the down window.
 while true; do
 
-# ── /proc scan before each logcat session ──────────────────────────────────
-# First call: catches games running before the daemon started.
-# Subsequent calls: catches games launched during the logcat down window.
 _startup_scan
 
-# ── logcat -b events streams Android's binary event log buffer ─────────────
+# ── Main event loop ───────────────────────────────────────────────────────────
+# logcat -b events streams Android's binary event log buffer.
 #
 # am_proc_start event format — tag ID 30014, stable since Android 4.x:
 #   (User|1|5),(PID|1|5),(UID|1|5),(Process Name|3),(Type|3),(Component|3)
@@ -493,12 +492,10 @@ logcat -b events -v brief 2>/dev/null | while IFS= read -r _line; do
   _wait_game_death "$_pkg" "$_pid" &
 
 done
-# ── Inner while pipe exited ────────────────────────────────────────────────
-# logcat should never exit during normal operation. If it does (logd restart,
-# OOM kill of logcat itself), sleep 5s then loop back to restart logcat.
-# The outer while-true keeps this daemon alive indefinitely.
+# ── Pipe exited — loop back and restart logcat ────────────────────────────────
 echo "[ADRENO-GED] logcat pipe exited -- restarting in 5s" \
   > /dev/kmsg 2>/dev/null || true
 sleep 5
 
 done  # outer while true
+
