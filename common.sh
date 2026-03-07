@@ -1,5 +1,18 @@
 #!/system/bin/sh
-# Shared functions for Adreno GPU Driver module scripts.
+# ============================================================
+# ADRENO DRIVER MODULE — SHARED FUNCTIONS
+# ============================================================
+#
+# Developer  : @pica_pica_picachu
+# Channel    : @zesty_pic (driver channel)
+#
+# ⚠️  ANTI-THEFT NOTICE ⚠️
+# This module was developed by @pica_pica_picachu.
+# If someone claims this as their own work and asks for
+# donations — report them immediately to @zesty_pic.
+#
+# ============================================================
+#
 # Source with: . "$MODDIR/common.sh"
 
 # Single-pass config loader. Reads file once, extracts and normalises all 5 variables.
@@ -20,11 +33,18 @@ load_config() {
         esac ;;
       RENDER_MODE)
         case "$_v" in
-          normal|skiavk|skiagl|skiavk_all) ;;
+          # Canonical lowercase values — pass through as-is
+          normal|skiavk|skiagl|skiavk_all|skiavkthreaded|skiaglthreaded) ;;
           [Nn][Oo][Rr][Mm][Aa][Ll])            _v='normal' ;;
           [Ss][Kk][Ii][Aa][Vv][Kk])            _v='skiavk' ;;
           [Ss][Kk][Ii][Aa][Gg][Ll])            _v='skiagl' ;;
           [Ss][Kk][Ii][Aa][Vv][Kk]_[Aa][Ll][Ll]) _v='skiavk_all' ;;
+          # skiavkthreaded — debug.hwui.renderer=skiavkthreaded (Android 14+)
+          # On Android < 14, service.sh degrades to skiavk automatically.
+          [Ss][Kk][Ii][Aa][Vv][Kk][Tt][Hh][Rr][Ee][Aa][Dd][Ee][Dd]) _v='skiavkthreaded' ;;
+          # skiaglthreaded — debug.hwui.renderer=skiagl + SF backend=skiaglthreaded
+          # Works on all Android versions; no version gate needed.
+          [Ss][Kk][Ii][Aa][Gg][Ll][Tt][Hh][Rr][Ee][Aa][Dd][Ee][Dd]) _v='skiaglthreaded' ;;
           *) _v='normal' ;;
         esac ;;
     esac

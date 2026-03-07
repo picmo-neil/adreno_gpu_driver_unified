@@ -3,6 +3,14 @@
 # Compatible with: Magisk, KernelSU, APatch
 # Runs in late_start service mode (NON-BLOCKING)
 # Executes after boot_completed, modules mounted, and Zygote started.
+#
+# Developer  : @pica_pica_picachu
+# Channel    : @zesty_pic (driver channel)
+#
+# ⚠️  ANTI-THEFT NOTICE ⚠️
+# This module was developed by @pica_pica_picachu.
+# If someone claims this as their own work and asks for
+# donations — report them immediately to @zesty_pic.
 
 MODDIR="${0%/*}"
 
@@ -354,6 +362,14 @@ fi
 #   pipeline cache clear and confirms the renderer prop is live.
 #   SystemUI is NOT crashed in any mode (stability fix — KGSL corruption prevention).
 # ========================================
+# Early SDK detection for skiavkthreaded/skiaglthreaded mode enforcement.
+# (Full detection block repeated later at system.prop write section; this
+#  forward-declaration is needed because the early enforcement block runs first.)
+_THREADED_ANDROID14_OK=false
+_sdk_early=$(getprop ro.build.version.sdk 2>/dev/null || echo "0")
+_sdk_early="${_sdk_early%%[^0-9]*}"
+[ "${_sdk_early:-0}" -ge 34 ] 2>/dev/null && _THREADED_ANDROID14_OK=true
+unset _sdk_early
 if cmd_exists resetprop; then
   case "$RENDER_MODE" in
     skiavk|skiavk_all)
@@ -368,6 +384,25 @@ if cmd_exists resetprop; then
       # debug.renderengine.backend intentionally NOT live-resetprop'd here.
       # Same rationale as skiavk: OEM ROM callbacks crash SF if set at runtime.
       log_service "[OK] Early enforcement: skiagl hwui.renderer set (renderengine.backend pre-SF only)"
+      ;;
+    skiavkthreaded)
+      # On Android 14+: set skiavkthreaded HWUI renderer.
+      # On Android < 14: degrade to skiavk (best available). post-fs-data.sh
+      # already set the renderengine.backend before SF started, so we only
+      # touch debug.hwui.renderer here (SF is live — backend must NOT change).
+      if [ "$_THREADED_ANDROID14_OK" = "true" ]; then
+        resetprop debug.hwui.renderer skiavkthreaded 2>/dev/null || true
+        log_service "[OK] Early enforcement: skiavkthreaded hwui.renderer set (Android 14+)"
+      else
+        resetprop debug.hwui.renderer skiavk 2>/dev/null || true
+        log_service "[OK] Early enforcement: skiavkthreaded→skiavk fallback (Android <14; renderengine.backend=skiaglthreaded pre-SF only)"
+      fi
+      ;;
+    skiaglthreaded)
+      # HWUI uses skiagl (skiaglthreaded is not a valid hwui.renderer value).
+      # SF backend was set to skiaglthreaded in post-fs-data.sh before SF started.
+      resetprop debug.hwui.renderer skiagl 2>/dev/null || true
+      log_service "[OK] Early enforcement: skiaglthreaded mode — hwui.renderer=skiagl (renderengine.backend=skiaglthreaded pre-SF only)"
       ;;
   esac
 fi
@@ -435,9 +470,7 @@ fi
 # skiavk_all: background subshell below additionally force-stops system UI packages.
 # SystemUI is NOT crashed in any mode. Next reboot: all procs get the renderer from init.
 case "$RENDER_MODE" in
-  skiavk|skiagl|skiavk_all)
-    # BUG5 FIX: Original message claimed "SystemUI NOT crashed" at boot+2s, before
-    # any crash check has been performed. Replaced with accurate status message.
+  skiavk|skiagl|skiavk_all|skiavkthreaded|skiaglthreaded)
     log_service "[OK] $RENDER_MODE: renderer prop enforced via resetprop at boot+2s; SystemUI NOT actively crashed (GMS/accounts protected)"
     ;;
 esac
@@ -595,73 +628,158 @@ if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
 
     else
 
-      # ── Full /proc polling daemon — fallback when binary is absent ───────
-      # This path only runs if adreno_ged couldn't start (binary missing,
-      # SELinux denial, kernel too old for netlink, etc.).
-      # Handles launch detection + death detection + GOS watchdog itself.
-      (
-        # FIX: restore target is always "skiavk", never "skiavk_all".
-        # "skiavk_all" is not a valid debug.hwui.renderer value — HWUI silently
-        # falls back to the device default for any unrecognised string.
-        # skiavk_all is a boot-time force-stop mode, not a renderer name.
-        _RESTORE="skiavk"
+      # ── Shell game exclusion daemon — launched when native adreno_ged is absent ──
+      #
+      # ROOT CAUSE of "daemon not working at all":
+      #   The previous code ran an INLINE /proc polling subshell here (polling every
+      #   1 second). game_excl_daemon.sh was defined but NEVER launched anywhere.
+      #
+      # WHY INLINE /PROC POLL FAILED FOR PUBG / ACE ANTI-CHEAT:
+      #   PUBG Mobile's Tencent ACE anti-cheat reads debug.hwui.renderer within
+      #   ~50 ms of process creation. The 1-second /proc poll interval means the
+      #   renderer switch to skiagl arrives ~950 ms too late. ACE sees the debug
+      #   prop, triggers a "cheat detected" crash/ban.
+      #
+      # WHY game_excl_daemon.sh FIXES THIS:
+      #   It uses `logcat -b events` which delivers am_proc_start events
+      #   synchronously the moment ActivityManager creates the process — typically
+      #   within 5–20 ms of fork(). The renderer switch to skiagl happens BEFORE
+      #   HWUI initialises in the forked process (~100–200 ms into startup).
+      #   ACE reads the prop AFTER HWUI init → sees skiagl → no debug flag → no crash.
+      #
+      # ARCHITECTURE:
+      #   1. Launch game_excl_daemon.sh in background → it writes its PID to
+      #      adreno_ged_pid (same file as native binary uses).
+      #   2. Shell daemon also writes to adreno_ged_active (0/1) which the GOS
+      #      prop watchdog below reads — same interface as native binary.
+      #   3. Slim GOS watchdog runs alongside shell daemon (catches Samsung GOS /
+      #      OEM perf daemon resetting debug.hwui.renderer mid-session).
+      #   4. If game_excl_daemon.sh is missing, fall back to original inline
+      #      /proc poll daemon as last resort.
+      _GED_SH="$MODDIR/game_excl_daemon.sh"
+      _GED_SH_LAUNCHED=false
 
-        # Fallback uses adreno_daemon_active (no ged binary, so no ged_active)
-        _SF="/data/local/tmp/adreno_daemon_active"
+      if [ -f "$_GED_SH" ]; then
+        # Make executable in case permissions were lost during install
+        chmod +x "$_GED_SH" 2>/dev/null || true
 
-        _any_excl_running() {
-          local _cf _rb _rbase
-          for _cf in /proc/[0-9]*/cmdline; do
-            [ -f "$_cf" ] || continue
-            { IFS= read -r _rb; } < "$_cf" 2>/dev/null || continue
-            [ -n "$_rb" ] || continue
-            _rbase="${_rb%%:*}"
-            _game_pkg_excluded "$_rbase" && return 0
+        # Normalize restore mode: skiavk_all is not a valid renderer value.
+        # The daemon's only job is to restore Vulkan after a game exits; that
+        # is always "skiavk". skiavk_all is a boot-time force-stop flag.
+        _GED_RESTORE="skiavk"
+
+        /system/bin/sh "$_GED_SH" "$_GED_RESTORE" "$MODDIR" >/dev/null 2>&1 &
+        _GED_SH_BGPID=$!
+        log_service "=========================================="
+        log_service "GAME COMPAT DAEMON (shell — game_excl_daemon.sh)"
+        log_service "  PID          : $_GED_SH_BGPID"
+        log_service "  Restore mode : $_GED_RESTORE"
+        log_service "  Detection    : logcat am_proc_start (~5-20ms latency)"
+        log_service "  Death watch  : /proc/\$PID sleep-loop (1s)"
+        log_service "  ACE fix      : skiagl set BEFORE HWUI init (PUBG/Tencent safe)"
+        log_service "=========================================="
+        _GED_SH_LAUNCHED=true
+        unset _GED_RESTORE _GED_SH_BGPID
+      else
+        log_service "[!] WARN: game_excl_daemon.sh not found at $_GED_SH"
+        log_service "    Falling back to inline /proc poll daemon (1s latency — slow)"
+        log_service "    PUBG/ACE anti-cheat may still trigger with this fallback."
+      fi
+
+      if [ "$_GED_SH_LAUNCHED" = "true" ]; then
+
+        # ── Slim GOS/OEM prop watchdog for the shell daemon path ─────────────
+        # Same logic as the native binary path above: when adreno_ged_active="1"
+        # (shell daemon set it), re-apply skiagl if Samsung GOS or an OEM perf
+        # daemon resets debug.hwui.renderer mid-session.
+        # The shell daemon writes /data/local/tmp/adreno_ged_active (same file as
+        # native ged.c write_state()) so this watchdog works identically for both.
+        (
+          _GOS_SF_SH="$_GED_ACTIVE_FILE"  # /data/local/tmp/adreno_ged_active
+          while true; do
+            sleep 3
+            { IFS= read -r _gs_sh; } < "$_GOS_SF_SH" 2>/dev/null || _gs_sh="0"
+            [ "$_gs_sh" != "1" ] && continue  # no game active — nothing to watch
+            _gc_sh=$(getprop debug.hwui.renderer 2>/dev/null || echo '')
+            if [ -n "$_gc_sh" ] && [ "$_gc_sh" != "skiagl" ]; then
+              resetprop debug.hwui.renderer skiagl 2>/dev/null || true
+              printf '[ADRENO][SVC-GOS-SH] renderer reset by GOS/OEM (%s→skiagl) re-applied\n' \
+                "$_gc_sh" > /dev/kmsg 2>/dev/null || true
+            fi
           done
-          return 1
-        }
+        ) >/dev/null 2>&1 &
+        log_service "[OK] GOS prop watchdog (shell daemon mode) PID=$! — 3s check while game active"
 
-        # Startup scan
-        { IFS= read -r _sf_val; } < "$_SF" 2>/dev/null || _sf_val="0"
-        if [ "$_sf_val" != "1" ] && _any_excl_running; then
-          resetprop debug.hwui.renderer skiagl 2>/dev/null || true
-          printf '1\n' > "$_SF" 2>/dev/null || true
-          printf '[ADRENO][POLL-FB] startup: excl pkg running → skiagl\n' \
-            > /dev/kmsg 2>/dev/null || true
-        fi
-        unset _sf_val
+      else
 
-        # Poll every 1s — tighter window than old 3s to catch HWUI init in time
-        while true; do
-          sleep 1
-          { IFS= read -r _ps; } < "$_SF" 2>/dev/null || _ps="0"
-          if [ "$_ps" = "0" ]; then
-            if _any_excl_running; then
-              resetprop debug.hwui.renderer skiagl 2>/dev/null || true
-              printf '1\n' > "$_SF" 2>/dev/null || true
-              printf '[ADRENO][POLL-FB] excl pkg detected → skiagl\n' \
-                > /dev/kmsg 2>/dev/null || true
-            fi
-          else
-            _cur=$(getprop debug.hwui.renderer 2>/dev/null || echo '')
-            if [ -n "$_cur" ] && [ "$_cur" != "skiagl" ]; then
-              resetprop debug.hwui.renderer skiagl 2>/dev/null || true
-              printf '[ADRENO][POLL-FB] GOS reset (%s→skiagl)\n' \
-                "$_cur" > /dev/kmsg 2>/dev/null || true
-            fi
-            unset _cur
-            if ! _any_excl_running; then
-              resetprop debug.hwui.renderer "$_RESTORE" 2>/dev/null || true
-              printf '0\n' > "$_SF" 2>/dev/null || true
-              printf '[ADRENO][POLL-FB] all excl pkgs gone → %s\n' \
-                "$_RESTORE" > /dev/kmsg 2>/dev/null || true
-            fi
+        # ── Inline /proc polling daemon — last resort only ────────────────────
+        # Only runs if game_excl_daemon.sh is missing from the module directory.
+        # This path has 1s latency and WILL lose the PUBG/ACE race condition.
+        (
+          # FIX: restore target is always "skiavk", never "skiavk_all".
+          # "skiavk_all" is not a valid debug.hwui.renderer value — HWUI silently
+          # falls back to the device default for any unrecognised string.
+          # skiavk_all is a boot-time force-stop mode, not a renderer name.
+          _RESTORE="skiavk"
+
+          # Fallback uses adreno_daemon_active (no ged binary, so no ged_active)
+          _SF="/data/local/tmp/adreno_daemon_active"
+
+          _any_excl_running() {
+            local _cf _rb _rbase
+            for _cf in /proc/[0-9]*/cmdline; do
+              [ -f "$_cf" ] || continue
+              { IFS= read -r _rb; } < "$_cf" 2>/dev/null || continue
+              [ -n "$_rb" ] || continue
+              _rbase="${_rb%%:*}"
+              _game_pkg_excluded "$_rbase" && return 0
+            done
+            return 1
+          }
+
+          # Startup scan
+          { IFS= read -r _sf_val; } < "$_SF" 2>/dev/null || _sf_val="0"
+          if [ "$_sf_val" != "1" ] && _any_excl_running; then
+            resetprop debug.hwui.renderer skiagl 2>/dev/null || true
+            printf '1\n' > "$_SF" 2>/dev/null || true
+            printf '[ADRENO][POLL-FB] startup: excl pkg running → skiagl\n' \
+              > /dev/kmsg 2>/dev/null || true
           fi
-        done
-      ) >/dev/null 2>&1 &
-      log_service "[OK] Fallback game compat daemon PID=$! — 1s /proc poll (adreno_ged not running), skiagl↔skiavk"
+          unset _sf_val
 
-    fi
+          # Poll every 1s — tighter window than old 3s to catch HWUI init in time
+          while true; do
+            sleep 1
+            { IFS= read -r _ps; } < "$_SF" 2>/dev/null || _ps="0"
+            if [ "$_ps" = "0" ]; then
+              if _any_excl_running; then
+                resetprop debug.hwui.renderer skiagl 2>/dev/null || true
+                printf '1\n' > "$_SF" 2>/dev/null || true
+                printf '[ADRENO][POLL-FB] excl pkg detected → skiagl\n' \
+                  > /dev/kmsg 2>/dev/null || true
+              fi
+            else
+              _cur=$(getprop debug.hwui.renderer 2>/dev/null || echo '')
+              if [ -n "$_cur" ] && [ "$_cur" != "skiagl" ]; then
+                resetprop debug.hwui.renderer skiagl 2>/dev/null || true
+                printf '[ADRENO][POLL-FB] GOS reset (%s→skiagl)\n' \
+                  "$_cur" > /dev/kmsg 2>/dev/null || true
+              fi
+              unset _cur
+              if ! _any_excl_running; then
+                resetprop debug.hwui.renderer "$_RESTORE" 2>/dev/null || true
+                printf '0\n' > "$_SF" 2>/dev/null || true
+                printf '[ADRENO][POLL-FB] all excl pkgs gone → %s\n' \
+                  "$_RESTORE" > /dev/kmsg 2>/dev/null || true
+              fi
+            fi
+          done
+        ) >/dev/null 2>&1 &
+        log_service "[OK] Fallback game compat daemon PID=$! — 1s /proc poll (game_excl_daemon.sh missing), skiagl↔skiavk"
+
+      fi
+
+      unset _GED_SH _GED_SH_LAUNCHED
 
     unset _GED_RUNNING _GED_ACTIVE_FILE
   fi
@@ -2292,6 +2410,22 @@ else
 fi
 
 # Step 2: write the correct props for the next boot
+# ── Android version detection for skiavkthreaded ─────────────────────────────
+# skiavkthreaded as debug.hwui.renderer was added in Android 14 (API 34).
+# On Android ≤ 13 (API ≤ 33), HWUI does not recognise "skiavkthreaded" and
+# silently falls back to the ROM default. The user may still choose to enable
+# it (the WebUI shows a warning on Android < 14) — when they do, we honour
+# their intent but automatically use "skiaglthreaded" for the RenderEngine
+# backend (debug.renderengine.backend) as a safe minimum on those devices.
+# This gives threaded SF compositing without the unsupported HWUI VK path.
+_SDK_VER=$(getprop ro.build.version.sdk 2>/dev/null || echo "0")
+_SDK_VER="${_SDK_VER%%[^0-9]*}"
+_SDK_VER="${_SDK_VER:-0}"
+# _THREADED_ANDROID14_OK=true if device is Android 14+ (API >= 34)
+_THREADED_ANDROID14_OK=false
+[ "$_SDK_VER" -ge 34 ] 2>/dev/null && _THREADED_ANDROID14_OK=true
+log_service "Android SDK: $_SDK_VER — skiavkthreaded HWUI support: $_THREADED_ANDROID14_OK"
+
 case "$RENDER_MODE" in
   skiavk|skiavk_all)
     _VK_HW=$(getprop ro.hardware.vulkan 2>/dev/null || echo "")
@@ -2514,7 +2648,113 @@ case "$RENDER_MODE" in
     # We already stripped the old value above, so system.prop is now clean.
     log_service "[OK] system.prop: render mode=normal, no hwui.renderer prop written"
     ;;
+
+  skiavkthreaded)
+    # ── skiavkthreaded mode ────────────────────────────────────────────────────
+    # Skia Vulkan with the threaded HWUI render path (Android 14+ / API 34+ only).
+    # On Android < 14, HWUI silently ignores "skiavkthreaded" and falls back to
+    # the ROM default. We apply the correct value based on the detected SDK version,
+    # but still write the props the user asked for so they are visible next boot.
+    #
+    # debug.renderengine.backend is NOT written to system.prop (same rationale as
+    # skiavk — set exclusively via resetprop BEFORE SF starts in post-fs-data.sh).
+    if [ "$_THREADED_ANDROID14_OK" = "true" ]; then
+      _SYSPR_HWUI_RENDERER="skiavkthreaded"
+      log_service "[OK] skiavkthreaded: Android 14+ confirmed (SDK $_SDK_VER) — full skiavkthreaded applied"
+    else
+      # Android < 14: skiavkthreaded is unsupported for debug.hwui.renderer.
+      # Apply plain skiavk as HWUI renderer; the threaded RenderEngine backend
+      # (skiaglthreaded / skiavkthreaded) is handled in post-fs-data.sh via
+      # resetprop before SF starts. At minimum, skiaglthreaded gives threaded SF
+      # compositing even without Vulkan threaded HWUI support.
+      _SYSPR_HWUI_RENDERER="skiavk"
+      log_service "[!] skiavkthreaded: Android < 14 (SDK $_SDK_VER)"
+      log_service "    debug.hwui.renderer=skiavkthreaded is NOT supported on this Android version."
+      log_service "    FALLBACK applied: debug.hwui.renderer=skiavk"
+      log_service "    Threaded backend (skiaglthreaded) set via post-fs-data.sh resetprop before SF."
+      log_service "    To get skiavkthreaded HWUI: upgrade to Android 14 (API 34+)."
+    fi
+    {
+      echo "debug.hwui.renderer=${_SYSPR_HWUI_RENDERER}"
+      echo "ro.hwui.use_vulkan=true"
+      echo "persist.vendor.vulkan.enable=1"
+      echo "ro.config.vulkan.enabled=true"
+      echo "com.qc.hardware=true"
+      echo "persist.sys.force_sw_gles=0"
+      echo "debug.hwui.use_buffer_age=false"
+      echo "debug.hwui.use_partial_updates=false"
+      echo "debug.hwui.use_gpu_pixel_buffers=false"
+      echo "renderthread.skia.reduceopstasksplitting=false"
+      echo "debug.hwui.skip_empty_damage=true"
+      echo "debug.hwui.use_hint_manager=true"
+      echo "debug.hwui.target_cpu_time_percent=33"
+      echo "debug.hwui.use_skia_graphite=false"
+      echo "debug.hwui.recycled_buffer_cache_size=4"
+      echo "debug.vulkan.layers="
+      echo "debug.vulkan.dev.layers="
+      echo "persist.graphics.vulkan.validation_enable=0"
+      echo "ro.egl.blobcache.multifile=true"
+      echo "ro.egl.blobcache.multifile_limit=33554432"
+      echo "debug.gralloc.enable_fb_ubwc=1"
+      echo "vendor.gralloc.enable_fb_ubwc=1"
+      echo "ro.sf.blurs_are_expensive=1"
+      echo "graphics.gpu.profiler.support=false"
+      echo "debug.hwui.drawing_enabled=true"
+      echo "hwui.disable_vsync=false"
+      echo "debug.egl.debug_proc="
+      echo "debug.egl.hw=1"
+      echo "debug.sf.hw=1"
+      echo "persist.sys.ui.hw=1"
+      echo "debug.hwui.texture_cache_size=72"
+      echo "debug.hwui.layer_cache_size=48"
+      echo "debug.hwui.path_cache_size=32"
+    } >> "$SYSPR" 2>/dev/null && \
+      log_service "[OK] system.prop: skiavkthreaded props written (hwui.renderer=${_SYSPR_HWUI_RENDERER})" || \
+      log_service "[!] WARNING: Failed to write skiavkthreaded props to system.prop"
+    unset _SYSPR_HWUI_RENDERER
+    ;;
+
+  skiaglthreaded)
+    # ── skiaglthreaded mode ────────────────────────────────────────────────────
+    # Skia GL with threaded RenderEngine backend.
+    # debug.hwui.renderer=skiagl on all Android versions (GL is always supported).
+    # debug.renderengine.backend=skiaglthreaded is set via post-fs-data.sh resetprop
+    # (before SF starts). This is safe on all Android versions.
+    {
+      echo "debug.hwui.renderer=skiagl"
+      echo "com.qc.hardware=true"
+      echo "persist.sys.force_sw_gles=0"
+      echo "debug.hwui.use_buffer_age=false"
+      echo "debug.hwui.use_partial_updates=false"
+      echo "debug.hwui.render_dirty_regions=false"
+      echo "renderthread.skia.reduceopstasksplitting=false"
+      echo "debug.hwui.skip_empty_damage=true"
+      echo "debug.hwui.use_hint_manager=true"
+      echo "debug.hwui.target_cpu_time_percent=66"
+      echo "debug.hwui.use_skia_graphite=false"
+      echo "debug.hwui.recycled_buffer_cache_size=4"
+      echo "ro.egl.blobcache.multifile=true"
+      echo "ro.egl.blobcache.multifile_limit=33554432"
+      echo "debug.gralloc.enable_fb_ubwc=1"
+      echo "vendor.gralloc.enable_fb_ubwc=1"
+      echo "ro.sf.blurs_are_expensive=1"
+      echo "graphics.gpu.profiler.support=false"
+      echo "debug.hwui.drawing_enabled=true"
+      echo "hwui.disable_vsync=false"
+      echo "debug.egl.debug_proc="
+      echo "debug.egl.hw=1"
+      echo "debug.sf.hw=1"
+      echo "persist.sys.ui.hw=1"
+      echo "debug.hwui.texture_cache_size=72"
+      echo "debug.hwui.layer_cache_size=48"
+      echo "debug.hwui.path_cache_size=32"
+    } >> "$SYSPR" 2>/dev/null && \
+      log_service "[OK] system.prop: skiaglthreaded props written" || \
+      log_service "[!] WARNING: Failed to write skiaglthreaded props to system.prop"
+    ;;
 esac
+
+unset _SDK_VER _THREADED_ANDROID14_OK
 
 log_service "========================================"
 log_service "RENDER MODE PERSISTENCE COMPLETE"
@@ -2571,8 +2811,7 @@ if cmd_exists resetprop; then
       # debug.renderengine.backend intentionally NOT live-resetprop'd here.
       # SF is active; OEM ROM property watchers fire a RenderEngine reinit on change
       # → SF crash → all apps lose window surfaces → watchdog reboot.
-      # It is set safely via resetprop BEFORE SF starts in post-fs-data.sh.
-      resetprop ro.hwui.use_vulkan true 2>/dev/null || true
+      # It is set safely via resetprop BEFORE SF starts in post-fs-data.sh.      resetprop ro.hwui.use_vulkan true 2>/dev/null || true
       resetprop persist.vendor.vulkan.enable 1 2>/dev/null || true
       resetprop ro.config.vulkan.enabled true 2>/dev/null || true
       resetprop persist.sys.force_sw_gles 0 2>/dev/null || true

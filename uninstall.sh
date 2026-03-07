@@ -1,7 +1,17 @@
 #!/system/bin/sh
-# ========================================
-# Adreno GPU Driver - Uninstall Script
-# ========================================
+# ============================================================
+# ADRENO DRIVER MODULE — UNINSTALL SCRIPT
+# ============================================================
+#
+# Developer  : @pica_pica_picachu
+# Channel    : @zesty_pic (driver channel)
+#
+# ⚠️  ANTI-THEFT NOTICE ⚠️
+# This module was developed by @pica_pica_picachu.
+# If someone claims this as their own work and asks for
+# donations — report them immediately to @zesty_pic.
+#
+# ============================================================
 
 echo "========================================"
 echo "Adreno GPU Driver Uninstaller"

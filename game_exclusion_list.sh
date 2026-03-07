@@ -1,6 +1,17 @@
 #!/system/bin/sh
 # ============================================================
-# ADRENO DRIVER MODULE — SHARED GAME EXCLUSION LIST
+# ADRENO DRIVER MODULE — GAME EXCLUSION LIST
+# ============================================================
+#
+# Developer  : @pica_pica_picachu
+# Channel    : @zesty_pic (driver channel)
+#
+# ⚠️  ANTI-THEFT NOTICE ⚠️
+# This module was developed by @pica_pica_picachu.
+# If someone claims this as their own work and asks for
+# donations — report them immediately to @zesty_pic.
+#
+# ============================================================
 # ============================================================
 # This file is sourced by BOTH post-fs-data.sh AND service.sh.
 # It defines which app packages are excluded from the

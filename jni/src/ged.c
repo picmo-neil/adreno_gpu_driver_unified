@@ -1,8 +1,31 @@
 /*
- * ADRENO DRIVER MODULE — GAME EXCLUSION DAEMON (NATIVE)
+ * ============================================================
+ * ADRENO DRIVER MODULE — GAME EXCLUSION DAEMON (NATIVE C)
+ * ============================================================
  *
- * Switches debug.hwui.renderer skiagl when an excluded game launches,
- * restores skiavk/skiavk_all when all excluded games exit.
+ * Developer  : @pica_pica_picachu
+ * Channel    : @zesty_pic (driver channel)
+ *
+ * ⚠️  ANTI-THEFT NOTICE ⚠️
+ * This module was developed by @pica_pica_picachu.
+ * If someone claims this as their own work and asks for
+ * donations — report them immediately to @zesty_pic.
+ *
+ * ============================================================
+ *
+ * Switches debug.hwui.renderer to skiagl when an excluded game
+ * launches, restores the configured render mode when all excluded
+ * games exit.
+ *
+ * SUPPORTED RENDER MODES (argv[1]):
+ *   skiavk        — restore to skiavk
+ *   skiavk_all    — restore to skiavk (skiavk_all is not a valid
+ *                   hwui.renderer value; normalized to skiavk)
+ *   skiavkthreaded — restore to skiavkthreaded on Android 14+
+ *                    (API ≥ 34); falls back to skiavk on Android <14
+ *                    (SkiaVkRenderEngine absent — OEM bootloop risk)
+ *   skiaglthreaded — restore to skiagl (skiaglthreaded is only valid
+ *                    for debug.renderengine.backend, not hwui.renderer)
  *
  * ANDROID APP LAUNCH MODEL (why we use FORK+COMM, not EXEC):
  *   Every Android app is born from zygote via fork(). execve() is never
@@ -27,6 +50,9 @@
  *      daemon exits cleanly (not crashes) on all error paths.
  *   5. set_renderer() forked a child but did not handle fork() == -1.
  *      Fix: fork failure falls back to direct setprop.
+ *   6. skiavkthreaded/skiaglthreaded modes not handled.
+ *      Fix: SDK detection at startup; g_restore_hwui set to the correct
+ *      hwui.renderer value for the configured mode.
  *
  * ARCHITECTURE:
  *   Launch detection : Netlink PROC_EVENT_FORK + PROC_EVENT_COMM
@@ -36,7 +62,7 @@
  *   Signals          : signalfd (SIGTERM, SIGINT, SIGHUP, SIGCHLD)
  *   Fallback         : 1s /proc scan if netlink unavailable
  *
- * USAGE:  adreno_ged <skiavk|skiavk_all> [MODDIR]
+ * USAGE:  adreno_ged <skiavk|skiavk_all|skiavkthreaded|skiaglthreaded> [MODDIR]
  */
 
 #define _GNU_SOURCE
@@ -138,9 +164,11 @@ static int  g_epoll_fd  = -1;
 static int  g_nl_sock   = -1;
 static int  g_signal_fd = -1;
 static int  g_kmsg_fd   = -1;
-static char g_restore_mode[32] = "skiavk";
+static char g_restore_mode[32] = "skiavk";  /* configured mode (argv[1]) */
+static char g_restore_hwui[32] = "skiavk";  /* actual hwui.renderer to restore after game exits */
 static char g_moddir[512]      = {0};
 static int  g_nl_failed        = 0;
+static int  g_sdk_ver          = 0;          /* ro.build.version.sdk — read once at startup */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Logging
@@ -156,6 +184,38 @@ static void klog(const char *fmt, ...) {
         int n = snprintf(msg, sizeof(msg), "[ADRENO-GED] %s\n", buf);
         (void)write(g_kmsg_fd, msg, (size_t)n);
     }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * SDK version detection
+ *
+ * Called once at startup to resolve the correct hwui.renderer restore value
+ * for skiavkthreaded mode.  Uses /proc/cmdline's androidboot.revision first
+ * (available in kernel cmdline, no fork needed), then falls back to reading
+ * the build prop file directly.  No exec() — no child process overhead.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+static int read_sdk_ver(void) {
+    /* Try build.prop locations in order — no exec, just file reads */
+    const char *paths[] = {
+        "/system/build.prop",
+        "/system/system/build.prop",
+        "/vendor/build.prop",
+        NULL
+    };
+    for (int i = 0; paths[i]; i++) {
+        FILE *f = fopen(paths[i], "r");
+        if (!f) continue;
+        char line[128];
+        while (fgets(line, (int)sizeof(line), f)) {
+            if (strncmp(line, "ro.build.version.sdk=", 21) == 0) {
+                int sdk = atoi(line + 21);
+                fclose(f);
+                if (sdk > 0) return sdk;
+            }
+        }
+        fclose(f);
+    }
+    return 0;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -402,7 +462,7 @@ static void close_game_at(int idx) {
     }
     g_active[idx] = g_active[--g_nactive];
     if (g_active_cnt > 0) g_active_cnt--;
-    if (g_active_cnt == 0) { set_renderer(g_restore_mode); write_state(0); }
+    if (g_active_cnt == 0) { set_renderer(g_restore_hwui); write_state(0); }
     klog("CLOSED: %s PID=%d active=%d", pkg, (int)pid, g_active_cnt);
 }
 static void game_closed_by_pidfd(int pidfd) {
@@ -566,7 +626,7 @@ static void handle_signal(void) {
         case SIGINT:
             klog("signal %u: shutting down", si.ssi_signo);
             /* restore renderer if a game was active */
-            if (g_active_cnt > 0) { set_renderer(g_restore_mode); write_state(0); }
+            if (g_active_cnt > 0) { set_renderer(g_restore_hwui); write_state(0); }
             /* reap pending children before exit */
             while (waitpid(-1, NULL, WNOHANG) > 0) {}
             for (int i = 0; i < g_nactive; i++)
@@ -609,16 +669,60 @@ static void startup_scan(void) {
  * main
  * ═══════════════════════════════════════════════════════════════════════════ */
 int main(int argc, char *argv[]) {
-    /* FIX: normalize "skiavk_all" → "skiavk".
-     * "skiavk_all" is NOT a valid debug.hwui.renderer value — HWUI silently
-     * falls back to the device default (which is skiavk on Vulkan-capable
-     * devices) when it reads an unrecognized string.  The compat daemon's
-     * only job here is to restore the Vulkan renderer after a game exits;
-     * the correct restore value is always plain "skiavk". */
-    if (argc >= 2 && (strcmp(argv[1],"skiavk")==0 || strcmp(argv[1],"skiavk_all")==0))
-        strncpy(g_restore_mode, "skiavk", sizeof(g_restore_mode)-1);
-    if (argc >= 3)
-        strncpy(g_moddir, argv[2], sizeof(g_moddir)-1);
+    /* ── Resolve configured mode and compute the hwui.renderer restore value ──
+     *
+     * g_restore_mode : the mode string as passed by service.sh (informational)
+     * g_restore_hwui : the actual debug.hwui.renderer value to resetprop when
+     *                  the last excluded game exits.  This must be a value that
+     *                  HWUI recognises; "skiavk_all" and "skiaglthreaded" are
+     *                  NOT valid hwui.renderer strings.
+     *
+     * Mode → g_restore_hwui mapping:
+     *   skiavk        → "skiavk"
+     *   skiavk_all    → "skiavk"         (skiavk_all is not a hwui.renderer value)
+     *   skiavkthreaded→ "skiavkthreaded" on Android 14+ (API ≥ 34)
+     *                   "skiavk"         on Android <14  (SkiaVkRenderEngine absent)
+     *   skiaglthreaded→ "skiagl"         (skiaglthreaded is only for renderengine.backend)
+     *   anything else → "skiavk"         (safe default)
+     */
+    if (argc >= 2) {
+        strncpy(g_restore_mode, argv[1], sizeof(g_restore_mode) - 1);
+        g_restore_mode[sizeof(g_restore_mode) - 1] = '\0';
+    }
+    if (argc >= 3) {
+        strncpy(g_moddir, argv[2], sizeof(g_moddir) - 1);
+        g_moddir[sizeof(g_moddir) - 1] = '\0';
+    }
+
+    /* Read SDK version once — needed for skiavkthreaded gate */
+    g_sdk_ver = read_sdk_ver();
+
+    /* Compute hwui.renderer restore value */
+    if (strcmp(g_restore_mode, "skiavk") == 0 ||
+        strcmp(g_restore_mode, "skiavk_all") == 0) {
+        strncpy(g_restore_hwui, "skiavk", sizeof(g_restore_hwui) - 1);
+    } else if (strcmp(g_restore_mode, "skiavkthreaded") == 0) {
+        if (g_sdk_ver >= 34) {
+            /* Android 14+: SkiaVkRenderEngine present, skiavkthreaded valid */
+            strncpy(g_restore_hwui, "skiavkthreaded", sizeof(g_restore_hwui) - 1);
+        } else {
+            /* Android <14: HWUI does not recognise "skiavkthreaded" → fall
+             * back to plain skiavk (Vulkan HWUI, best available on <14).
+             * OEM ROMs on Android 12/13 will silently ignore "skiavkthreaded"
+             * and default to whatever their ro.hwui.use_vulkan says, which is
+             * unpredictable.  Explicit "skiavk" is always correct here. */
+            strncpy(g_restore_hwui, "skiavk", sizeof(g_restore_hwui) - 1);
+        }
+    } else if (strcmp(g_restore_mode, "skiaglthreaded") == 0) {
+        /* "skiaglthreaded" is a debug.renderengine.backend value, not a valid
+         * debug.hwui.renderer value.  For HWUI we use "skiagl". */
+        strncpy(g_restore_hwui, "skiagl", sizeof(g_restore_hwui) - 1);
+    } else {
+        /* Unknown / normal mode: fall back to skiavk (daemon shouldn't run
+         * in normal mode, but be safe if service.sh passes wrong arg). */
+        strncpy(g_restore_hwui, "skiavk", sizeof(g_restore_hwui) - 1);
+    }
+    g_restore_hwui[sizeof(g_restore_hwui) - 1] = '\0';
 
     g_kmsg_fd = open(KMSG, O_WRONLY|O_CLOEXEC);
     if (already_running()) return 0;
@@ -627,7 +731,8 @@ int main(int argc, char *argv[]) {
     if (g_npkgs == 0) { klog("FATAL: empty package list"); return 1; }
 
     write_pid();
-    klog("started PID=%d restore=%s pkgs=%d", (int)getpid(), g_restore_mode, g_npkgs);
+    klog("started PID=%d mode=%s hwui_restore=%s sdk=%d pkgs=%d",
+         (int)getpid(), g_restore_mode, g_restore_hwui, g_sdk_ver, g_npkgs);
 
     /*
      * Block ALL signals we handle before creating signalfd.
@@ -697,7 +802,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* Should never reach here, but clean up anyway */
-    if (g_active_cnt > 0) { set_renderer(g_restore_mode); write_state(0); }
+    if (g_active_cnt > 0) { set_renderer(g_restore_hwui); write_state(0); }
     unlink(PID_FILE);
     return 0;
 }

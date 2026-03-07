@@ -1,10 +1,19 @@
 #!/system/bin/sh
-# Adreno GPU Driver - Post FS Data
+# ============================================================
+# ADRENO DRIVER MODULE — POST-FS-DATA
+# ============================================================
+#
+# Developer  : @pica_pica_picachu
+# Channel    : @zesty_pic (driver channel)
+#
+# ⚠️  ANTI-THEFT NOTICE ⚠️
+# This module was developed by @pica_pica_picachu.
+# If someone claims this as their own work and asks for
+# donations — report them immediately to @zesty_pic.
+#
+# ============================================================
 # Compatible with: Magisk, KernelSU, APatch
-
-MODDIR="${0%/*}"
-
-# ========================================
+#
 # NOTE: Renderer props (debug.hwui.renderer, debug.renderengine.backend)
 # are now intentionally persisted to system.prop by service.sh after a
 # confirmed successful skiavk boot.  Stripping them here would fight that
@@ -1323,7 +1332,7 @@ _EARLY_EFFECTIVE_MODE="$RENDER_MODE"
 _EARLY_CLEAR_REASON=""
 if [ "$_EARLY_EFFECTIVE_MODE" != "$_EARLY_LAST_MODE" ]; then
   _EARLY_CLEAR_REASON="mode_change"
-elif [ "$_EARLY_EFFECTIVE_MODE" = "skiavk" ] || [ "$_EARLY_EFFECTIVE_MODE" = "skiavk_all" ]; then
+elif [ "$_EARLY_EFFECTIVE_MODE" = "skiavk" ] || [ "$_EARLY_EFFECTIVE_MODE" = "skiavk_all" ] || [ "$_EARLY_EFFECTIVE_MODE" = "skiavkthreaded" ]; then
   # Same skiavk mode across boots — still clear to purge stale session-keyed
   # Vulkan pipeline cache blobs (custom Adreno driver stores raw heap addresses
   # that are invalidated on every boot → vkCreatePipelineCache SIGSEGV).
@@ -1378,7 +1387,7 @@ log_boot "========================================"
 _VK_SCORE_FILE="/data/local/tmp/adreno_vk_compat_score"
 _VK_SCORE_WRITTEN=false
 
-if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
+if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ] || [ "$RENDER_MODE" = "skiavkthreaded" ]; then
 
   log_boot "========================================"
   log_boot "VULKAN COMPATIBILITY GATE"
@@ -1476,7 +1485,7 @@ if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
 fi
 
 # ── Fix ro.hardware.vulkan ICD at earliest possible point (pre-Zygote) ────────
-if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
+if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ] || [ "$RENDER_MODE" = "skiavkthreaded" ]; then
   if command -v resetprop >/dev/null 2>&1; then
     _curr_hwvk=$(getprop ro.hardware.vulkan 2>/dev/null || echo "")
     case "$_curr_hwvk" in
@@ -1505,7 +1514,7 @@ unset _VK_SCORE_FILE _VK_SCORE_WRITTEN
 # ==========================================================================
 apply_gralloc_compat_props() {
   case "$RENDER_MODE" in
-    skiavk|skiavk_all) ;;
+    skiavk|skiavk_all|skiavkthreaded) ;;
     *) return 0 ;;
   esac
   command -v resetprop >/dev/null 2>&1 || return 1
@@ -2546,6 +2555,96 @@ case "$RENDER_MODE" in
       ) >/dev/null 2>&1 &
       log_boot "[OK] skiagl background task: props re-applied + 3rd-party apps force-stopped to cold-start with skiagl renderer"
     fi
+    ;;
+
+  skiavkthreaded)
+    # ── skiavkthreaded mode ───────────────────────────────────────────────────
+    # User selected skiavkthreaded explicitly. This means they want:
+    #   debug.hwui.renderer=skiavkthreaded  — HWUI app renderer (Android 14+)
+    #   debug.renderengine.backend=skiavkthreaded  — SF compositor (Android 14+)
+    #
+    # Android 13 (SDK ≤ 33): HWUI does NOT recognise "skiavkthreaded" as a valid
+    # debug.hwui.renderer value; it silently falls back to the default (skiagl or
+    # skiavk depending on ro.hwui.use_vulkan). To give the user SOMETHING useful,
+    # we set debug.hwui.renderer=skiavk (Vulkan HWUI, best available on Android 13)
+    # and debug.renderengine.backend=skiaglthreaded (threaded GL for SF — always
+    # safe). The WebUI already informed the user with a warning banner.
+    #
+    # Android 14+ (SDK ≥ 34): full skiavkthreaded for both HWUI and SF.
+    _skvt_sdk=$(getprop ro.build.version.sdk 2>/dev/null || echo "0")
+    if command -v resetprop >/dev/null 2>&1; then
+      if [ "$_skvt_sdk" -ge 34 ] 2>/dev/null; then
+        # Full skiavkthreaded path (Android 14+)
+        resetprop debug.hwui.renderer skiavkthreaded
+        resetprop ro.hwui.use_vulkan true
+        resetprop ro.config.vulkan.enabled true
+        resetprop persist.vendor.vulkan.enable true
+        resetprop com.qc.hardware true
+        resetprop persist.sys.force_sw_gles 0
+        resetprop debug.hwui.use_buffer_age false
+        resetprop debug.hwui.use_partial_updates false
+        resetprop debug.hwui.use_gpu_pixel_buffers false
+        resetprop renderthread.skia.reduceopstasksplitting false
+        resetprop debug.hwui.skip_empty_damage true
+        resetprop debug.hwui.webview_overlays_enabled true
+        if [ -f "$MODDIR/.boot_success" ]; then
+          resetprop debug.renderengine.backend skiavkthreaded
+          log_boot "[OK] skiavkthreaded: SDK=${_skvt_sdk} >= 34, .boot_success present — full skiavkthreaded HWUI+SF"
+        else
+          # First real boot — use safe GL SF backend; promotes to skiavkthreaded next boot
+          resetprop debug.renderengine.backend skiaglthreaded
+          log_boot "[SAFE] skiavkthreaded: SDK=${_skvt_sdk} >= 34 but no .boot_success — SF=skiaglthreaded this boot"
+          log_boot "       skiavkthreaded SF will activate next boot after .boot_success written"
+        fi
+      else
+        # Android < 14: degrade gracefully. HWUI gets skiavk (best available),
+        # SF gets skiaglthreaded (always safe). The WebUI warned the user already.
+        resetprop debug.hwui.renderer skiavk
+        resetprop ro.hwui.use_vulkan true
+        resetprop ro.config.vulkan.enabled true
+        resetprop persist.vendor.vulkan.enable true
+        resetprop com.qc.hardware true
+        resetprop persist.sys.force_sw_gles 0
+        resetprop debug.hwui.use_buffer_age false
+        resetprop debug.hwui.use_partial_updates false
+        resetprop debug.hwui.use_gpu_pixel_buffers false
+        resetprop renderthread.skia.reduceopstasksplitting false
+        resetprop debug.hwui.skip_empty_damage true
+        resetprop debug.hwui.webview_overlays_enabled true
+        resetprop debug.renderengine.backend skiaglthreaded
+        log_boot "[DEGRADE] skiavkthreaded: SDK=${_skvt_sdk} < 34 — HWUI=skiavk, SF=skiaglthreaded (best available on Android <14)"
+        log_boot "          WebUI informed user: skiavkthreaded requires Android 14+"
+      fi
+    fi
+    unset _skvt_sdk
+    log_boot "[OK] Render mode: skiavkthreaded applied"
+    ;;
+
+  skiaglthreaded)
+    # ── skiaglthreaded mode ───────────────────────────────────────────────────
+    # User selected skiaglthreaded. This is safe on all Android versions.
+    #   debug.hwui.renderer=skiagl         — HWUI uses Skia+GL (stable, compatible)
+    #   debug.renderengine.backend=skiaglthreaded — SF uses threaded GL compositor
+    #
+    # "skiaglthreaded" is not a valid debug.hwui.renderer value — it is only valid
+    # for debug.renderengine.backend. For HWUI we use "skiagl" (which is the GL path).
+    # This gives users threaded SF compositing without touching HWUI Vulkan.
+    if command -v resetprop >/dev/null 2>&1; then
+      resetprop debug.hwui.renderer skiagl
+      resetprop persist.sys.force_sw_gles 0
+      resetprop com.qc.hardware true
+      resetprop debug.hwui.use_buffer_age false
+      resetprop debug.hwui.use_partial_updates false
+      resetprop debug.hwui.render_dirty_regions false
+      resetprop debug.hwui.webview_overlays_enabled true
+      resetprop renderthread.skia.reduceopstasksplitting false
+      resetprop debug.hwui.skip_empty_damage true
+      # skiaglthreaded SF backend — works on all Android versions.
+      # SF gets a dedicated RenderThread for compositing without Vulkan dependency.
+      resetprop debug.renderengine.backend skiaglthreaded
+      log_boot "[OK] skiaglthreaded: HWUI=skiagl, SF=skiaglthreaded — threaded GL compositor applied (all Android versions)"
+    fi
+    log_boot "[OK] Render mode: skiaglthreaded applied"
     ;;
 
   normal|*)

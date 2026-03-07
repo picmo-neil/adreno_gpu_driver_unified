@@ -3,6 +3,16 @@
 # ADRENO DRIVER MODULE — GAME EXCLUSION DAEMON
 # ============================================================
 #
+# Developer  : @pica_pica_picachu
+# Channel    : @zesty_pic (driver channel)
+#
+# ⚠️  ANTI-THEFT NOTICE ⚠️
+# This module was developed by @pica_pica_picachu.
+# If someone claims this as their own work and asks for
+# donations — report them immediately to @zesty_pic.
+#
+# ============================================================
+#
 # ZERO-OVERHEAD EVENT-DRIVEN ARCHITECTURE
 # ========================================
 # This daemon prevents the dual-VkDevice crash that occurs when a
@@ -57,6 +67,12 @@
 # ── Configuration ─────────────────────────────────────────────────────────────
 _DAEMON_PID_FILE="/data/local/tmp/adreno_ged_pid"
 _ACTIVE_COUNT_FILE="/data/local/tmp/adreno_ged_count"
+# adreno_ged_active: matches the state file written by the native ged.c binary.
+# Written here so the GOS prop watchdog in service.sh can read the same file
+# regardless of whether it's the native binary or this shell daemon that's running.
+# "1" = at least one excluded game is active (renderer = skiagl)
+# "0" = no excluded game active (renderer = skiavk/skiavk_all)
+_GED_ACTIVE_FILE="/data/local/tmp/adreno_ged_active"
 _LOCK_DIR="/data/local/tmp/adreno_ged.lock"
 
 # The renderer to restore when all games exit.
@@ -211,6 +227,9 @@ _game_open() {
   if [ "$_cnt" -eq 1 ]; then
     # First excluded game opened -- HWUI must use GL to prevent dual-VkDevice crash
     _set_renderer skiagl
+    # Write state file so GOS watchdog in service.sh (and the native ged.c path)
+    # both know a game is active regardless of which daemon is running.
+    printf '1\n' > "$_GED_ACTIVE_FILE" 2>/dev/null || true
     echo "[ADRENO-GED] GAME OPEN: ${_pkg} (PID=${_pid}) -- active=1 -> skiagl" \
       > /dev/kmsg 2>/dev/null || true
   else
@@ -233,6 +252,8 @@ _game_closed() {
   if [ "$_cnt" -eq 0 ]; then
     # Last excluded game exited -- restore Vulkan renderer
     _set_renderer "$_SKIAVK_MODE"
+    # Clear state file so service.sh GOS watchdog stops watching
+    printf '0\n' > "$_GED_ACTIVE_FILE" 2>/dev/null || true
     echo "[ADRENO-GED] GAME CLOSED: ${_pkg} (PID=${_pid}) -- active=0 -> ${_SKIAVK_MODE}" \
       > /dev/kmsg 2>/dev/null || true
   else
@@ -319,10 +340,11 @@ trap '
   _trap_cnt="${_trap_cnt%%[^0-9]*}"; _trap_cnt="${_trap_cnt:-0}"
   if [ "$_trap_cnt" -gt 0 ]; then
     _set_renderer "$_SKIAVK_MODE"
+    printf "0\n" > "$_GED_ACTIVE_FILE" 2>/dev/null || true
     echo "[ADRENO-GED] SIGTERM: restored ${_SKIAVK_MODE} (was skiagl, count=${_trap_cnt})" \
       > /dev/kmsg 2>/dev/null || true
   fi
-  rm -f "$_DAEMON_PID_FILE" "$_ACTIVE_COUNT_FILE" 2>/dev/null || true
+  rm -f "$_DAEMON_PID_FILE" "$_ACTIVE_COUNT_FILE" "$_GED_ACTIVE_FILE" 2>/dev/null || true
   rmdir "$_LOCK_DIR" 2>/dev/null || true
   exit 0
 ' TERM INT
@@ -330,6 +352,7 @@ trap '
 # ── Initialize state ──────────────────────────────────────────────────────────
 printf '%s\n' "$$" > "$_DAEMON_PID_FILE" 2>/dev/null || true
 printf '0\n'       > "$_ACTIVE_COUNT_FILE" 2>/dev/null || true
+printf '0\n'       > "$_GED_ACTIVE_FILE" 2>/dev/null || true
 rmdir "$_LOCK_DIR" 2>/dev/null || true  # clear any stale lock from a previous crash
 
 echo "[ADRENO-GED] Started (PID=$$, restore_mode=${_SKIAVK_MODE})" \

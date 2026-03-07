@@ -1,4 +1,16 @@
-# Adreno GPU Driver - Installation Script
+# ============================================================
+# ADRENO DRIVER MODULE — INSTALLATION SCRIPT
+# ============================================================
+#
+# Developer  : @pica_pica_picachu
+# Channel    : @zesty_pic (driver channel)
+#
+# ⚠️  ANTI-THEFT NOTICE ⚠️
+# This module was developed by @pica_pica_picachu.
+# If someone claims this as their own work and asks for
+# donations — report them immediately to @zesty_pic.
+#
+# ============================================================
 # Compatible with: Magisk, KernelSU, APatch
 #
 # Runs as BusyBox ash sourced by update-binary (not executed directly).

@@ -1,5 +1,74 @@
 import { exec, toast as ksuToast } from './assets/kernelsu.js';
 
+// ============================================================
+// MODULE AUTHOR LOCK
+// ============================================================
+// Reads module.prop and verifies that @pica_pica_picachu (or the
+// short alias "picmo") appears anywhere in the author= line.
+// The check is case-insensitive and works regardless of delimiter
+// (commas, @-signs, spaces, hyphens, pipes — any separator).
+//
+// If the check fails the entire WebUI is replaced with a black
+// lock screen. This protects against redistribution without credit.
+// ============================================================
+
+/**
+ * Returns true if the module.prop author field contains a recognised
+ * developer alias.  Accepted variants (case-insensitive, any position):
+ *   pica_pica_picachu  — full Telegram username
+ *   picmo              — short alias sometimes used in prop files
+ */
+async function checkModuleAuthor(modPath) {
+    try {
+        // Read just the author line — grep is faster than full cat on large props
+        const res = await exec(
+            `grep '^author=' "${modPath}/module.prop" 2>/dev/null || ` +
+            `grep '^author=' /data/adb/modules/adreno_gpu_driver_unified/module.prop 2>/dev/null || ` +
+            `grep '^author=' /data/adb/modules/adreno_gpu_driver/module.prop 2>/dev/null`
+        );
+        const raw = (res && res.stdout ? res.stdout : '').toLowerCase().trim();
+        // Check for either known alias anywhere in the author value
+        if (raw.includes('pica_pica_picachu') || raw.includes('picmo')) {
+            return true;
+        }
+        return false;
+    } catch (e) {
+        // If we can't read module.prop at all, fail closed (show lock)
+        return false;
+    }
+}
+
+/**
+ * Show the author lock screen and halt further JS execution by throwing.
+ */
+function showAuthorLockScreen() {
+    const lock = document.getElementById('authorLockScreen');
+    if (lock) lock.style.display = 'flex';
+    // Hide the rest of the UI
+    const main = document.querySelector('main');
+    if (main) main.style.display = 'none';
+    const nav = document.querySelector('nav, .bottom-nav, .nav-bar');
+    if (nav) nav.style.display = 'none';
+    const canvas = document.getElementById('particleCanvas');
+    if (canvas) canvas.style.display = 'none';
+}
+
+// ============================================================
+// ANDROID SDK VERSION — cached after first read
+// ============================================================
+let _cachedSdkVer = null;
+async function getAndroidSdkVer() {
+    if (_cachedSdkVer !== null) return _cachedSdkVer;
+    try {
+        const res = await exec('getprop ro.build.version.sdk 2>/dev/null');
+        const v = parseInt((res && res.stdout ? res.stdout : '0').trim(), 10);
+        _cachedSdkVer = isNaN(v) ? 0 : v;
+    } catch (e) {
+        _cachedSdkVer = 0;
+    }
+    return _cachedSdkVer;
+}
+
 // ============================================
 // LIGHTWEIGHT PARTICLE ENGINE — Optimized for budget mobile WebView
 // Adreno 610 (Snapdragon 665) friendly: low count, simple shapes only, no heavy gradients per-particle
@@ -2411,6 +2480,84 @@ async function applyRenderNow() {
             logToTerminal('✅ debug.hwui.renderer = skiagl', 'success');
             logToTerminal('✅ debug.renderengine.backend = skiaglthreaded (SF explicitly on GL)', 'success');
             logToTerminal(`✅ ${_SKIAGL_PROPS.length} skiagl + stability + perf + compat props applied live`, 'success');
+        } else if (renderMode === 'skiavkthreaded') {
+            // ── skiavkthreaded — live resetprop ──────────────────────────────────
+            // debug.hwui.renderer: set to skiavkthreaded on Android 14+ (API ≥ 34),
+            //   fall back to skiavk on Android <14 (SkiaVkRenderEngine not present).
+            // debug.renderengine.backend: CANNOT be set live. SF is already running;
+            //   OEM ROM property watchers fire a RenderEngine reinit mid-frame →
+            //   SF crash → all app surfaces are destroyed → watchdog reboot.
+            //   It was set to skiavkthreaded (API ≥ 34) or skiaglthreaded (API <14)
+            //   via resetprop in post-fs-data.sh BEFORE SF started. Reboot to apply.
+            const _skvt_sdk = await getAndroidSdkVer();
+            const _skvt_hwui = _skvt_sdk >= 34 ? 'skiavkthreaded' : 'skiavk';
+            const _SKVT_PROPS = [
+                ['debug.hwui.renderer',                      _skvt_hwui],
+                ['ro.hwui.use_vulkan',                       'true'],
+                ['ro.config.vulkan.enabled',                 'true'],
+                ['persist.vendor.vulkan.enable',             '1'],
+                ['com.qc.hardware',                          'true'],
+                ['persist.sys.force_sw_gles',                '0'],
+                ['debug.hwui.use_buffer_age',                'false'],
+                ['debug.hwui.use_partial_updates',           'false'],
+                ['debug.hwui.use_gpu_pixel_buffers',         'false'],
+                ['renderthread.skia.reduceopstasksplitting', 'false'],
+                ['debug.hwui.skip_empty_damage',             'true'],
+                ['debug.hwui.webview_overlays_enabled',      'true'],
+                ['debug.hwui.use_hint_manager',              'true'],
+                ['debug.hwui.target_cpu_time_percent',       '33'],
+                ['debug.hwui.use_skia_graphite',             'false'],
+                ['debug.vulkan.layers',                      ''],
+                ['persist.graphics.vulkan.validation_enable','0'],
+                ['ro.egl.blobcache.multifile',               'true'],
+                ['ro.egl.blobcache.multifile_limit',         '33554432'],
+                ['debug.gralloc.enable_fb_ubwc',             '1'],
+                ['vendor.gralloc.enable_fb_ubwc',            '1'],
+                ['graphics.gpu.profiler.support',            'false'],
+            ];
+            for (const [prop, val] of _SKVT_PROPS) {
+                await exec(`resetprop ${prop} "${val}"`);
+            }
+            logToTerminal(`✅ debug.hwui.renderer = ${_skvt_hwui}`, 'success');
+            if (_skvt_sdk >= 34) {
+                logToTerminal(`✅ skiavkthreaded: Android ${_skvt_sdk >= 35 ? '15' : '14'} (API ${_skvt_sdk}) — full threaded Vulkan HWUI applied`, 'success');
+            } else {
+                logToTerminal(`⚠️  skiavkthreaded: Android API ${_skvt_sdk} < 34 — HWUI fallback to skiavk (SkiaVkRenderEngine absent on this Android version)`, 'warn');
+                logToTerminal(`    debug.renderengine.backend=skiaglthreaded was set pre-SF via post-fs-data.sh — threaded GL compositor active`, 'info');
+                logToTerminal(`    Reboot to apply. To get full skiavkthreaded HWUI: upgrade to Android 14 (API 34+).`, 'info');
+            }
+            logToTerminal(`ℹ️  debug.renderengine.backend NOT set live (SF running — OEM watcher crash risk). Was set pre-SF in post-fs-data.sh. Reboot to re-apply.`, 'warn');
+        } else if (renderMode === 'skiaglthreaded') {
+            // ── skiaglthreaded — live resetprop ──────────────────────────────────
+            // debug.hwui.renderer=skiagl ("skiaglthreaded" is only valid for
+            //   debug.renderengine.backend — not a recognised hwui.renderer value).
+            // debug.renderengine.backend=skiaglthreaded: CANNOT be set live.
+            //   Same rationale as skiavkthreaded: SF is running, OEM ROM callbacks.
+            //   Was set in post-fs-data.sh before SF started.
+            const _SGLTH_PROPS = [
+                ['debug.hwui.renderer',                      'skiagl'],
+                ['persist.sys.force_sw_gles',                '0'],
+                ['com.qc.hardware',                          'true'],
+                ['debug.hwui.use_buffer_age',                'false'],
+                ['debug.hwui.use_partial_updates',           'false'],
+                ['debug.hwui.render_dirty_regions',          'false'],
+                ['debug.hwui.webview_overlays_enabled',      'true'],
+                ['renderthread.skia.reduceopstasksplitting', 'false'],
+                ['debug.hwui.skip_empty_damage',             'true'],
+                ['debug.hwui.use_hint_manager',              'true'],
+                ['debug.hwui.target_cpu_time_percent',       '66'],
+                ['ro.egl.blobcache.multifile',               'true'],
+                ['ro.egl.blobcache.multifile_limit',         '33554432'],
+                ['debug.gralloc.enable_fb_ubwc',             '1'],
+                ['vendor.gralloc.enable_fb_ubwc',            '1'],
+                ['graphics.gpu.profiler.support',            'false'],
+                ['debug.hwui.use_skia_graphite',             'false'],
+            ];
+            for (const [prop, val] of _SGLTH_PROPS) {
+                await exec(`resetprop ${prop} "${val}"`);
+            }
+            logToTerminal(`✅ debug.hwui.renderer = skiagl (skiaglthreaded mode — GL HWUI renderer applied live)`, 'success');
+            logToTerminal(`ℹ️  debug.renderengine.backend=skiaglthreaded NOT set live (SF running — set pre-SF in post-fs-data.sh). Reboot to re-apply threaded SF backend.`, 'warn');
         } else {
             for (const p of _CLEAR_ALL) {
                 await exec(`resetprop --delete ${p} 2>/dev/null || true`);
@@ -2531,6 +2678,90 @@ async function applyRenderNow() {
                 ];
                 await exec(`printf '${_SKIAGL_PERSIST.join('\\n')}\\n' >> "${sysprPath}"`);
                 logToTerminal(`✅ system.prop: ${_SKIAGL_PERSIST.length} skiagl+renderengine+stability+perf+compat props written (persists on reboot)`, 'success');
+            } else if (renderMode === 'skiavkthreaded') {
+                // ── skiavkthreaded system.prop write ─────────────────────────────
+                // Write hwui.renderer (skiavkthreaded on API ≥ 34, skiavk on <14)
+                // plus all Vulkan stability/OEM compat props.
+                // debug.renderengine.backend is EXCLUDED — OEM SF watcher bootloop.
+                // It is handled exclusively via resetprop in post-fs-data.sh.
+                const _skvt_sdk2 = await getAndroidSdkVer();
+                const _skvt_hwui2 = _skvt_sdk2 >= 34 ? 'skiavkthreaded' : 'skiavk';
+                const _SKVT_PERSIST = [
+                    `debug.hwui.renderer=${_skvt_hwui2}`,
+                    'ro.hwui.use_vulkan=true',
+                    'persist.vendor.vulkan.enable=1',
+                    'ro.config.vulkan.enabled=true',
+                    'com.qc.hardware=true',
+                    'persist.sys.force_sw_gles=0',
+                    'debug.hwui.use_buffer_age=false',
+                    'debug.hwui.use_partial_updates=false',
+                    'debug.hwui.use_gpu_pixel_buffers=false',
+                    'renderthread.skia.reduceopstasksplitting=false',
+                    'debug.hwui.skip_empty_damage=true',
+                    'debug.hwui.webview_overlays_enabled=true',
+                    'debug.hwui.use_hint_manager=true',
+                    'debug.hwui.target_cpu_time_percent=33',
+                    'debug.hwui.use_skia_graphite=false',
+                    'debug.hwui.recycled_buffer_cache_size=4',
+                    'debug.vulkan.layers=',
+                    'persist.graphics.vulkan.validation_enable=0',
+                    'ro.egl.blobcache.multifile=true',
+                    'ro.egl.blobcache.multifile_limit=33554432',
+                    'debug.gralloc.enable_fb_ubwc=1',
+                    'vendor.gralloc.enable_fb_ubwc=1',
+                    'ro.sf.blurs_are_expensive=1',
+                    'graphics.gpu.profiler.support=false',
+                    'debug.hwui.drawing_enabled=true',
+                    'debug.egl.hw=1',
+                    'debug.sf.hw=1',
+                    'persist.sys.ui.hw=1',
+                    'debug.hwui.texture_cache_size=72',
+                    'debug.hwui.layer_cache_size=48',
+                    'debug.hwui.path_cache_size=32',
+                ];
+                // debug.renderengine.backend intentionally excluded from system.prop.
+                // On next reboot, post-fs-data.sh will resetprop the correct value
+                // (skiavkthreaded on API ≥ 34 + .boot_success, else skiaglthreaded)
+                // BEFORE SF starts — OEM property watchers cannot fire pre-SF.
+                await exec(`printf '${_SKVT_PERSIST.join('\\\\n')}\\\\n' >> "${sysprPath}"`);
+                logToTerminal(`✅ system.prop: skiavkthreaded — ${_SKVT_PERSIST.length} props written (hwui.renderer=${_skvt_hwui2}). renderengine.backend excluded — set via pre-SF resetprop in post-fs-data.sh`, 'success');
+                if (_skvt_sdk2 < 34) {
+                    logToTerminal(`ℹ️  On next reboot: post-fs-data.sh will set renderengine.backend=skiaglthreaded (API ${_skvt_sdk2} <34 — skiaglthreaded SF backend, best available for this Android version)`, 'info');
+                }
+            } else if (renderMode === 'skiaglthreaded') {
+                // ── skiaglthreaded system.prop write ─────────────────────────────
+                // hwui.renderer=skiagl (skiaglthreaded is not a valid hwui.renderer).
+                // renderengine.backend excluded — same OEM watcher risk as skiavk.
+                const _SGLTH_PERSIST = [
+                    'debug.hwui.renderer=skiagl',
+                    'com.qc.hardware=true',
+                    'persist.sys.force_sw_gles=0',
+                    'debug.hwui.use_buffer_age=false',
+                    'debug.hwui.use_partial_updates=false',
+                    'debug.hwui.render_dirty_regions=false',
+                    'debug.hwui.webview_overlays_enabled=true',
+                    'renderthread.skia.reduceopstasksplitting=false',
+                    'debug.hwui.skip_empty_damage=true',
+                    'debug.hwui.use_hint_manager=true',
+                    'debug.hwui.target_cpu_time_percent=66',
+                    'ro.egl.blobcache.multifile=true',
+                    'ro.egl.blobcache.multifile_limit=33554432',
+                    'debug.gralloc.enable_fb_ubwc=1',
+                    'vendor.gralloc.enable_fb_ubwc=1',
+                    'graphics.gpu.profiler.support=false',
+                    'debug.hwui.use_skia_graphite=false',
+                    'ro.sf.blurs_are_expensive=1',
+                    'debug.egl.hw=1',
+                    'debug.sf.hw=1',
+                    'persist.sys.ui.hw=1',
+                    'debug.hwui.texture_cache_size=72',
+                    'debug.hwui.layer_cache_size=48',
+                    'debug.hwui.path_cache_size=32',
+                ];
+                // debug.renderengine.backend=skiaglthreaded excluded from system.prop.
+                // Post-fs-data.sh sets it via resetprop before SF starts on each boot.
+                await exec(`printf '${_SGLTH_PERSIST.join('\\\\n')}\\\\n' >> "${sysprPath}"`);
+                logToTerminal(`✅ system.prop: skiaglthreaded — ${_SGLTH_PERSIST.length} props written (hwui.renderer=skiagl). renderengine.backend=skiaglthreaded excluded — set via pre-SF resetprop on each boot`, 'success');
             } else {
                 logToTerminal('✅ system.prop: render props cleared', 'success');
             }
@@ -5328,6 +5559,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         setLoading(false);
         return;
     }
+
+    // ── AUTHOR LOCK CHECK ────────────────────────────────────────────────────
+    // Must run before any other init. If the developer credit is missing from
+    // module.prop, show the lock screen and abort.
+    const authorOk = await checkModuleAuthor(MOD_PATH);
+    if (!authorOk) {
+        showAuthorLockScreen();
+        setLoading(false);
+        return;
+    }
+    // ────────────────────────────────────────────────────────────────────────
     
     MOD_WEB_LANG = `${MOD_PATH}/webroot/Languages`;
     MOD_DOCS = `${MOD_PATH}/Documentation`;
@@ -5633,15 +5875,26 @@ document.addEventListener('DOMContentLoaded', async () => {
     const renderModeSelect = document.getElementById('RENDER_MODE');
     const renderModeDesc = document.querySelector('.mode-desc-text');
     if (renderModeSelect && renderModeDesc) {
-        const updateRenderModeDescription = () => {
+        const updateRenderModeDescription = async () => {
             const mode = renderModeSelect.value;
+            const sdk = await getAndroidSdkVer();
             const descriptions = {
                 'normal': currentTranslations.renderDesc || 'Default rendering backend — no debug props set',
                 'skiavk': currentTranslations.renderDescSkiaVK || 'HWUI uses Skia+Vulkan — smoother UI on Adreno GPUs (written to system.prop + applied live via resetprop)',
                 'skiagl': currentTranslations.renderDescSkiaGL || 'HWUI uses Skia+OpenGL — better compatibility fallback (written to system.prop + applied live via resetprop)',
-                'skiavk_all': currentTranslations.renderDescSkiaVKAll || 'SkiaVK + boot-time renderer activation subshell (boot+35s). Throttled force-stops all 3rd-party AND non-critical system apps (150ms gap, GMS/Meta/SystemUI excluded) so they cold-start with Vulkan. 150ms throttle prevents concurrent KGSL context teardown corruption on custom Adreno drivers.'
+                'skiavk_all': currentTranslations.renderDescSkiaVKAll || 'SkiaVK + boot-time renderer activation subshell (boot+35s). Throttled force-stops all 3rd-party AND non-critical system apps (150ms gap, GMS/Meta/SystemUI excluded) so they cold-start with Vulkan. 150ms throttle prevents concurrent KGSL context teardown corruption on custom Adreno drivers.',
+                'skiavkthreaded': sdk >= 34
+                    ? 'HWUI + SurfaceFlinger both use Skia+Vulkan on dedicated RenderThreads (Android 14+). Most performant compositor mode. Fully applied on this device (API ' + sdk + ' ≥ 34).'
+                    : '⚠️ Full skiavkthreaded requires Android 14+ (API 34+). This device is API ' + sdk + ' — HWUI will fall back to skiavk automatically. The threaded SF backend (skiaglthreaded) will still be set. You can still enable this.',
+                'skiaglthreaded': 'HWUI uses Skia+OpenGL (skiagl). SurfaceFlinger uses a dedicated threaded GL RenderEngine (skiaglthreaded). Works on all Android versions — no version gate needed.'
             };
             renderModeDesc.textContent = descriptions[mode] || descriptions['normal'];
+
+            // Show/hide the skiavkthreaded Android version warning banner
+            const warnBanner = document.getElementById('skiavkthreadedWarn');
+            if (warnBanner) {
+                warnBanner.style.display = (mode === 'skiavkthreaded' && sdk < 34) ? 'block' : 'none';
+            }
         };
         
         renderModeSelect.addEventListener('change', updateRenderModeDescription);
