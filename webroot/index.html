@@ -449,14 +449,20 @@
             </div>
 
             <!-- Force skiavkthreaded backend toggle — only shown when skiavk/skiavk_all is selected -->
-            <div id="forceThreadedRow" class="setting-row" style="display:none;">
+            <div id="forceThreadedRow" class="setting-item ripple-target hover-lift" style="display:none;">
                 <div class="text-col">
-                    <div class="setting-title">Force Skiavkthreaded Backend</div>
-                    <div class="setting-desc">Force <code>debug.renderengine.backend=skiavkthreaded</code> even if your device is below Android 14 (API 34). On Android &lt;14, SurfaceFlinger may not implement SkiaVkRenderEngine — strict OEM ROMs (MIUI/HyperOS, OneUI) may bootloop. Only enable this if you know your device supports it.</div>
+                    <div class="setting-header">
+                        <div class="setting-title" data-i18n="forceThreadedName">Force Skiavkthreaded Backend</div>
+                    </div>
+                    <div class="setting-desc" data-i18n="forceThreadedDesc">Force <code>debug.renderengine.backend=skiavkthreaded</code> even on Android &lt;14 (API 34). Strict OEM ROMs (MIUI/HyperOS, OneUI) may bootloop — only enable if you know your device supports it.</div>
+                    <div class="badge badge-warning" data-i18n="forceThreadedSub">⚠️ Android 14+ recommended</div>
                 </div>
-                <label class="toggle-switch">
-                    <input type="checkbox" id="FORCE_SKIAVKTHREADED_BACKEND">
-                    <span class="slider"></span>
+                <label class="switch modern-switch" aria-label="Force Skiavkthreaded Backend Toggle">
+                    <input type="checkbox" id="FORCE_SKIAVKTHREADED_BACKEND" role="switch">
+                    <span class="slider modern-slider">
+                        <span class="slider-text off">OFF</span>
+                        <span class="slider-text on">ON</span>
+                    </span>
                 </label>
             </div>
 

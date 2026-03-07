@@ -89,3 +89,17 @@ RENDER_MODE=normal
 #
 # Recommended: y when RENDER_MODE=skiavk or skiavk_all
 GAME_EXCLUSION_DAEMON=n
+
+# ========================================
+# SurfaceFlinger Backend Override
+# ========================================
+
+# Force Skiavkthreaded Backend
+# Forces debug.renderengine.backend=skiavkthreaded even on Android < 14 (API 34).
+# On Android 14+, this is set automatically when RENDER_MODE=skiavk or skiavk_all.
+# On Android < 14: SurfaceFlinger does not implement SkiaVkRenderEngine — strict OEM
+# ROMs (MIUI/HyperOS, OneUI) will BOOTLOOP if an unknown backend string is passed.
+# Only enable if you know your device's SurfaceFlinger supports skiavkthreaded.
+# y = force skiavkthreaded backend regardless of Android version
+# n = auto-detect (skiavkthreaded on API >= 34, skiaglthreaded otherwise)
+FORCE_SKIAVKTHREADED_BACKEND=n
