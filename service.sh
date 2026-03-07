@@ -77,6 +77,7 @@ ARM64_OPT="n"
 QGL="n"
 PLT="n"
 RENDER_MODE="normal"
+FORCE_SKIAVKTHREADED_BACKEND="n"
 
 CONFIG_FILE="/sdcard/Adreno_Driver/Config/adreno_config.txt"
 ALT_CONFIG="$MODDIR/adreno_config.txt"
@@ -93,6 +94,11 @@ fi
 # BUG7 FIX: Normalize RENDER_MODE to lowercase so case statements match
 # regardless of how the user wrote it in the config (SkiaVK, SKIAVK, etc.).
 RENDER_MODE=$(printf '%s' "$RENDER_MODE" | tr '[:upper:]' '[:lower:]')
+# Legacy: skiavkthreaded/skiaglthreaded were removed as standalone modes.
+# common.sh normalizes them on load, but guard here in case of direct writes.
+[ "$RENDER_MODE" = "skiavkthreaded" ] && RENDER_MODE="skiavk"
+[ "$RENDER_MODE" = "skiaglthreaded" ] && RENDER_MODE="skiagl"
+[ "$FORCE_SKIAVKTHREADED_BACKEND" != "y" ] && FORCE_SKIAVKTHREADED_BACKEND="n"
 
 # ========================================
 # LOGGING SYSTEM
@@ -230,7 +236,7 @@ else
   log_service "No config file found, using defaults"
 fi
 
-log_service "Configuration: ARM64_OPT=$ARM64_OPT, QGL=$QGL, PLT=$PLT, RENDER_MODE=$RENDER_MODE"
+log_service "Configuration: ARM64_OPT=$ARM64_OPT, QGL=$QGL, PLT=$PLT, RENDER_MODE=$RENDER_MODE, FORCE_SKIAVKTHREADED_BACKEND=$FORCE_SKIAVKTHREADED_BACKEND"
 
 # ========================================
 # WAIT FOR BOOT COMPLETION
@@ -362,47 +368,27 @@ fi
 #   pipeline cache clear and confirms the renderer prop is live.
 #   SystemUI is NOT crashed in any mode (stability fix — KGSL corruption prevention).
 # ========================================
-# Early SDK detection for skiavkthreaded/skiaglthreaded mode enforcement.
-# (Full detection block repeated later at system.prop write section; this
-#  forward-declaration is needed because the early enforcement block runs first.)
+# Early enforcement: set debug.hwui.renderer via resetprop at boot+5s.
+# debug.renderengine.backend is NOT set here — SF is running; OEM ROM
+# change callbacks fire and crash SurfaceFlinger. Backend is set exclusively
+# before SF starts in post-fs-data.sh and persists via system.prop.
 _THREADED_ANDROID14_OK=false
 _sdk_early=$(getprop ro.build.version.sdk 2>/dev/null || echo "0")
 _sdk_early="${_sdk_early%%[^0-9]*}"
-[ "${_sdk_early:-0}" -ge 34 ] 2>/dev/null && _THREADED_ANDROID14_OK=true
+# skiavkthreaded backend requires SDK >= 34, or can be forced via flag
+if [ "${_sdk_early:-0}" -ge 34 ] 2>/dev/null || [ "$FORCE_SKIAVKTHREADED_BACKEND" = "y" ]; then
+  _THREADED_ANDROID14_OK=true
+fi
 unset _sdk_early
 if cmd_exists resetprop; then
   case "$RENDER_MODE" in
     skiavk|skiavk_all)
       resetprop debug.hwui.renderer skiavk 2>/dev/null || true
-      # debug.renderengine.backend intentionally NOT live-resetprop'd here.
-      # SF is running at boot_completed+5s — OEM ROM change callbacks fire and
-      # crash SurfaceFlinger. Set exclusively before SF starts in post-fs-data.sh.
       log_service "[OK] Early enforcement: skiavk hwui.renderer set (renderengine.backend pre-SF only)"
       ;;
     skiagl)
       resetprop debug.hwui.renderer skiagl 2>/dev/null || true
-      # debug.renderengine.backend intentionally NOT live-resetprop'd here.
-      # Same rationale as skiavk: OEM ROM callbacks crash SF if set at runtime.
       log_service "[OK] Early enforcement: skiagl hwui.renderer set (renderengine.backend pre-SF only)"
-      ;;
-    skiavkthreaded)
-      # On Android 14+: set skiavkthreaded HWUI renderer.
-      # On Android < 14: degrade to skiavk (best available). post-fs-data.sh
-      # already set the renderengine.backend before SF started, so we only
-      # touch debug.hwui.renderer here (SF is live — backend must NOT change).
-      if [ "$_THREADED_ANDROID14_OK" = "true" ]; then
-        resetprop debug.hwui.renderer skiavkthreaded 2>/dev/null || true
-        log_service "[OK] Early enforcement: skiavkthreaded hwui.renderer set (Android 14+)"
-      else
-        resetprop debug.hwui.renderer skiavk 2>/dev/null || true
-        log_service "[OK] Early enforcement: skiavkthreaded→skiavk fallback (Android <14; renderengine.backend=skiaglthreaded pre-SF only)"
-      fi
-      ;;
-    skiaglthreaded)
-      # HWUI uses skiagl (skiaglthreaded is not a valid hwui.renderer value).
-      # SF backend was set to skiaglthreaded in post-fs-data.sh before SF started.
-      resetprop debug.hwui.renderer skiagl 2>/dev/null || true
-      log_service "[OK] Early enforcement: skiaglthreaded mode — hwui.renderer=skiagl (renderengine.backend=skiaglthreaded pre-SF only)"
       ;;
   esac
 fi
@@ -470,7 +456,7 @@ fi
 # skiavk_all: background subshell below additionally force-stops system UI packages.
 # SystemUI is NOT crashed in any mode. Next reboot: all procs get the renderer from init.
 case "$RENDER_MODE" in
-  skiavk|skiagl|skiavk_all|skiavkthreaded|skiaglthreaded)
+  skiavk|skiagl|skiavk_all)
     log_service "[OK] $RENDER_MODE: renderer prop enforced via resetprop at boot+2s; SystemUI NOT actively crashed (GMS/accounts protected)"
     ;;
 esac
@@ -2410,21 +2396,20 @@ else
 fi
 
 # Step 2: write the correct props for the next boot
-# ── Android version detection for skiavkthreaded ─────────────────────────────
-# skiavkthreaded as debug.hwui.renderer was added in Android 14 (API 34).
-# On Android ≤ 13 (API ≤ 33), HWUI does not recognise "skiavkthreaded" and
-# silently falls back to the ROM default. The user may still choose to enable
-# it (the WebUI shows a warning on Android < 14) — when they do, we honour
-# their intent but automatically use "skiaglthreaded" for the RenderEngine
-# backend (debug.renderengine.backend) as a safe minimum on those devices.
-# This gives threaded SF compositing without the unsupported HWUI VK path.
+# ── Android version detection for renderengine.backend ───────────────────────
+# debug.renderengine.backend=skiavkthreaded requires Android 14 (API 34+).
+# On Android ≤ 13, SurfaceFlinger does not implement SkiaVkRenderEngine.
+# Fallback: skiaglthreaded (threaded GL compositor) — safe on all versions.
+# FORCE_SKIAVKTHREADED_BACKEND=y overrides this gate at the user's own risk.
 _SDK_VER=$(getprop ro.build.version.sdk 2>/dev/null || echo "0")
 _SDK_VER="${_SDK_VER%%[^0-9]*}"
 _SDK_VER="${_SDK_VER:-0}"
-# _THREADED_ANDROID14_OK=true if device is Android 14+ (API >= 34)
+# _THREADED_ANDROID14_OK=true → use skiavkthreaded backend; false → skiaglthreaded
 _THREADED_ANDROID14_OK=false
-[ "$_SDK_VER" -ge 34 ] 2>/dev/null && _THREADED_ANDROID14_OK=true
-log_service "Android SDK: $_SDK_VER — skiavkthreaded HWUI support: $_THREADED_ANDROID14_OK"
+if [ "$_SDK_VER" -ge 34 ] 2>/dev/null || [ "$FORCE_SKIAVKTHREADED_BACKEND" = "y" ]; then
+  _THREADED_ANDROID14_OK=true
+fi
+log_service "Android SDK: $_SDK_VER | FORCE_SKIAVKTHREADED_BACKEND=$FORCE_SKIAVKTHREADED_BACKEND | threaded backend eligible: $_THREADED_ANDROID14_OK"
 
 case "$RENDER_MODE" in
   skiavk|skiavk_all)
@@ -2459,11 +2444,17 @@ case "$RENDER_MODE" in
       # and max_frame_buffer=2 starve the pipeline. use_phase_offsets_as_durations
       # is Samsung-specific and breaks vsync scheduling on all other OEM ROMs.
       # These props are now kept in the strip/delete lists only for cleanup.
-      # Write renderer props to system.prop — boot_completed confirms Vulkan is functional
-      # debug.hwui.renderer persisted here for next-boot per-process HWUI initialization.
-      # debug.renderengine.backend intentionally NOT written to system.prop — see
-      # post-fs-data.sh header comment. It is set via resetprop before SF starts only.
+      # Write renderer props to system.prop — boot_completed confirms Vulkan is functional.
+      # debug.hwui.renderer: persisted for per-process HWUI initialization on next boot.
+      # debug.renderengine.backend: written here so init loads it BEFORE SF starts.
+      #   skiavkthreaded if SDK>=34 or FORCE_SKIAVKTHREADED_BACKEND=y; else skiaglthreaded.
+      #   This is safe in system.prop (init reads before SF) — NOT safe as live resetprop.
       echo "debug.hwui.renderer=skiavk"
+      if [ "$_THREADED_ANDROID14_OK" = "true" ]; then
+        echo "debug.renderengine.backend=skiavkthreaded"
+      else
+        echo "debug.renderengine.backend=skiaglthreaded"
+      fi
       echo "com.qc.hardware=true"
       echo "persist.sys.force_sw_gles=0"
       echo "debug.hwui.use_buffer_age=false"
@@ -2560,9 +2551,10 @@ case "$RENDER_MODE" in
     # OpenGL is always safe — no Vulkan dependency.
     {
       echo "debug.hwui.renderer=skiagl"
-      # debug.renderengine.backend intentionally NOT written to system.prop.
-      # Same risk as skiavk: OEM ROM live callbacks crash SF if this prop changes
-      # at runtime. Set exclusively via resetprop before SF starts in post-fs-data.sh.
+      # debug.renderengine.backend=skiaglthreaded: written to system.prop so init
+      # loads it before SF starts on next boot. skiaglthreaded is safe on all Android
+      # versions — no version gate needed. NOT set live (SF running, OEM callbacks).
+      echo "debug.renderengine.backend=skiaglthreaded"
       echo "persist.sys.force_sw_gles=0"
       echo "com.qc.hardware=true"
       # GL partial-update extensions disabled — unreliable on custom Adreno drivers.
@@ -2647,110 +2639,6 @@ case "$RENDER_MODE" in
     # Normal mode: no render prop in system.prop — system uses its default renderer.
     # We already stripped the old value above, so system.prop is now clean.
     log_service "[OK] system.prop: render mode=normal, no hwui.renderer prop written"
-    ;;
-
-  skiavkthreaded)
-    # ── skiavkthreaded mode ────────────────────────────────────────────────────
-    # Skia Vulkan with the threaded HWUI render path (Android 14+ / API 34+ only).
-    # On Android < 14, HWUI silently ignores "skiavkthreaded" and falls back to
-    # the ROM default. We apply the correct value based on the detected SDK version,
-    # but still write the props the user asked for so they are visible next boot.
-    #
-    # debug.renderengine.backend is NOT written to system.prop (same rationale as
-    # skiavk — set exclusively via resetprop BEFORE SF starts in post-fs-data.sh).
-    if [ "$_THREADED_ANDROID14_OK" = "true" ]; then
-      _SYSPR_HWUI_RENDERER="skiavkthreaded"
-      log_service "[OK] skiavkthreaded: Android 14+ confirmed (SDK $_SDK_VER) — full skiavkthreaded applied"
-    else
-      # Android < 14: skiavkthreaded is unsupported for debug.hwui.renderer.
-      # Apply plain skiavk as HWUI renderer; the threaded RenderEngine backend
-      # (skiaglthreaded / skiavkthreaded) is handled in post-fs-data.sh via
-      # resetprop before SF starts. At minimum, skiaglthreaded gives threaded SF
-      # compositing even without Vulkan threaded HWUI support.
-      _SYSPR_HWUI_RENDERER="skiavk"
-      log_service "[!] skiavkthreaded: Android < 14 (SDK $_SDK_VER)"
-      log_service "    debug.hwui.renderer=skiavkthreaded is NOT supported on this Android version."
-      log_service "    FALLBACK applied: debug.hwui.renderer=skiavk"
-      log_service "    Threaded backend (skiaglthreaded) set via post-fs-data.sh resetprop before SF."
-      log_service "    To get skiavkthreaded HWUI: upgrade to Android 14 (API 34+)."
-    fi
-    {
-      echo "debug.hwui.renderer=${_SYSPR_HWUI_RENDERER}"
-      echo "ro.hwui.use_vulkan=true"
-      echo "persist.vendor.vulkan.enable=1"
-      echo "ro.config.vulkan.enabled=true"
-      echo "com.qc.hardware=true"
-      echo "persist.sys.force_sw_gles=0"
-      echo "debug.hwui.use_buffer_age=false"
-      echo "debug.hwui.use_partial_updates=false"
-      echo "debug.hwui.use_gpu_pixel_buffers=false"
-      echo "renderthread.skia.reduceopstasksplitting=false"
-      echo "debug.hwui.skip_empty_damage=true"
-      echo "debug.hwui.use_hint_manager=true"
-      echo "debug.hwui.target_cpu_time_percent=33"
-      echo "debug.hwui.use_skia_graphite=false"
-      echo "debug.hwui.recycled_buffer_cache_size=4"
-      echo "debug.vulkan.layers="
-      echo "debug.vulkan.dev.layers="
-      echo "persist.graphics.vulkan.validation_enable=0"
-      echo "ro.egl.blobcache.multifile=true"
-      echo "ro.egl.blobcache.multifile_limit=33554432"
-      echo "debug.gralloc.enable_fb_ubwc=1"
-      echo "vendor.gralloc.enable_fb_ubwc=1"
-      echo "ro.sf.blurs_are_expensive=1"
-      echo "graphics.gpu.profiler.support=false"
-      echo "debug.hwui.drawing_enabled=true"
-      echo "hwui.disable_vsync=false"
-      echo "debug.egl.debug_proc="
-      echo "debug.egl.hw=1"
-      echo "debug.sf.hw=1"
-      echo "persist.sys.ui.hw=1"
-      echo "debug.hwui.texture_cache_size=72"
-      echo "debug.hwui.layer_cache_size=48"
-      echo "debug.hwui.path_cache_size=32"
-    } >> "$SYSPR" 2>/dev/null && \
-      log_service "[OK] system.prop: skiavkthreaded props written (hwui.renderer=${_SYSPR_HWUI_RENDERER})" || \
-      log_service "[!] WARNING: Failed to write skiavkthreaded props to system.prop"
-    unset _SYSPR_HWUI_RENDERER
-    ;;
-
-  skiaglthreaded)
-    # ── skiaglthreaded mode ────────────────────────────────────────────────────
-    # Skia GL with threaded RenderEngine backend.
-    # debug.hwui.renderer=skiagl on all Android versions (GL is always supported).
-    # debug.renderengine.backend=skiaglthreaded is set via post-fs-data.sh resetprop
-    # (before SF starts). This is safe on all Android versions.
-    {
-      echo "debug.hwui.renderer=skiagl"
-      echo "com.qc.hardware=true"
-      echo "persist.sys.force_sw_gles=0"
-      echo "debug.hwui.use_buffer_age=false"
-      echo "debug.hwui.use_partial_updates=false"
-      echo "debug.hwui.render_dirty_regions=false"
-      echo "renderthread.skia.reduceopstasksplitting=false"
-      echo "debug.hwui.skip_empty_damage=true"
-      echo "debug.hwui.use_hint_manager=true"
-      echo "debug.hwui.target_cpu_time_percent=66"
-      echo "debug.hwui.use_skia_graphite=false"
-      echo "debug.hwui.recycled_buffer_cache_size=4"
-      echo "ro.egl.blobcache.multifile=true"
-      echo "ro.egl.blobcache.multifile_limit=33554432"
-      echo "debug.gralloc.enable_fb_ubwc=1"
-      echo "vendor.gralloc.enable_fb_ubwc=1"
-      echo "ro.sf.blurs_are_expensive=1"
-      echo "graphics.gpu.profiler.support=false"
-      echo "debug.hwui.drawing_enabled=true"
-      echo "hwui.disable_vsync=false"
-      echo "debug.egl.debug_proc="
-      echo "debug.egl.hw=1"
-      echo "debug.sf.hw=1"
-      echo "persist.sys.ui.hw=1"
-      echo "debug.hwui.texture_cache_size=72"
-      echo "debug.hwui.layer_cache_size=48"
-      echo "debug.hwui.path_cache_size=32"
-    } >> "$SYSPR" 2>/dev/null && \
-      log_service "[OK] system.prop: skiaglthreaded props written" || \
-      log_service "[!] WARNING: Failed to write skiaglthreaded props to system.prop"
     ;;
 esac
 

@@ -239,6 +239,7 @@ QGL="n"
 PLT="n"
 RENDER_MODE="normal"
 GAME_EXCLUSION_DAEMON="n"
+FORCE_SKIAVKTHREADED_BACKEND="n"
 
 CONFIG_FILE="/sdcard/Adreno_Driver/Config/adreno_config.txt"
 ALT_CONFIG="$MODDIR/adreno_config.txt"
@@ -258,6 +259,11 @@ fi
 # service.sh already does this. post-fs-data.sh was missing it — any uppercase
 # variant silently fell through all case branches and renderer was never set.
 RENDER_MODE=$(printf '%s' "$RENDER_MODE" | tr '[:upper:]' '[:lower:]')
+# Legacy: skiavkthreaded/skiaglthreaded were removed as standalone RENDER_MODE values.
+# common.sh normalizes them on load, but guard here defensively.
+[ "$RENDER_MODE" = "skiavkthreaded" ] && RENDER_MODE="skiavk"
+[ "$RENDER_MODE" = "skiaglthreaded" ] && RENDER_MODE="skiagl"
+[ "$FORCE_SKIAVKTHREADED_BACKEND" != "y" ] && FORCE_SKIAVKTHREADED_BACKEND="n"
 
 # ========================================
 # LOGGING SETUP
@@ -1332,7 +1338,7 @@ _EARLY_EFFECTIVE_MODE="$RENDER_MODE"
 _EARLY_CLEAR_REASON=""
 if [ "$_EARLY_EFFECTIVE_MODE" != "$_EARLY_LAST_MODE" ]; then
   _EARLY_CLEAR_REASON="mode_change"
-elif [ "$_EARLY_EFFECTIVE_MODE" = "skiavk" ] || [ "$_EARLY_EFFECTIVE_MODE" = "skiavk_all" ] || [ "$_EARLY_EFFECTIVE_MODE" = "skiavkthreaded" ]; then
+elif [ "$_EARLY_EFFECTIVE_MODE" = "skiavk" ] || [ "$_EARLY_EFFECTIVE_MODE" = "skiavk_all" ]; then
   # Same skiavk mode across boots — still clear to purge stale session-keyed
   # Vulkan pipeline cache blobs (custom Adreno driver stores raw heap addresses
   # that are invalidated on every boot → vkCreatePipelineCache SIGSEGV).
@@ -1387,7 +1393,7 @@ log_boot "========================================"
 _VK_SCORE_FILE="/data/local/tmp/adreno_vk_compat_score"
 _VK_SCORE_WRITTEN=false
 
-if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ] || [ "$RENDER_MODE" = "skiavkthreaded" ]; then
+if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
 
   log_boot "========================================"
   log_boot "VULKAN COMPATIBILITY GATE"
@@ -1485,7 +1491,7 @@ if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ] || [ "$REN
 fi
 
 # ── Fix ro.hardware.vulkan ICD at earliest possible point (pre-Zygote) ────────
-if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ] || [ "$RENDER_MODE" = "skiavkthreaded" ]; then
+if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
   if command -v resetprop >/dev/null 2>&1; then
     _curr_hwvk=$(getprop ro.hardware.vulkan 2>/dev/null || echo "")
     case "$_curr_hwvk" in
@@ -1514,7 +1520,7 @@ unset _VK_SCORE_FILE _VK_SCORE_WRITTEN
 # ==========================================================================
 apply_gralloc_compat_props() {
   case "$RENDER_MODE" in
-    skiavk|skiavk_all|skiavkthreaded) ;;
+    skiavk|skiavk_all) ;;
     *) return 0 ;;
   esac
   command -v resetprop >/dev/null 2>&1 || return 1
@@ -1875,42 +1881,43 @@ case "$RENDER_MODE" in
       # OEM property watchers → RenderEngine reinit mid-frame → SF crash.
       if [ "$FIRST_BOOT_PENDING" = "false" ]; then
         resetprop debug.hwui.renderer skiavk
-        # skiavkthreaded: SurfaceFlinger Vulkan threaded compositor (Android 14+).
-        # SKIA_VK_THREADED = enum 6 in RenderEngine.h; SkiaVkRenderEngine.cpp
-        # implements it. Android 15 requires it by default. Valid since AOSP 14.
-        # Set via resetprop BEFORE SF starts (post-fs-data runs pre-SF). Do NOT
-        # set this in service.sh (SF is live — OEM property watchers fire a
-        # RenderEngine reinit on change → SF crash → watchdog reboot). Do NOT
-        # set in system.prop (loaded before module overlays mount → no Vulkan
-        # driver → SF falls back to GL silently, ignoring the prop).
+        # debug.renderengine.backend: set via resetprop BEFORE SF starts.
+        # skiavkthreaded = SkiaVkRenderEngine (Android 14+ / API 34+).
+        # skiaglthreaded = fallback threaded GL compositor (all Android versions).
+        # DO NOT set this live in service.sh — SF is running, OEM ROM property
+        # watchers fire a RenderEngine reinit mid-frame → SF crash → watchdog reboot.
+        # DO NOT set in system.prop alone (loaded before module overlays mount →
+        # no Vulkan driver present → SF silently falls back, ignoring the prop).
+        # Here (post-fs-data, pre-SF) is the only safe window to set it.
         #
-        # GATE: Android 12/13 (SDK < 34) SurfaceFlinger does not implement
-        # SkiaVkRenderEngine. The known-valid backends on Android 12/13 are:
-        # threaded, skiagl, skiaglthreaded, gles. Passing an unrecognized string
-        # is harmless on AOSP (falls back to skiaglthreaded) but OEM ROMs
-        # (MIUI/HyperOS, OneUI, ColorOS) perform strict validation and reject
-        # unknown backends → SF init failure → watchdog reboot (bootloop).
-        # Only set skiavkthreaded on Android 14+ (API 34+) where
-        # SkiaVkRenderEngine.cpp is guaranteed present in the AOSP tree.
+        # Gate: API >= 34 OR FORCE_SKIAVKTHREADED_BACKEND=y (user override).
+        # On Android < 14: OEM SFs reject unknown backend strings → bootloop.
+        # Only bypass if FORCE flag is set AND .boot_success confirmed safe.
         _re_sdk=$(getprop ro.build.version.sdk 2>/dev/null || echo "0")
+        _re_threaded_ok=false
         if [ "$_re_sdk" -ge 34 ] 2>/dev/null; then
+          _re_threaded_ok=true
+        elif [ "$FORCE_SKIAVKTHREADED_BACKEND" = "y" ]; then
+          _re_threaded_ok=true
+          log_boot "[WARN] FORCE_SKIAVKTHREADED_BACKEND=y: SDK=${_re_sdk} < 34 — skiavkthreaded forced by user (bootloop risk on strict OEM ROMs)"
+        fi
+        if [ "$_re_threaded_ok" = "true" ]; then
           if [ -f "$MODDIR/.boot_success" ]; then
             # Previous boot reached boot_completed with skiavk active — safe to enable
             resetprop debug.renderengine.backend skiavkthreaded
-            log_boot "[OK] skiavkthreaded: .boot_success confirmed, SDK=${_re_sdk} >= 34, SkiaVkRenderEngine present"
+            log_boot "[OK] renderengine.backend=skiavkthreaded: .boot_success confirmed, SDK=${_re_sdk}$([ "$FORCE_SKIAVKTHREADED_BACKEND" = "y" ] && echo " (FORCED)")"
           else
-            # No success marker: first real boot after install, or previous boot froze before
-            # boot_completed. Use skiaglthreaded (always works) so SF starts cleanly this
-            # boot. service.sh will write .boot_success at boot_completed → next boot
-            # promotes to skiavkthreaded. Worst-case: 1 boot on GL backend, not 3 freezes.
+            # First real boot after install, or previous boot froze before boot_completed.
+            # Use skiaglthreaded so SF starts cleanly. Next boot promotes to skiavkthreaded.
             resetprop debug.renderengine.backend skiaglthreaded
-            log_boot "[SAFE] skiaglthreaded: no .boot_success present — SF using safe GL backend this boot"
-            log_boot "       skiavkthreaded will activate next boot once .boot_success is written by service.sh"
+            log_boot "[SAFE] renderengine.backend=skiaglthreaded: no .boot_success — safe GL backend this boot"
+            log_boot "       skiavkthreaded activates next boot after service.sh writes .boot_success"
           fi
         else
-          log_boot "[SKIP] skiavkthreaded: Android SDK=${_re_sdk} < 34, SkiaVkRenderEngine absent — not set (OEM bootloop prevention)"
+          log_boot "[SKIP] skiavkthreaded backend: SDK=${_re_sdk} < 34, SkiaVkRenderEngine absent — using skiaglthreaded fallback"
+          resetprop debug.renderengine.backend skiaglthreaded
         fi
-        unset _re_sdk
+        unset _re_sdk _re_threaded_ok
       fi
       # ── Dangerous SF props INTENTIONALLY NOT SET via resetprop ──────────────
       # (latch_unsignaled, disable_backpressure, disable_triple_buffer, etc.)
@@ -2292,6 +2299,11 @@ case "$RENDER_MODE" in
 
   skiagl)
     {
+      # Renderer props: hwui.renderer for per-process HWUI; renderengine.backend
+      # for SurfaceFlinger compositor. Both persisted here for next boot.
+      # renderengine.backend is also set via resetprop below (pre-SF, this boot).
+      printf 'debug.hwui.renderer=skiagl\n'
+      printf 'debug.renderengine.backend=skiaglthreaded\n'
       # force_sw_gles=0 — use hardware GLES (not software fallback)
       printf 'persist.sys.force_sw_gles=0\n'
       # Qualcomm hardware acceleration gate — enables Qualcomm ION buffer paths in gralloc
@@ -2558,93 +2570,23 @@ case "$RENDER_MODE" in
     ;;
 
   skiavkthreaded)
-    # ── skiavkthreaded mode ───────────────────────────────────────────────────
-    # User selected skiavkthreaded explicitly. This means they want:
-    #   debug.hwui.renderer=skiavkthreaded  — HWUI app renderer (Android 14+)
-    #   debug.renderengine.backend=skiavkthreaded  — SF compositor (Android 14+)
-    #
-    # Android 13 (SDK ≤ 33): HWUI does NOT recognise "skiavkthreaded" as a valid
-    # debug.hwui.renderer value; it silently falls back to the default (skiagl or
-    # skiavk depending on ro.hwui.use_vulkan). To give the user SOMETHING useful,
-    # we set debug.hwui.renderer=skiavk (Vulkan HWUI, best available on Android 13)
-    # and debug.renderengine.backend=skiaglthreaded (threaded GL for SF — always
-    # safe). The WebUI already informed the user with a warning banner.
-    #
-    # Android 14+ (SDK ≥ 34): full skiavkthreaded for both HWUI and SF.
-    _skvt_sdk=$(getprop ro.build.version.sdk 2>/dev/null || echo "0")
-    if command -v resetprop >/dev/null 2>&1; then
-      if [ "$_skvt_sdk" -ge 34 ] 2>/dev/null; then
-        # Full skiavkthreaded path (Android 14+)
-        resetprop debug.hwui.renderer skiavkthreaded
-        resetprop ro.hwui.use_vulkan true
-        resetprop ro.config.vulkan.enabled true
-        resetprop persist.vendor.vulkan.enable true
-        resetprop com.qc.hardware true
-        resetprop persist.sys.force_sw_gles 0
-        resetprop debug.hwui.use_buffer_age false
-        resetprop debug.hwui.use_partial_updates false
-        resetprop debug.hwui.use_gpu_pixel_buffers false
-        resetprop renderthread.skia.reduceopstasksplitting false
-        resetprop debug.hwui.skip_empty_damage true
-        resetprop debug.hwui.webview_overlays_enabled true
-        if [ -f "$MODDIR/.boot_success" ]; then
-          resetprop debug.renderengine.backend skiavkthreaded
-          log_boot "[OK] skiavkthreaded: SDK=${_skvt_sdk} >= 34, .boot_success present — full skiavkthreaded HWUI+SF"
-        else
-          # First real boot — use safe GL SF backend; promotes to skiavkthreaded next boot
-          resetprop debug.renderengine.backend skiaglthreaded
-          log_boot "[SAFE] skiavkthreaded: SDK=${_skvt_sdk} >= 34 but no .boot_success — SF=skiaglthreaded this boot"
-          log_boot "       skiavkthreaded SF will activate next boot after .boot_success written"
-        fi
-      else
-        # Android < 14: degrade gracefully. HWUI gets skiavk (best available),
-        # SF gets skiaglthreaded (always safe). The WebUI warned the user already.
-        resetprop debug.hwui.renderer skiavk
-        resetprop ro.hwui.use_vulkan true
-        resetprop ro.config.vulkan.enabled true
-        resetprop persist.vendor.vulkan.enable true
-        resetprop com.qc.hardware true
-        resetprop persist.sys.force_sw_gles 0
-        resetprop debug.hwui.use_buffer_age false
-        resetprop debug.hwui.use_partial_updates false
-        resetprop debug.hwui.use_gpu_pixel_buffers false
-        resetprop renderthread.skia.reduceopstasksplitting false
-        resetprop debug.hwui.skip_empty_damage true
-        resetprop debug.hwui.webview_overlays_enabled true
-        resetprop debug.renderengine.backend skiaglthreaded
-        log_boot "[DEGRADE] skiavkthreaded: SDK=${_skvt_sdk} < 34 — HWUI=skiavk, SF=skiaglthreaded (best available on Android <14)"
-        log_boot "          WebUI informed user: skiavkthreaded requires Android 14+"
-      fi
-    fi
-    unset _skvt_sdk
-    log_boot "[OK] Render mode: skiavkthreaded applied"
+    # ── LEGACY: skiavkthreaded was removed as a separate RENDER_MODE ─────────
+    # common.sh normalizes this to 'skiavk' on load. This branch is only reached
+    # if the config was written directly without going through common.sh.
+    # Redirect to skiavk behaviour by falling through after normalization.
+    log_boot "[LEGACY] RENDER_MODE=skiavkthreaded normalized to skiavk (renderengine.backend handled by skiavk block)"
+    RENDER_MODE="skiavk"
+    # Note: RENDER_MODE change here does NOT re-execute the skiavk case above.
+    # The renderengine.backend will be set on next boot. Log for diagnostics.
+    log_boot "         Reboot to apply renderengine.backend=skiavkthreaded (or skiaglthreaded fallback)"
     ;;
 
   skiaglthreaded)
-    # ── skiaglthreaded mode ───────────────────────────────────────────────────
-    # User selected skiaglthreaded. This is safe on all Android versions.
-    #   debug.hwui.renderer=skiagl         — HWUI uses Skia+GL (stable, compatible)
-    #   debug.renderengine.backend=skiaglthreaded — SF uses threaded GL compositor
-    #
-    # "skiaglthreaded" is not a valid debug.hwui.renderer value — it is only valid
-    # for debug.renderengine.backend. For HWUI we use "skiagl" (which is the GL path).
-    # This gives users threaded SF compositing without touching HWUI Vulkan.
-    if command -v resetprop >/dev/null 2>&1; then
-      resetprop debug.hwui.renderer skiagl
-      resetprop persist.sys.force_sw_gles 0
-      resetprop com.qc.hardware true
-      resetprop debug.hwui.use_buffer_age false
-      resetprop debug.hwui.use_partial_updates false
-      resetprop debug.hwui.render_dirty_regions false
-      resetprop debug.hwui.webview_overlays_enabled true
-      resetprop renderthread.skia.reduceopstasksplitting false
-      resetprop debug.hwui.skip_empty_damage true
-      # skiaglthreaded SF backend — works on all Android versions.
-      # SF gets a dedicated RenderThread for compositing without Vulkan dependency.
-      resetprop debug.renderengine.backend skiaglthreaded
-      log_boot "[OK] skiaglthreaded: HWUI=skiagl, SF=skiaglthreaded — threaded GL compositor applied (all Android versions)"
-    fi
-    log_boot "[OK] Render mode: skiaglthreaded applied"
+    # ── LEGACY: skiaglthreaded was removed as a separate RENDER_MODE ─────────
+    # common.sh normalizes this to 'skiagl' on load. Same as above.
+    log_boot "[LEGACY] RENDER_MODE=skiaglthreaded normalized to skiagl (renderengine.backend=skiaglthreaded handled by skiagl block)"
+    RENDER_MODE="skiagl"
+    log_boot "         Reboot to apply renderengine.backend=skiaglthreaded via skiagl block"
     ;;
 
   normal|*)

@@ -22,10 +22,7 @@
     <p style="color:#777;font-size:0.78em;">If you believe this is wrong, ensure your module.prop contains the original author credits. Report fake redistributions to <strong style="color:#c084fc;">@zesty_pic</strong></p>
 </div>
 
-<!-- skiavkthreaded Android version warning banner — shown/hidden by JS -->
-<div id="skiavkthreadedWarn" style="display:none;position:fixed;bottom:72px;left:12px;right:12px;z-index:9999;padding:10px 14px;border-radius:10px;background:rgba(255,180,0,0.13);border:1px solid rgba(255,180,0,0.4);font-size:0.84em;color:#ffd966;line-height:1.45;">
-    ⚠️ <strong>skiavkthreaded</strong> only works fully from <strong>Android 14</strong> and up. On Android &lt;14, HWUI will fall back to <strong>skiavk</strong> automatically. You can still enable it.
-</div>
+<!-- Force-threaded backend warning is now shown inline in the forceThreadedRow toggle (see RENDER_MODE section) -->
 
 
 
@@ -446,11 +443,21 @@
                         <option value="skiavk">SkiaVK</option>
                         <option value="skiagl">SkiaGL</option>
                         <option value="skiavk_all">SkiaVK All</option>
-                        <option value="skiavkthreaded">SkiaVK Threaded</option>
-                        <option value="skiaglthreaded">SkiaGL Threaded</option>
                     </select>
                     <span class="arrow">▼</span>
                 </div>
+            </div>
+
+            <!-- Force skiavkthreaded backend toggle — only shown when skiavk/skiavk_all is selected -->
+            <div id="forceThreadedRow" class="setting-row" style="display:none;">
+                <div class="text-col">
+                    <div class="setting-title">Force Skiavkthreaded Backend</div>
+                    <div class="setting-desc">Force <code>debug.renderengine.backend=skiavkthreaded</code> even if your device is below Android 14 (API 34). On Android &lt;14, SurfaceFlinger may not implement SkiaVkRenderEngine — strict OEM ROMs (MIUI/HyperOS, OneUI) may bootloop. Only enable this if you know your device supports it.</div>
+                </div>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="FORCE_SKIAVKTHREADED_BACKEND">
+                    <span class="slider"></span>
+                </label>
             </div>
 
             <div class="divider elegant-divider"></div>

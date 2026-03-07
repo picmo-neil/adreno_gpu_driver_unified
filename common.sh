@@ -26,25 +26,24 @@ load_config() {
     _v="${_v%$'\r'}"
     # Normalise boolean keys
     case "$_k" in
-      VERBOSE|ARM64_OPT|QGL|PLT|GAME_EXCLUSION_DAEMON)
+      VERBOSE|ARM64_OPT|QGL|PLT|GAME_EXCLUSION_DAEMON|FORCE_SKIAVKTHREADED_BACKEND)
         case "$_v" in
           [Yy]|[Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee]) _v='y' ;;
           *) _v='n' ;;
         esac ;;
       RENDER_MODE)
         case "$_v" in
-          # Canonical lowercase values — pass through as-is
-          normal|skiavk|skiagl|skiavk_all|skiavkthreaded|skiaglthreaded) ;;
+          # Canonical values — pass through as-is
+          normal|skiavk|skiagl|skiavk_all) ;;
           [Nn][Oo][Rr][Mm][Aa][Ll])            _v='normal' ;;
           [Ss][Kk][Ii][Aa][Vv][Kk])            _v='skiavk' ;;
           [Ss][Kk][Ii][Aa][Gg][Ll])            _v='skiagl' ;;
           [Ss][Kk][Ii][Aa][Vv][Kk]_[Aa][Ll][Ll]) _v='skiavk_all' ;;
-          # skiavkthreaded — debug.hwui.renderer=skiavkthreaded (Android 14+)
-          # On Android < 14, service.sh degrades to skiavk automatically.
-          [Ss][Kk][Ii][Aa][Vv][Kk][Tt][Hh][Rr][Ee][Aa][Dd][Ee][Dd]) _v='skiavkthreaded' ;;
-          # skiaglthreaded — debug.hwui.renderer=skiagl + SF backend=skiaglthreaded
-          # Works on all Android versions; no version gate needed.
-          [Ss][Kk][Ii][Aa][Gg][Ll][Tt][Hh][Rr][Ee][Aa][Dd][Ee][Dd]) _v='skiaglthreaded' ;;
+          # Legacy: skiavkthreaded/skiaglthreaded were removed as separate modes.
+          # renderengine.backend is now folded into skiavk/skiavk_all/skiagl.
+          # Use FORCE_SKIAVKTHREADED_BACKEND=y to force skiavkthreaded backend.
+          [Ss][Kk][Ii][Aa][Vv][Kk][Tt][Hh][Rr][Ee][Aa][Dd][Ee][Dd]) _v='skiavk' ;;
+          [Ss][Kk][Ii][Aa][Gg][Ll][Tt][Hh][Rr][Ee][Aa][Dd][Ee][Dd]) _v='skiagl' ;;
           *) _v='normal' ;;
         esac ;;
     esac
@@ -55,6 +54,7 @@ load_config() {
       PLT)         PLT="$_v" ;;
       RENDER_MODE) RENDER_MODE="$_v" ;;
       GAME_EXCLUSION_DAEMON) GAME_EXCLUSION_DAEMON="$_v" ;;
+      FORCE_SKIAVKTHREADED_BACKEND) FORCE_SKIAVKTHREADED_BACKEND="$_v" ;;
     esac
   done < "$cfg"
 }
