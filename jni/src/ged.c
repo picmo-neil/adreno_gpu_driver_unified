@@ -53,6 +53,30 @@
  *   6. skiavkthreaded/skiaglthreaded modes not handled.
  *      Fix: SDK detection at startup; g_restore_hwui set to the correct
  *      hwui.renderer value for the configured mode.
+ *   7. PROC_EVENT_COMM handler was broken — zero games ever detected:
+ *      a) Used process_tgid unconditionally for pending_remove().
+ *         Worker threads (FinalizerDaemon, RenderThread, etc.) share their
+ *         process's tgid but have distinct pids.  The first worker-thread
+ *         COMM after zygote fork consumed the pending entry; the main
+ *         thread's package-name COMM arrived later to find an empty table.
+ *         Kernel source confirms: process_pid = task->pid (caller TID),
+ *         process_tgid = task->tgid (thread group PID).
+ *         Fix: if (process_pid != process_tgid) ignore — worker thread.
+ *      b) Called pending_remove() BEFORE comm_could_be_app().
+ *         ActivityThread.main() fires Process.setArgV0("<pre-initialized>")
+ *         immediately after fork.  This fires PROC_EVENT_COMM on the main
+ *         thread (pid==tgid) with comm="<pre-initialized>".  The old order
+ *         called pending_remove (success, entry gone) then comm_could_be_app
+ *         (fails, starts with '<').  Entry consumed before the real package
+ *         name COMM from handleBindApplication() arrived 1–15 s later.
+ *         Fix: comm_could_be_app() first; only remove from pending on match.
+ *      c) Zygote restart detection was placed after comm_could_be_app() —
+ *         making it dead code since "zygote64" never passes that filter.
+ *         Fix: zygote check moved before comm_could_be_app().
+ *   8. PENDING_TIMEOUT_S was 5 s — too short for heavy games (Genshin Impact,
+ *      PUBG on some devices) where AMS bind + handleBindApplication can take
+ *      5–15 s, causing the entry to expire before the package-name COMM.
+ *      Fix: raised to 20 s.
  *
  * ARCHITECTURE:
  *   Launch detection : Netlink PROC_EVENT_FORK + PROC_EVENT_COMM
@@ -106,7 +130,7 @@ static inline int sys_pidfd_open(pid_t pid, unsigned int flags) {
 #define MAX_PENDING       128
 #define MAX_EPOLL_EVENTS  32
 #define NL_BUF_SIZE       8192
-#define PENDING_TIMEOUT_S 5
+#define PENDING_TIMEOUT_S 20
 
 #define PID_FILE   "/data/local/tmp/adreno_ged_pid"
 #define STATE_FILE "/data/local/tmp/adreno_ged_active"
@@ -581,16 +605,103 @@ static void handle_netlink(void) {
             break;
         }
         case PROC_EVENT_COMM: {
-            pid_t pid = ev->event_data.comm.process_tgid;
-            if (!pending_remove(pid)) break;
-            if (!comm_could_be_app(ev->event_data.comm.comm)) break;
-            char pkg[MAX_PKG_LEN];
-            if (!read_cmdline(pid, pkg, sizeof(pkg))) break;
-            /* detect new zygote (e.g. after crash/restart) */
-            if (strcmp(pkg,"zygote64")==0 || strcmp(pkg,"zygote")==0 || strcmp(pkg,"zygote32")==0) {
-                add_zygote_pid(pid); klog("new zygote PID=%d", (int)pid); break;
+            pid_t pid  = ev->event_data.comm.process_pid;   /* TID of renaming thread */
+            pid_t tgid = ev->event_data.comm.process_tgid;  /* process PID (thread group) */
+
+            /*
+             * BUG FIX 1 — worker-thread COMM events must not consume pending entries.
+             *
+             * PROC_EVENT_COMM fires for every prctl(PR_SET_NAME) call, from any
+             * thread.  Kernel source (drivers/connector/cn_proc.c):
+             *     ev->event_data.comm.process_pid  = task->pid;   // caller's TID
+             *     ev->event_data.comm.process_tgid = task->tgid;  // thread group PID
+             *
+             * Worker threads (RenderThread, FinalizerDaemon, HeapTaskDaemon,
+             * ReferenceQueueDaemon, AsyncTask, …) share the main thread's tgid but
+             * have their own TIDs, so process_pid != process_tgid for them.
+             *
+             * OLD CODE:  pid_t pid = ev->event_data.comm.process_tgid;
+             *            if (!pending_remove(pid)) break;
+             *            if (!comm_could_be_app(comm)) break;
+             *
+             * What happened on a real launch (PUBG / Genshin):
+             *   1. Zygote forks  → FORK event → pending_add(child_tgid)
+             *   2. ActivityThread.main() runs:
+             *        Process.setArgV0("<pre-initialized>")  → COMM: pid==tgid,
+             *        comm = "<pre-initialized>" (starts with '<', fails isalpha)
+             *        OLD CODE: pending_remove(tgid) → SUCCESS → ENTRY CONSUMED
+             *                  comm_could_be_app("<pre-initialized>") → 0 → break
+             *        → pending entry gone, game MISSED PERMANENTLY
+             *   3. handleBindApplication() runs (1–15 s later):
+             *        Process.setArgV0("com.tencent.ig") → COMM: pid==tgid,
+             *        comm = "com.tencent.i" (15-char truncation)
+             *        OLD CODE: pending_remove(tgid) → 0 (already gone) → break
+             *
+             * FIX A: reject worker threads immediately (process_pid != process_tgid).
+             * FIX B: check comm_could_be_app() BEFORE pending_remove() so that
+             *        intermediate names like "<pre-initialized>" do not consume the
+             *        entry — it is preserved until the real package-name COMM fires.
+             */
+            if (pid != tgid) break;   /* worker thread rename — preserve pending entry */
+
+            const char *comm_str = ev->event_data.comm.comm;
+
+            /*
+             * Zygote restart detection — MUST come before comm_could_be_app().
+             * "zygote64", "zygote", "zygote32" have no '.' and length < 15, so they
+             * fail comm_could_be_app().  When init restarts a crashed zygote its
+             * child enters pending via the parent==1 path in PROC_EVENT_FORK.
+             * Detect it here before the app-name filter so we can track the new PID.
+             * Note: the old code placed this check AFTER comm_could_be_app(), making
+             * it dead code — zygote names never pass that filter.
+             */
+            if (strcmp(comm_str, "zygote64") == 0 ||
+                strcmp(comm_str, "zygote")   == 0 ||
+                strcmp(comm_str, "zygote32") == 0) {
+                if (pending_remove(tgid)) {
+                    add_zygote_pid(tgid);
+                    klog("new zygote PID=%d", (int)tgid);
+                }
+                break;
             }
-            if (pkg_matches(pkg)) game_open(pkg, pid);
+
+            /* comm_could_be_app: pre-filter before the more expensive read_cmdline.
+             * Rejects: "usap64", "usap32", "<pre-initialized>", kernel threads,
+             * native daemon names.  Only names with a '.' or ≥15 chars pass —
+             * these are the only cases that could be a Java package name.
+             * This preserves the pending entry until the real package-name COMM fires.
+             */
+            if (!comm_could_be_app(comm_str)) break;   /* keep entry alive in pending */
+
+            /* BUG A FIX — USAP pool detection.
+             *
+             * Android Q+ USAP pool: Zygote pre-forks "unspecialized app process"
+             * instances (named "usap64"/"usap32") that sit idle in a pool. When
+             * an app launches, the system specializes an existing USAP in-place —
+             * no second fork. The PROC_EVENT_FORK fires at PRE-FORK time, which
+             * can be MINUTES before specialization. With PENDING_TIMEOUT_S=20 the
+             * pending entry expires, pending_remove() returns 0, and the game
+             * launch is missed permanently.
+             *
+             * OLD CODE:
+             *   if (!pending_remove(tgid)) break;  // ← gate: misses USAP games
+             *
+             * FIX: Use pending_remove() only for cleanup (non-blocking), then
+             * always call read_cmdline() + pkg_matches() directly. The pending
+             * table is no longer a detection gate. read_cmdline() is ~3 syscalls
+             * and only runs when comm_could_be_app() returns true (i.e. the comm
+             * has a '.' or is ≥15 chars — only Java app launches). Total overhead
+             * added: ~3 syscalls per Java app launch on this device. Negligible.
+             *
+             * Double-open protection: game_open() checks `g_active[i].pid == pid`
+             * for all active entries before adding, so re-detecting the same PID
+             * (e.g. from a race between netlink and startup_scan) is safe.
+             */
+            (void)pending_remove(tgid);  /* clean up table; not a gate */
+
+            char pkg[MAX_PKG_LEN];
+            if (!read_cmdline(tgid, pkg, sizeof(pkg))) break;
+            if (pkg_matches(pkg)) game_open(pkg, tgid);
             break;
         }
         case PROC_EVENT_EXIT:

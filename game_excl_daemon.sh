@@ -26,12 +26,15 @@
 #   DETECTING GAME START — logcat events buffer:
 #     ActivityManager posts an am_proc_start binary event to the events
 #     log buffer every time any app process is created. This daemon opens
-#     a streaming logcat session against that buffer. The read() syscall
-#     on the logcat pipe blocks in TASK_INTERRUPTIBLE state inside the
-#     kernel (the pipe is backed by logd's epoll loop). Between game
-#     launches the daemon is parked in the kernel — zero CPU, zero
-#     wakeups. It wakes only when logd has a new event line ready.
+#     a streaming logcat session against that buffer with -v brief format.
+#     The read() syscall on the logcat pipe blocks in TASK_INTERRUPTIBLE
+#     state inside the kernel (the pipe is backed by logd's epoll loop).
+#     Between game launches the daemon is parked in the kernel — zero CPU,
+#     zero wakeups. It wakes only when logd has a new event line ready.
 #     One logcat process covers ALL packages in the exclusion list.
+#     NOTE: -v raw must NOT be used. It strips the event tag ("am_proc_start")
+#     from every output line, causing the pre-filter to never match and
+#     zero games to be detected. -v brief keeps the tag in each line.
 #
 #   DETECTING GAME EXIT — /proc/$PID existence:
 #     The kernel removes /proc/$PID atomically when the process group
@@ -82,6 +85,13 @@ case "$_SKIAVK_MODE" in
   skiavk|skiavk_all) ;;
   *) _SKIAVK_MODE="skiavk" ;;
 esac
+
+# FIX: Accept MODDIR override from $2 (service.sh passes it explicitly).
+# On KernelSU without meta-module, MODDIR is not exported to the environment;
+# without this the _GAME_EXCL_MOD path below resolves to "/game_exclusion_list.sh"
+# (empty MODDIR prefix) and the module's bundled exclusion list is silently skipped,
+# falling back to the inline hardcoded defaults instead of the user's edits.
+[ -n "${2:-}" ] && MODDIR="$2"
 
 # ── Duplicate-instance guard ──────────────────────────────────────────────────
 # Only one daemon may run at a time. Check the PID file; if the recorded
@@ -358,17 +368,39 @@ rmdir "$_LOCK_DIR" 2>/dev/null || true  # clear any stale lock from a previous c
 echo "[ADRENO-GED] Started (PID=$$, restore_mode=${_SKIAVK_MODE})" \
   > /dev/kmsg 2>/dev/null || true
 
-# ── Startup scan (one-time, before main loop) ─────────────────────────────────
+# ── Main monitoring loop — survives logcat/logd restarts ───────────────────────
+#
+# BUG 1 FIX: The previous code called:
+#   exec /system/bin/sh "$0" "$_SKIAVK_MODE" "${MODDIR:-}"
+# at the logcat pipe exit path. exec() keeps the SAME PID. The duplicate-
+# instance guard then read its own PID from the PID file, called kill -0 on
+# itself (always succeeds), and exited: "Already running as PID $$".
+# The daemon could never restart after a logd crash.
+#
+# Fix: outer while-true loop around the logcat pipe. The daemon process
+# stays alive (same PID, PID file valid, all sub-daemons intact). After
+# each logcat exit we call _startup_scan before restarting logcat to catch
+# any games that launched during the brief down window.
+#
+# _startup_scan double-invocation safety (game was already running when
+# logcat died): _game_open increments counter 1→2 (no skiagl re-switch since
+# cnt!=1). Two _wait_game_death sub-daemons for the same PID (old + new)
+# both call _game_closed when game exits: 2→1 (no restore) then 1→0
+# (restore). Renderer behaviour is correct.
+while true; do
+
+# ── /proc scan before each logcat session ──────────────────────────────────
+# First call: catches games running before the daemon started.
+# Subsequent calls: catches games launched during the logcat down window.
 _startup_scan
 
-# ── Main event loop ───────────────────────────────────────────────────────────
-# logcat -b events streams Android's binary event log buffer.
+# ── logcat -b events streams Android's binary event log buffer ─────────────
 #
-# am_proc_start event format (logcat -v raw output):
-#   I am_proc_start: [user,pid,uid,package,type,component]
+# am_proc_start event format — tag ID 30014, stable since Android 4.x:
+#   (User|1|5),(PID|1|5),(UID|1|5),(Process Name|3),(Type|3),(Component|3)
 #
-# Example line:
-#   I am_proc_start: [0,9876,10123,com.tencent.ig,activity,com.tencent.ig/.MainActivity]
+# Example line with -v brief (what we use):
+#   I/am_proc_start(1): [0,9876,10123,com.tencent.ig,activity,com.tencent.ig/.MainActivity]
 #
 # Comma-separated fields inside the brackets (1-indexed):
 #   1 = user         (Android multi-user ID, usually 0)
@@ -378,13 +410,32 @@ _startup_scan
 #   5 = type         (activity / service / provider / receiver)
 #   6 = component    (full package/class component name)
 #
-# -v raw: strips logcat timestamp/header prefix so each line is just the
-# tag and payload. Simplifies parsing and avoids extra string allocation.
+# FORMAT NOTES — why we use -v brief and not -v raw:
+#
+#   -v raw (BROKEN):
+#     Strips the event tag entirely from output. A line looks like:
+#       [0,9876,10123,com.tencent.ig,activity,com.tencent.ig/.MainActivity]
+#     The string "am_proc_start" is completely absent.
+#     The *am_proc_start* pre-filter below NEVER matches.
+#     Result: zero games ever detected. This was the original bug.
+#
+#   -v brief (what we specify):
+#     Outputs: I/am_proc_start(PID): [fields]
+#     The tag is always present. Pre-filter matches. Parser finds '[' correctly.
+#     Consistent across all Android versions (4.x through 15+).
+#
+#   No -v flag (DO NOT USE):
+#     Default varies by Android version — "brief" on Android ≤6, "threadtime"
+#     on Android ≥7.  threadtime output looks like:
+#       MM-DD HH:MM:SS.mmm  PID  TID  I  am_proc_start: [...]
+#     The tag is still present so the pre-filter would still match, but the
+#     format is device-version-dependent. Specifying -v brief is safer and
+#     produces the simplest, most predictable output.
 #
 # The read() syscall on this pipe blocks in TASK_INTERRUPTIBLE inside the
 # kernel's pipe wait queue (logd uses epoll internally). Zero CPU between
 # process-start events -- the daemon is truly asleep in the kernel.
-logcat -b events -v raw 2>/dev/null | while IFS= read -r _line; do
+logcat -b events -v brief 2>/dev/null | while IFS= read -r _line; do
 
   # ── Fast pre-filter ───────────────────────────────────────────────────────
   # The events buffer contains many event types (gc_heap_info, am_activity_launch,
@@ -442,11 +493,12 @@ logcat -b events -v raw 2>/dev/null | while IFS= read -r _line; do
   _wait_game_death "$_pkg" "$_pid" &
 
 done
-# ── Pipe exit ─────────────────────────────────────────────────────────────────
-# logcat should never exit during normal operation. If it does (e.g. logd
-# restart, OOM kill of logcat itself), wait 5 seconds and re-exec this daemon
-# to restore the monitoring. Pass the restore mode through the re-exec.
-echo "[ADRENO-GED] logcat pipe exited unexpectedly -- restarting in 5s" \
+# ── Inner while pipe exited ────────────────────────────────────────────────
+# logcat should never exit during normal operation. If it does (logd restart,
+# OOM kill of logcat itself), sleep 5s then loop back to restart logcat.
+# The outer while-true keeps this daemon alive indefinitely.
+echo "[ADRENO-GED] logcat pipe exited -- restarting in 5s" \
   > /dev/kmsg 2>/dev/null || true
 sleep 5
-exec /system/bin/sh "$0" "$_SKIAVK_MODE"
+
+done  # outer while true

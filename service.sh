@@ -552,7 +552,44 @@ esac
 if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
   if cmd_exists resetprop; then
 
-    # ── Check if adreno_ged (native binary) is already running ─────────────
+    # ── Launch native adreno_ged binary (FIX: was never launched anywhere) ──
+    # The build pipeline places the binary in:
+    #   $MODDIR/bin/arm64-v8a/adreno_ged   (64-bit, preferred)
+    #   $MODDIR/bin/armeabi-v7a/adreno_ged  (32-bit, fallback)
+    # adreno_ged handles ALL game detection via kernel interfaces:
+    #   - Launch: netlink PROC_EVENT_FORK + PROC_EVENT_COMM  (zero overhead)
+    #   - Death : pidfd_open + epoll                         (zero overhead)
+    #   - Startup scan at daemon start
+    # The binary writes its own PID to /data/local/tmp/adreno_ged_pid so
+    # the check below can detect it. If the binary is unavailable or fails,
+    # the shell fallback (game_excl_daemon.sh) activates automatically.
+    _GED_NATIVE_BIN=""
+    if [ -f "$MODDIR/bin/arm64-v8a/adreno_ged" ]; then
+      _GED_NATIVE_BIN="$MODDIR/bin/arm64-v8a/adreno_ged"
+    elif [ -f "$MODDIR/bin/armeabi-v7a/adreno_ged" ]; then
+      _GED_NATIVE_BIN="$MODDIR/bin/armeabi-v7a/adreno_ged"
+    fi
+    if [ -n "$_GED_NATIVE_BIN" ]; then
+      # Guard: don't re-launch if already running (e.g. from post-fs-data.sh)
+      _ged_pre_pid=""
+      [ -f "/data/local/tmp/adreno_ged_pid" ] && \
+        { IFS= read -r _ged_pre_pid; } < "/data/local/tmp/adreno_ged_pid" 2>/dev/null || true
+      if [ -n "$_ged_pre_pid" ] && kill -0 "$_ged_pre_pid" 2>/dev/null; then
+        log_service "[OK] adreno_ged already running (PID=$_ged_pre_pid) — skipping re-launch"
+      else
+        chmod 0755 "$_GED_NATIVE_BIN" 2>/dev/null || true
+        # Restore arg is always "skiavk" — "skiavk_all" is a boot-time flag, not a renderer value
+        nohup "$_GED_NATIVE_BIN" "skiavk" "$MODDIR" >/dev/null 2>&1 &
+        sleep 1  # give daemon time to write its PID file before the check below reads it
+        log_service "[OK] adreno_ged launched: $_GED_NATIVE_BIN"
+      fi
+      unset _ged_pre_pid
+    else
+      log_service "[!] adreno_ged binary not found in $MODDIR/bin/ — shell fallback will be used"
+    fi
+    unset _GED_NATIVE_BIN
+    # ── End native binary launch ─────────────────────────────────────────────
+
     # post-fs-data.sh launches adreno_ged and writes its PID to adreno_ged_pid.
     # adreno_ged handles ALL detection via kernel interfaces (zero overhead):
     #   - Launch: netlink PROC_EVENT_FORK + PROC_EVENT_COMM
@@ -766,6 +803,8 @@ if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
       fi
 
       unset _GED_SH _GED_SH_LAUNCHED
+
+    fi  # closes if [ "$_GED_RUNNING" = "true" ] — FIX: was missing, caused entire service.sh to fail at parse time
 
     unset _GED_RUNNING _GED_ACTIVE_FILE
   fi
