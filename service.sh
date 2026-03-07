@@ -255,7 +255,22 @@ if cmd_exists resetprop; then
   ) &
   TIMEOUT_PID=$!
 
-  resetprop -w sys.boot_completed 1 2>/dev/null
+  # BUG FIX: resetprop -w semantics — the VALUE argument is the value to wait
+  # FROM (i.e. "wait until the property changes away from this value"), not the
+  # value to wait FOR. Maps to Android's __system_property_wait() which blocks
+  # on the property serial changing from old_serial.
+  #
+  # WRONG (was here): resetprop -w sys.boot_completed 1
+  #   At boot time sys.boot_completed = "0". "Wait until it changes FROM 1" →
+  #   current value 0 ≠ 1 already → RETURNS IMMEDIATELY. service.sh proceeds
+  #   mid-boot before GMS/OEM init. In skiavk_all: force-stop fires during GMS
+  #   first-init → system_server watchdog → ROM logo → reboot. This was the
+  #   freeze/bootloop bug.
+  #
+  # CORRECT: resetprop -w sys.boot_completed 0
+  #   "Wait until it changes FROM 0" → blocks until sys.boot_completed = "1".
+  #   Documented in Magisk's official developer guides exactly as this.
+  resetprop -w sys.boot_completed 0 2>/dev/null
 
   kill $TIMEOUT_PID 2>/dev/null || true
   wait $TIMEOUT_PID 2>/dev/null || true
