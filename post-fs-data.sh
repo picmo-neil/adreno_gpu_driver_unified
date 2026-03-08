@@ -25,6 +25,7 @@
 # SHARED FUNCTIONS
 # ========================================
 
+MODDIR="${0%/*}"
 . "$MODDIR/common.sh"
 
 # ========================================
@@ -242,6 +243,7 @@ QGL="n"
 PLT="n"
 RENDER_MODE="normal"
 GAME_EXCLUSION_DAEMON="n"
+FORCE_SKIAVKTHREADED_BACKEND="n"
 
 CONFIG_FILE="/sdcard/Adreno_Driver/Config/adreno_config.txt"
 # /data/local/tmp path: readable at post-fs-data (unlike /sdcard which is FUSE-mounted
@@ -264,6 +266,7 @@ fi
 [ "$PLT" != "y" ]       && PLT="n"
 [ -z "$RENDER_MODE" ]   && RENDER_MODE="normal"
 [ "$GAME_EXCLUSION_DAEMON" != "y" ] && GAME_EXCLUSION_DAEMON="n"
+[ "$FORCE_SKIAVKTHREADED_BACKEND" != "y" ] && FORCE_SKIAVKTHREADED_BACKEND="n"
 # BUG A FIX: Normalize RENDER_MODE to lowercase so every case statement matches
 # regardless of how the user typed it (SkiaVK, SKIAVK, SkiaGL, etc.).
 # service.sh already does this. post-fs-data.sh was missing it — any uppercase
@@ -606,7 +609,7 @@ else
   log_boot "No config found, using defaults"
 fi
 
-log_boot "Configuration: PLT=$PLT, QGL=$QGL, ARM64_OPT=$ARM64_OPT, RENDER=$RENDER_MODE, GAME_EXCLUSION_DAEMON=$GAME_EXCLUSION_DAEMON"
+log_boot "Configuration: PLT=$PLT, QGL=$QGL, ARM64_OPT=$ARM64_OPT, RENDER=$RENDER_MODE, GAME_EXCLUSION_DAEMON=$GAME_EXCLUSION_DAEMON, FORCE_SKIAVKTHREADED_BACKEND=$FORCE_SKIAVKTHREADED_BACKEND"
 [ "${_GED_AUTO_ENABLED:-0}" = "1" ] && \
   log_boot "[AUTO] GAME_EXCLUSION_DAEMON auto-enabled for RENDER_MODE=$RENDER_MODE (prevents dual-VkDevice crash in native-Vulkan games). Set GAME_EXCLUSION_DAEMON=n to opt out."
 
@@ -1919,13 +1922,24 @@ case "$RENDER_MODE" in
       # Must be set here (post-fs-data, pre-SF). Setting after SF starts triggers OEM
       # addChangeCallback → RenderEngine reinit mid-frame → SF crash.
       resetprop debug.hwui.renderer skiavk
+      # debug.renderengine.backend — SurfaceFlinger compositor engine.
+      #   skiavkthreaded = SkiaVkRenderEngine (fully implemented Android 14+ / API 34+).
+      #   skiaglthreaded = threaded GL compositor (safe fallback for API < 34).
+      #
+      # Decision logic:
+      #   FORCE_SKIAVKTHREADED_BACKEND=y  -> always skiavkthreaded regardless of API.
+      #   FORCE_SKIAVKTHREADED_BACKEND=n  -> skiavkthreaded if SDK >= 34, skiaglthreaded otherwise.
       _re_sdk=$(getprop ro.build.version.sdk 2>/dev/null || echo "0")
-      if [ "$_re_sdk" -ge 34 ] 2>/dev/null; then
+      if [ "$FORCE_SKIAVKTHREADED_BACKEND" = "y" ] || [ "$_re_sdk" -ge 34 ] 2>/dev/null; then
         resetprop debug.renderengine.backend skiavkthreaded
-        log_boot "[OK] renderengine.backend=skiavkthreaded (SDK=${_re_sdk})"
+        if [ "$FORCE_SKIAVKTHREADED_BACKEND" = "y" ] && [ "$_re_sdk" -lt 34 ] 2>/dev/null; then
+          log_boot "[OK] renderengine.backend=skiavkthreaded (FORCE_SKIAVKTHREADED_BACKEND=y, SDK=${_re_sdk} < 34 — forced)"
+        else
+          log_boot "[OK] renderengine.backend=skiavkthreaded (SDK=${_re_sdk})"
+        fi
       else
         resetprop debug.renderengine.backend skiaglthreaded
-        log_boot "[OK] renderengine.backend=skiaglthreaded (SDK=${_re_sdk} < 34, SkiaVkRenderEngine not available)"
+        log_boot "[OK] renderengine.backend=skiaglthreaded (SDK=${_re_sdk} < 34, set FORCE_SKIAVKTHREADED_BACKEND=y to override)"
       fi
       unset _re_sdk
       # ── Dangerous SF props INTENTIONALLY NOT SET via resetprop ──────────────

@@ -559,6 +559,7 @@ write_compat_state() {
     echo "KGSL_GPU_MODEL=${KGSL_GPU_MODEL:-unknown}"
     echo "KERNEL_VERSION_RAW=${KERNEL_VERSION_RAW:-unknown}"
     echo "KGSL_VERSION_RAW=${KGSL_VERSION_RAW:-unknown}"
+    echo "FORCE_SKIAVKTHREADED_BACKEND=${FORCE_SKIAVKTHREADED_BACKEND:-n}"
     # Issues: replace semicolons with |||  for safe single-line storage
     printf 'VK_COMPAT_ISSUES=%s\n' "${VK_COMPAT_ISSUES//;/|||}"
   } > "$_state_file" 2>/dev/null || true
@@ -1011,5 +1012,7 @@ patch_ro_hardware_vulkan() {
   return 0
 }
 
-# Backwards-compat alias — probe function availability check
+# Backwards-compat aliases — probe function availability check
 # probe_vulkan_compat_extended and patch_ro_hardware_vulkan are defined above
+# probe_vulkan_stack_compatibility was the old name for probe_vulkan_compat_extended
+probe_vulkan_stack_compatibility() { probe_vulkan_compat_extended "$@"; }

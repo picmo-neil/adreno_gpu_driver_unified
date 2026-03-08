@@ -91,10 +91,14 @@ RENDER_MODE="normal"
 FORCE_SKIAVKTHREADED_BACKEND="n"
 
 CONFIG_FILE="/sdcard/Adreno_Driver/Config/adreno_config.txt"
+DATA_CONFIG="/data/local/tmp/adreno_config.txt"
 ALT_CONFIG="$MODDIR/adreno_config.txt"
 
+# Priority: /sdcard (mounted by service.sh time) -> /data/local/tmp (mirrored) -> $MODDIR
 if ! load_config "$CONFIG_FILE"; then
-  load_config "$ALT_CONFIG" || true
+  if ! load_config "$DATA_CONFIG"; then
+    load_config "$ALT_CONFIG" || true
+  fi
 fi
 
 [ "$VERBOSE" != "y" ]   && VERBOSE="n"
@@ -2137,8 +2141,12 @@ if cmd_exists resetprop; then
       resetprop debug.hwui.renderer skiavk 2>/dev/null || true
       # debug.renderengine.backend intentionally NOT live-resetprop'd here.
       # SF is active; OEM ROM property watchers fire a RenderEngine reinit on change
-      # → SF crash → all apps lose window surfaces → watchdog reboot.
-      # It is set safely via resetprop BEFORE SF starts in post-fs-data.sh.
+      # -> SF crash -> all apps lose window surfaces -> watchdog reboot.
+      # Set safely BEFORE SF starts via resetprop in post-fs-data.sh.
+      # Log current effective value (set at post-fs-data time) for diagnostics:
+      _svc_re_be=$(getprop debug.renderengine.backend 2>/dev/null || echo "default")
+      log_service "[INFO] renderengine.backend=${_svc_re_be} (FORCE_SKIAVKTHREADED_BACKEND=${FORCE_SKIAVKTHREADED_BACKEND}, set pre-SF in post-fs-data.sh)"
+      unset _svc_re_be
       resetprop ro.hwui.use_vulkan true 2>/dev/null || true
       resetprop persist.vendor.vulkan.enable 1 2>/dev/null || true
       resetprop ro.config.vulkan.enabled true 2>/dev/null || true
