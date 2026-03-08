@@ -83,6 +83,7 @@ GAME_EXCLUSION_PKGS="
 com.tencent.ig
 com.pubg.krmobile
 com.pubg.imobile
+com.pubg.newstate
 com.vng.pubgmobile
 com.rekoo.pubgm
 com.tencent.tmgp.pubgmhd
@@ -105,6 +106,7 @@ com.facebook.lite
 com.facebook.mlite
 com.instagram.android
 com.instagram.lite
+com.instagram.barcelona
 com.whatsapp
 com.whatsapp.w4b
 "

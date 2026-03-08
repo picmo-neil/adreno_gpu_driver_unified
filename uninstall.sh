@@ -136,6 +136,13 @@ rm -f  /data/local/tmp/adreno_vk_compat_score   2>/dev/null || true
 rm -f  /data/local/tmp/adreno_skiavk_degraded   2>/dev/null || true
 rm -f  /data/local/tmp/adreno_old_vendor        2>/dev/null || true
 rm -f  /data/local/tmp/adreno_game_exclusion_list.sh 2>/dev/null || true
+# Additional state files not previously removed on uninstall:
+rm -f  /data/local/tmp/adreno_last_render_mode      2>/dev/null || true  # stale mode → reinstall skips cache clear
+rm -f  /data/local/tmp/adreno_skiavk_force_override 2>/dev/null || true  # user-created force-override persists across reinstall
+rm -f  /data/local/tmp/adreno_vk_compat             2>/dev/null || true  # prop_only/incompatible flag → disables skiavk_all force-stop
+rm -f  /data/local/tmp/adreno_config.txt            2>/dev/null || true  # SD mirror read by next post-fs-data boot
+rm -f  /data/local/tmp/adreno_ged_w_*              2>/dev/null || true  # orphaned game-watch marker files
+rm -f  /data/local/tmp/adreno_early_log_buffer.*    2>/dev/null || true  # leftover early log buffers
 echo "✓ Temp files removed"
 echo ""
 
@@ -178,6 +185,7 @@ echo "Stopping game exclusion daemon..."
 
 _GED_PID_FILE="/data/local/tmp/adreno_ged_pid"
 _GED_COUNT_FILE="/data/local/tmp/adreno_ged_count"
+_GED_ACTIVE_FILE="/data/local/tmp/adreno_ged_active"
 _GED_LOCK_DIR="/data/local/tmp/adreno_ged.lock"
 
 # Kill main daemon
@@ -203,14 +211,27 @@ fi
 # up its children. If the daemon was killed hard (SIGKILL), any orphaned
 # sub-daemons will exit on their own when /proc/$GAME_PID disappears naturally.
 
-# Restore renderer if daemon left it in skiagl state
-# Read the active game count: if > 0 the renderer is currently skiagl
-_ged_count=0
-[ -f "$_GED_COUNT_FILE" ] && { IFS= read -r _ged_count; } < "$_GED_COUNT_FILE" 2>/dev/null || true
-_ged_count="${_ged_count:-0}"
-case "$_ged_count" in [0-9]*) ;; *) _ged_count=0 ;; esac
+# Restore renderer if daemon left it in skiagl state.
+#
+# BUG FIX: the native ged.c daemon writes adreno_ged_active ("1"/"0") to record
+# whether a game is currently active. The shell daemon also writes this file.
+# Previously, uninstall.sh only read adreno_ged_count, which is written only by
+# the shell daemon — if the native daemon was running, adreno_ged_count would
+# be 0 (never written), and the renderer restore would be silently skipped even
+# though the renderer was stuck at skiagl. Fix: read adreno_ged_active first
+# (covers both daemon paths); fall back to adreno_ged_count for shell-only installs.
+_ged_active=0
+if [ -f "$_GED_ACTIVE_FILE" ]; then
+  { IFS= read -r _ged_active; } < "$_GED_ACTIVE_FILE" 2>/dev/null || _ged_active=0
+  _ged_active="${_ged_active:-0}"
+  case "$_ged_active" in [0-9]*) ;; *) _ged_active=0 ;; esac
+elif [ -f "$_GED_COUNT_FILE" ]; then
+  { IFS= read -r _ged_active; } < "$_GED_COUNT_FILE" 2>/dev/null || _ged_active=0
+  _ged_active="${_ged_active:-0}"
+  case "$_ged_active" in [0-9]*) ;; *) _ged_active=0 ;; esac
+fi
 
-if [ "$_ged_count" -gt 0 ]; then
+if [ "$_ged_active" -gt 0 ]; then
   # Daemon was active with games running — renderer may be skiagl.
   # Restore to skiavk (best-effort; module is being removed so any mode is acceptable).
   if command -v resetprop >/dev/null 2>&1; then
@@ -223,10 +244,11 @@ fi
 # Remove all daemon state files
 rm -f "$_GED_PID_FILE"   2>/dev/null || true
 rm -f "$_GED_COUNT_FILE" 2>/dev/null || true
+rm -f "$_GED_ACTIVE_FILE" 2>/dev/null || true
 rmdir "$_GED_LOCK_DIR"   2>/dev/null || true
 rm -f "/data/local/tmp/adreno_game_excl_daemon.sh" 2>/dev/null || true
 
-unset _GED_PID_FILE _GED_COUNT_FILE _GED_LOCK_DIR _ged_pid _ged_count
+unset _GED_PID_FILE _GED_COUNT_FILE _GED_ACTIVE_FILE _GED_LOCK_DIR _ged_pid _ged_active
 echo "✓ Game exclusion daemon state files removed"
 echo ""
 

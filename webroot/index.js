@@ -1802,7 +1802,7 @@ async function loadRenderStatus() {
         logToTerminal(`  debug.hwui.renderer        = ${hwuiDisplay}`, 'info');
         logToTerminal(`  debug.renderengine.backend = ${reDisplay}`, 'info');
         logToTerminal(`  ro.hwui.use_vulkan          = ${useVulkanDisplay}`, 'info');
-        logToTerminal('  (debug.hwui.renderer written to system.prop by service.sh for persistence. renderengine.backend set pre-SF via resetprop only — NOT in system.prop, avoids OEM watcher bootloop)', 'info');
+        logToTerminal('  (debug.hwui.renderer written to system.prop by post-fs-data.sh/WebUI for persistence. renderengine.backend set pre-SF via resetprop only — NOT applied live: OEM SF property watcher fires on runtime change → SF crash + all apps lose surfaces)', 'info');
 
         // Update DOM status elements if present in HTML
         const hwuiEl      = document.getElementById('hwuiRendererStatus');
@@ -2041,8 +2041,14 @@ async function loadConfig() {
     const lines = res.stdout.split('\n');
     const config = {};
     lines.forEach(line => {
-        const [key, val] = line.split('=');
-        if (key && val) config[key.trim()] = val.trim();
+        // Use indexOf so values containing '=' (e.g. Base64, encoded paths) are
+        // preserved intact. split('=') would truncate at the first '=' only if
+        // destructured to [key, val], silently discarding the rest of the value.
+        const idx = line.indexOf('=');
+        if (idx < 1) return;
+        const key = line.slice(0, idx).trim();
+        const val = line.slice(idx + 1).trim();
+        if (key) config[key] = val;
     });
     
     const setToggle = (id, value) => {
@@ -2101,11 +2107,11 @@ async function applyRenderNow() {
         // ── Step 1: Set props live via resetprop ─────────────────────────────
         const _ALL_SKIAVK_PROPS = [
             ['debug.hwui.renderer',                      'skiavk'],
-            // debug.renderengine.backend intentionally NOT in live apply list.
-            // SF is running — OEM ROM change callbacks fire RenderEngine reinit
-            // mid-frame → SF crash → all apps lose surfaces → watchdog reboot.
-            // Backend is written to system.prop (persists on next boot) and set
-            // via resetprop BEFORE SF starts in post-fs-data.sh only.
+            // debug.renderengine.backend: in _ALL_SKIAVK_PROPS so it IS written to system.prop.
+            // _LIVE_UNSAFE_PROPS gate prevents live resetprop — only written to system.prop.
+            // init reads system.prop BEFORE SF starts → safe. OEM watcher fires only on runtime change.
+            // NOT set live (OEM ROM change callbacks fire RenderEngine reinit mid-frame → SF crash).
+            ['debug.renderengine.backend',               'skiavkthreaded'],
             // ── DANGEROUS SF PROPS INTENTIONALLY OMITTED ─────────────────────────
             // debug.sf.latch_unsignaled, debug.sf.auto_latch_unsignaled,
             // debug.sf.disable_backpressure, debug.sf.enable_hwc_vds,
@@ -2524,31 +2530,32 @@ async function applyRenderNow() {
             await exec(`[ -f "${sysprPath}" ] || touch "${sysprPath}"`);
             await exec(`awk '!/${_STRIP_PATTERN}/' "${sysprPath}" > "${sysprPath}.tmp" && mv "${sysprPath}.tmp" "${sysprPath}" 2>/dev/null || true`);
             if (renderMode === 'skiavk' || renderMode === 'skiavk_all') {
-                // ── Write ALL skiavk props including renderer props to system.prop ──────────
+                // ── Write ALL skiavk props to system.prop for boot persistence ─────────────
                 //
-                // UPDATED STRATEGY (matches service.sh post-fix):
+                // STRATEGY: Both hwui.renderer and renderengine.backend written to system.prop.
                 // Module system.prop is processed by the root manager (Magisk/KSU/APatch) via
-                // resetprop AFTER magic-mount completes. The custom Vulkan driver overlay is
-                // therefore already in place when these props are applied on the next boot.
-                // Writing debug.hwui.renderer=skiavk to system.prop (renderengine.backend excluded — pre-SF resetprop only)
-                // to system.prop is now SAFE and NECESSARY — it guarantees both HWUI and
-                // SurfaceFlinger read the correct renderer from the very first process launch,
-                // including SystemUI, without relying on resetprop timing.
+                // resetprop AFTER magic-mount completes — Vulkan driver overlay already in place.
                 //
-                // All other stability/perf/compat/OEM props persist normally.
-                // debug.renderengine.backend excluded from system.prop — OEM ROM SF
-                // property watchers fire a RenderEngine reinit when value changes at runtime
-                // → SF crash → bootloop on 2nd boot. Set via resetprop pre-SF only.
+                // renderengine.backend IS safe in system.prop:
+                //   - init reads system.prop BEFORE SurfaceFlinger starts
+                //   - OEM ROM SF property watchers only fire on RUNTIME property changes
+                //   - Writing to system.prop is not a runtime change — it's a boot-time read
+                //   - This ensures SF uses the correct compositor from the very first frame
+                //
+                // renderengine.backend is NOT live-resetprop'd (guarded by _LIVE_UNSAFE_PROPS).
+                // OEM watcher fires only when the value changes while SF is running — system.prop
+                // is read once at SF init, before any watcher is registered.
                 const _SAFE_SKIAVK_PERSIST = _ALL_SKIAVK_PROPS
-                    .filter(([k]) => k !== 'debug.renderengine.backend')
                     .map(([k,v]) => `${k}=${v}`).join('\\n');
                 await exec(`printf '${_SAFE_SKIAVK_PERSIST}\\n' >> "${sysprPath}"`);
-                logToTerminal(`✅ system.prop: ${_ALL_SKIAVK_PROPS.length - 1} skiavk props written (hwui.renderer=skiavk + HWUI/OEM/perf). renderengine.backend excluded — pre-SF resetprop only (OEM watcher bootloop fix).`, 'success');
+                logToTerminal(`✅ system.prop: ${_ALL_SKIAVK_PROPS.length} skiavk props written (hwui.renderer=skiavk + renderengine.backend=skiavkthreaded + HWUI/OEM/perf). renderengine.backend written to system.prop — safe (init reads before SF, watcher fires only on runtime change).`, 'success');
             } else if (renderMode === 'skiagl') {
                 const _SKIAGL_PERSIST = [
                     'debug.hwui.renderer=skiagl',
-                    // debug.renderengine.backend excluded — OEM SF watcher crash risk.
-                    // Set via resetprop before SF starts in post-fs-data.sh only.
+                    // debug.renderengine.backend=skiaglthreaded: written to system.prop.
+                    // init reads this before SF starts on next boot — safe.
+                    // NOT live-resetprop'd (OEM SF watcher fires on runtime change only).
+                    'debug.renderengine.backend=skiaglthreaded',
                     // OEM/hardware gate
                     'persist.sys.force_sw_gles=0',
                     'com.qc.hardware=true',
@@ -3528,8 +3535,11 @@ async function saveConfig() {
             const lines = [
                 // ── Renderer props ──
                 // debug.hwui.renderer persisted here — per-process HWUI prop, safe.
-                // debug.renderengine.backend excluded — OEM SF watcher bootloop risk.
+                // debug.renderengine.backend written here — init reads system.prop BEFORE SF starts.
+                // Safe to persist: root manager applies system.prop after magic-mount (driver overlay present).
+                // NOT set live (OEM ROM SF watcher → RenderEngine reinit mid-frame → crash).
                 'debug.hwui.renderer=skiavk',
+                'debug.renderengine.backend=skiavkthreaded',
                 // ── DANGEROUS SF PROPS INTENTIONALLY OMITTED ─────────────────────────
                 // (latch_unsignaled, disable_backpressure, disable_triple_buffer, etc.)
                 // See _ALL_SKIAVK_PROPS comment in applyRenderNow() for root cause.
@@ -3623,12 +3633,14 @@ async function saveConfig() {
                 'hwui.disable_vsync=false',
             ].join('\\n');
             await exec(`printf '${lines}\\n' >> "${sysprPath}"`);
-            logToTerminal(`✓ system.prop: skiavk props written — hwui.renderer=skiavk + HWUI+OEM+EGL+perf+compat+VKfix props. renderengine.backend excluded (OEM SF watcher bootloop fix). Phase offsets OMITTED. Dangerous SF fence/buffer props EXCLUDED.`, 'success');
+            logToTerminal(`✓ system.prop: skiavk props written — hwui.renderer=skiavk + renderengine.backend=skiavkthreaded + HWUI+OEM+EGL+perf+compat+VKfix props. Phase offsets OMITTED. Dangerous SF fence/buffer props EXCLUDED.`, 'success');
         } else if (finalRenderMode === 'skiagl') {
             // Write full skiagl prop set to system.prop — synced with post-fs-data.sh
             const _SKIAGL_SAVE = [
                 'debug.hwui.renderer=skiagl',
-                // debug.renderengine.backend excluded — OEM SF watcher bootloop risk.
+                // debug.renderengine.backend=skiaglthreaded: written to system.prop.
+                // init reads before SF starts — safe. NOT live-resetprop'd.
+                'debug.renderengine.backend=skiaglthreaded',
                 'persist.sys.force_sw_gles=0',
                 'com.qc.hardware=true',
                 // Partial updates disabled — EGL extensions unreliable on custom Adreno drivers

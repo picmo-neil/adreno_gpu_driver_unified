@@ -57,6 +57,17 @@ else
   _game_pkg_excluded() { local _p="$1" _e; for _e in $GAME_EXCLUSION_PKGS; do case "$_p" in $_e) return 0;; esac; done; return 1; }
 fi
 unset _GAME_EXCL_SD _GAME_EXCL_DATA _GAME_EXCL_MOD
+# Defensive guard: if none of the sourcing paths succeeded (file missing,
+# unreadable, or sourced file was truncated/corrupted and did not define the
+# function), provide a safe no-op stub so the skiavk_all force-stop subshell
+# and _is_native_vk_game_running() never abort with "command not found" (exit
+# 127 in mksh). The stub disables game-package exclusion silently rather than
+# crashing mid-sequence.
+if ! command -v _game_pkg_excluded >/dev/null 2>&1; then
+  _game_pkg_excluded() { return 1; }
+  printf '[ADRENO] service.sh: _game_pkg_excluded() undefined after sourcing — game exclusion disabled (check game_exclusion_list.sh)\n' \
+    > /dev/kmsg 2>/dev/null || true
+fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 cmd_exists() {
@@ -65,7 +76,7 @@ cmd_exists() {
 
 safe_read() {
   local _sr
-  { IFS= read -r _sr; } < "$1" 2>/dev/null && printf '%s' "${_sr%$'\r'}"
+  { IFS= read -r _sr; } < "$1" 2>/dev/null && printf '%s' "${_sr%$(printf '\r')}"
 }
 
 # ========================================
@@ -255,7 +266,13 @@ if cmd_exists resetprop; then
   ) &
   TIMEOUT_PID=$!
 
-  resetprop -w sys.boot_completed 0 2>/dev/null
+  # FIX: sys.boot_completed goes ""→"1" at boot_completed, never "0".
+  # resetprop -w NAME VALUE blocks until NAME==VALUE, so we must wait for "1".
+  # The Magisk docs show "0" which appears to be a documentation error —
+  # waiting for "0" returns immediately (prop is already 0 on some ROMs at
+  # service.sh start) or never returns (AOSP ROMs that start it as ""),
+  # causing the 300s timeout to kill $$ and abort ALL of service.sh.
+  resetprop -w sys.boot_completed 1 2>/dev/null
 
   kill $TIMEOUT_PID 2>/dev/null || true
   wait $TIMEOUT_PID 2>/dev/null || true
@@ -325,27 +342,15 @@ fi
 # ══ END BLOCK F ══════════════════════════════════════════════════════════
 
 # ========================================
-# FIRST BOOT CHECK
+# FIRST BOOT DEFERRAL: REMOVED
 # ========================================
-# post-fs-data.sh creates .service_skip_render when it detects first boot
-# (FIRST_BOOT_PENDING). post-fs-data.sh defers the renderer during boot, but
-# service.sh runs independently in late_start and has no other way to know
-# it's first boot — the .first_boot_pending marker is already gone by now.
-# Without this check, service.sh would resetprop skiavk at boot_completed+2s
-# → every app opened after that point starts with skiavk, Vulkan not yet
-# validated → crash popup on every app open all session.
-if [ -f "$MODDIR/.service_skip_render" ]; then
-  rm -f "$MODDIR/.service_skip_render" 2>/dev/null
-  log_service "========================================"
-  log_service "FIRST BOOT DETECTED — skipping renderer activation this boot."
-  log_service "Renderer props will NOT be set via resetprop or written to system.prop."
-  log_service "Reason: Vulkan/GL driver not yet validated. Second boot will activate $RENDER_MODE renderer."
-  log_service "NOTE: This boot uses the system-default renderer. All other stability props remain active."
-  log_service "========================================"
-  # Continue to run the rest of service.sh (QGL, PLT, stats, etc.)
-  # but skip all renderer prop setting by overriding RENDER_MODE to normal.
-  RENDER_MODE="normal"
-fi
+# Q7 decision: always apply renderer from first boot.
+# The 2-boot delay caused stale system.prop state and user confusion.
+# Vulkan safety is handled by the VK compat gate in post-fs-data.sh which
+# auto-degrades to skiagl if no Vulkan driver .so is found.
+# Clean up any stale markers left from a previous module version.
+rm -f "$MODDIR/.service_skip_render" 2>/dev/null || true
+rm -f "$MODDIR/.first_boot_pending" 2>/dev/null || true
 
 # ========================================
 # EARLY RENDERER ENFORCEMENT
@@ -372,14 +377,12 @@ fi
 # debug.renderengine.backend is NOT set here — SF is running; OEM ROM
 # change callbacks fire and crash SurfaceFlinger. Backend is set exclusively
 # before SF starts in post-fs-data.sh and persists via system.prop.
-_THREADED_ANDROID14_OK=false
-_sdk_early=$(getprop ro.build.version.sdk 2>/dev/null || echo "0")
-_sdk_early="${_sdk_early%%[^0-9]*}"
-# skiavkthreaded backend requires SDK >= 34, or can be forced via flag
-if [ "${_sdk_early:-0}" -ge 34 ] 2>/dev/null || [ "$FORCE_SKIAVKTHREADED_BACKEND" = "y" ]; then
-  _THREADED_ANDROID14_OK=true
-fi
-unset _sdk_early
+# _THREADED_ANDROID14_OK first set removed here (Q8 dead code fix).
+# renderengine.backend is NEVER resetprop'd in service.sh — SF is running,
+# OEM change callbacks would crash it. Backend is set exclusively in
+# post-fs-data.sh BEFORE SF starts, via resetprop. The only place
+# _THREADED_ANDROID14_OK matters is the system.prop write block below
+# (~line 2440), where it is correctly re-evaluated just before use.
 if cmd_exists resetprop; then
   case "$RENDER_MODE" in
     skiavk|skiavk_all)
@@ -483,33 +486,37 @@ esac
 #   color channel corruption on specific horizontal scan lines → green line.
 #   Fix: skiagl → HWUI uses GL buffers → no UBWC format mismatch.
 #
-# ARCHITECTURE — Zygisk hook + /proc polling:
+# ARCHITECTURE — Game Exclusion Daemon (GED):
 #
-#   PATH A (Zygisk companion, primary — zero overhead):
-#     The module's .so in zygisk/<abi>.so registers a preAppSpecialize
-#     callback via the Zygisk API (ReZygisk / ZygiskNext / Magisk Zygisk).
-#     This fires synchronously in the forked child at Zygote fork time —
-#     BEFORE any app code, before the JVM loads, before HWUI initialises.
-#     The companion (root) calls resetprop and writes the state file.
-#     Detection latency: ~0ms. CPU cost: 0 between launches.
-#     Requires: ReZygisk, ZygiskNext, or Magisk built-in Zygisk enabled.
+#   The GED is launched by post-fs-data.sh after boot_completed+2s.
+#   Two GED variants exist, tried in order:
 #
-#   PATH B (/proc polling, always running):
-#     Runs regardless of Zygisk presence. Handles:
-#       1. Death detection — poll /proc until all excluded pkgs exit,
-#          then restore the renderer.
-#       2. GOS/OEM watchdog — Samsung GOS / OEM perf daemons reset
-#          debug.hwui.renderer during game sessions. Re-apply skiagl.
-#       3. Launch fallback — detects games when Zygisk is not active,
-#          or in the rare case the Zygisk companion call fails.
-#     Interval: 3s fixed. Cost: ~1-3ms per cycle (one /proc glob walk).
-#     Zero CPU between cycles (sleeping).
+#   NATIVE GED (bin/<abi>/adreno_ged, preferred):
+#     Uses NETLINK_CONNECTOR + PROC_EVENT_FORK/COMM to detect game launches
+#     at kernel level — zero CPU overhead between events.
+#     Death detection: pidfd_open(pid, 0) + epoll (Linux 5.3+), with fallback
+#     to 1s /proc scan on older kernels that lack pidfd.
+#     Immune to SELinux logcat restrictions.
+#     Active per-game re-enforcement: while any game is active, re-applies
+#     debug.hwui.renderer=skiagl every ~5s in case GOS/OEM daemons reset it.
 #
-# STATE FILE: /data/local/tmp/adreno_daemon_active
+#   SHELL GED (game_excl_daemon.sh, fallback):
+#     Primary: logcat -b events -v brief, parses am_proc_start (tag 30014).
+#     Fallback: if logcat exits 3 times in <2s (SELinux-blocked), switches to
+#     2s /proc-poll mode for new launch detection.
+#     Death detection: _wait_game_death() sub-daemon, 1s /proc/$PID poll.
+#     Active per-game re-enforcement: _wait_game_death checks
+#     debug.hwui.renderer every 5 iterations (~5s) and re-applies skiagl if
+#     any OEM/GOS daemon has reset it.
+#
+# STATE FILE: /data/local/tmp/adreno_ged_active
 #   "1" = game running, renderer = skiagl
 #   "0" = no game running, renderer = restore target
-#   Written by Zygisk companion (PATH A) on launch,
-#   and by this polling loop (PATH B) on death/detection.
+#   Written by the active GED on game open/close.
+#
+# NOTE: There is no Zygisk .so in this module. PATH A (Zygisk hook) described
+# in earlier comments was a planned future feature and has NOT been implemented.
+# The GED (logcat/netlink) is the only launch detection mechanism.
 # ========================================
 
 # ========================================
@@ -519,296 +526,44 @@ esac
 # (prevents dual-VkDevice crash on UE4/native-Vulkan titles), then
 # restores the configured renderer once all listed games exit.
 #
-# ARCHITECTURE — two complementary paths:
+# ARCHITECTURE:
+#   Launch detection:  native GED via NETLINK_CONNECTOR (preferred)
+#                      OR shell GED via logcat am_proc_start (fallback)
+#                      OR shell GED via 2s /proc-poll (SELinux fallback)
+#   Death detection:   native GED via pidfd + epoll; fallback to 1s /proc scan
+#                      shell GED via 1s /proc/$PID poll per active game
+#   GOS re-enforcement: both GED variants re-apply skiagl every ~5s while
+#                       any listed game is active, guarding against OEM/GOS
+#                       property resets mid-session
 #
-#   PATH A: Zygisk companion (zero overhead, preferred)
-#     The Zygisk .so in zygisk/<abi>.so intercepts every app launch via
-#     preAppSpecialize (fires synchronously at Zygote fork, before ANY
-#     app code runs). The companion (root) calls resetprop and writes
-#     the state file instantly. Requires ReZygisk / ZygiskNext / Magisk
-#     built-in Zygisk to be active. When Zygisk is present, launch
-#     detection latency is ~0ms and this shell loop costs nothing extra.
-#
-#   PATH B: /proc polling (fallback, always running)
-#     Required for:
-#       1. Death detection — when the game process dies, restore renderer
-#       2. GOS/OEM prop watchdog — Samsung GOS / OEM perf daemons reset
-#          debug.hwui.renderer mid-session; poll re-applies skiagl
-#       3. Launch detection fallback — when Zygisk is NOT active
-#          (plain Magisk with Zygisk disabled, KSU without ReZygisk, etc.)
-#     Poll interval: 3s always.
-#     Cost per cycle: ~1-3ms (one /proc glob + cmdline reads per process).
-#     This is the ONLY loop — the logcat am_proc_start/died event loop
-#     has been completely removed (replaced by Zygisk).
-#
-# STATE FILE:
-#   /data/local/tmp/adreno_daemon_active
-#     "1" = game running, renderer = skiagl
-#     "0" = no game running, renderer = restore target
-#   Written by Zygisk companion on launch (PATH A) and by this loop
-#   on death. Both writers are idempotent; no locking needed.
+# STATE FILE: /data/local/tmp/adreno_ged_active
+#   "1" = at least one listed game running, renderer = skiagl
+#   "0" = no listed games running, renderer = restore target
 # ========================================
 
 if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
-  if cmd_exists resetprop; then
-
-    # ── Launch native adreno_ged binary (FIX: was never launched anywhere) ──
-    # The build pipeline places the binary in:
-    #   $MODDIR/bin/arm64-v8a/adreno_ged   (64-bit, preferred)
-    #   $MODDIR/bin/armeabi-v7a/adreno_ged  (32-bit, fallback)
-    # adreno_ged handles ALL game detection via kernel interfaces:
-    #   - Launch: netlink PROC_EVENT_FORK + PROC_EVENT_COMM  (zero overhead)
-    #   - Death : pidfd_open + epoll                         (zero overhead)
-    #   - Startup scan at daemon start
-    # The binary writes its own PID to /data/local/tmp/adreno_ged_pid so
-    # the check below can detect it. If the binary is unavailable or fails,
-    # the shell fallback (game_excl_daemon.sh) activates automatically.
-    _GED_NATIVE_BIN=""
-    if [ -f "$MODDIR/bin/arm64-v8a/adreno_ged" ]; then
-      _GED_NATIVE_BIN="$MODDIR/bin/arm64-v8a/adreno_ged"
-    elif [ -f "$MODDIR/bin/armeabi-v7a/adreno_ged" ]; then
-      _GED_NATIVE_BIN="$MODDIR/bin/armeabi-v7a/adreno_ged"
-    fi
-    if [ -n "$_GED_NATIVE_BIN" ]; then
-      # Guard: don't re-launch if already running (e.g. from post-fs-data.sh)
-      _ged_pre_pid=""
-      [ -f "/data/local/tmp/adreno_ged_pid" ] && \
-        { IFS= read -r _ged_pre_pid; } < "/data/local/tmp/adreno_ged_pid" 2>/dev/null || true
-      if [ -n "$_ged_pre_pid" ] && kill -0 "$_ged_pre_pid" 2>/dev/null; then
-        log_service "[OK] adreno_ged already running (PID=$_ged_pre_pid) — skipping re-launch"
-      else
-        chmod 0755 "$_GED_NATIVE_BIN" 2>/dev/null || true
-        # Restore arg is always "skiavk" — "skiavk_all" is a boot-time flag, not a renderer value
-        nohup "$_GED_NATIVE_BIN" "skiavk" "$MODDIR" >/dev/null 2>&1 &
-        sleep 1  # give daemon time to write its PID file before the check below reads it
-        log_service "[OK] adreno_ged launched: $_GED_NATIVE_BIN"
-      fi
-      unset _ged_pre_pid
-    else
-      log_service "[!] adreno_ged binary not found in $MODDIR/bin/ — shell fallback will be used"
-    fi
-    unset _GED_NATIVE_BIN
-    # ── End native binary launch ─────────────────────────────────────────────
-
-    # post-fs-data.sh launches adreno_ged and writes its PID to adreno_ged_pid.
-    # adreno_ged handles ALL detection via kernel interfaces (zero overhead):
-    #   - Launch: netlink PROC_EVENT_FORK + PROC_EVENT_COMM
-    #   - Death:  pidfd_open + epoll
-    #   - Startup scan at daemon start
-    # If it's alive, the full /proc polling subshell below is completely
-    # redundant — it would scan /proc every second for no reason AND create a
-    # second concurrent writer to debug.hwui.renderer.
-    # In that case we only need a slim GOS watchdog that re-applies skiagl
-    # if Samsung GOS / OEM perf daemons reset the prop mid-session.
-    _GED_PID_FILE="/data/local/tmp/adreno_ged_pid"
-    _GED_ACTIVE_FILE="/data/local/tmp/adreno_ged_active"
-    _GED_RUNNING=false
-    _ged_pid=""
-    if [ -f "$_GED_PID_FILE" ]; then
-      { IFS= read -r _ged_pid; } < "$_GED_PID_FILE" 2>/dev/null || _ged_pid=""
-      if [ -n "$_ged_pid" ] && kill -0 "$_ged_pid" 2>/dev/null; then
-        _GED_RUNNING=true
-      fi
-    fi
-
-    log_service "========================================"
-    log_service "GAME COMPAT DAEMON"
-    if [ "$_GED_RUNNING" = "true" ]; then
-      log_service "  adreno_ged running (PID=${_ged_pid}) — all detection delegated to binary"
-      log_service "  Launch: netlink PROC_EVENT_FORK+COMM (zero overhead)"
-      log_service "  Death : pidfd_open + epoll (zero overhead)"
-      log_service "  service.sh: GOS prop watchdog only (no /proc scan)"
-    else
-      log_service "  adreno_ged not running — launching /proc polling fallback"
-    fi
-    log_service "========================================"
-    unset _ged_pid _GED_PID_FILE
-
-    if [ "$_GED_RUNNING" = "true" ]; then
-
-      # ── GOS/OEM prop watchdog — slim, no /proc scan ─────────────────────
-      # When adreno_ged state file shows a game is active (value "1"), re-apply
-      # skiagl immediately if Samsung GOS or an OEM perf daemon resets the prop.
-      # Sleeps 3s per cycle; does nothing (no getprop, no /proc) when no game
-      # is running — truly zero overhead between game sessions.
-      # Reads adreno_ged's own state file (adreno_ged_active) so there is no
-      # confusion between the two binaries' state files.
-      (
-        _GOS_SF="$_GED_ACTIVE_FILE"  # same state file adreno_ged writes
-        while true; do
-          sleep 3
-          { IFS= read -r _gs; } < "$_GOS_SF" 2>/dev/null || _gs="0"
-          [ "$_gs" != "1" ] && continue  # no game active — nothing to watch
-          _gc=$(getprop debug.hwui.renderer 2>/dev/null || echo '')
-          if [ -n "$_gc" ] && [ "$_gc" != "skiagl" ]; then
-            resetprop debug.hwui.renderer skiagl 2>/dev/null || true
-            printf '[ADRENO][SVC-GOS] renderer reset by GOS/OEM (%s→skiagl) re-applied\n' \
-              "$_gc" > /dev/kmsg 2>/dev/null || true
-          fi
-        done
-      ) >/dev/null 2>&1 &
-      log_service "[OK] GOS prop watchdog PID=$! — 3s check while game active; zero /proc scanning (adreno_ged owns detection)"
-
-    else
-
-      # ── Shell game exclusion daemon — launched when native adreno_ged is absent ──
-      #
-      # ROOT CAUSE of "daemon not working at all":
-      #   The previous code ran an INLINE /proc polling subshell here (polling every
-      #   1 second). game_excl_daemon.sh was defined but NEVER launched anywhere.
-      #
-      # WHY INLINE /PROC POLL FAILED FOR PUBG / ACE ANTI-CHEAT:
-      #   PUBG Mobile's Tencent ACE anti-cheat reads debug.hwui.renderer within
-      #   ~50 ms of process creation. The 1-second /proc poll interval means the
-      #   renderer switch to skiagl arrives ~950 ms too late. ACE sees the debug
-      #   prop, triggers a "cheat detected" crash/ban.
-      #
-      # WHY game_excl_daemon.sh FIXES THIS:
-      #   It uses `logcat -b events` which delivers am_proc_start events
-      #   synchronously the moment ActivityManager creates the process — typically
-      #   within 5–20 ms of fork(). The renderer switch to skiagl happens BEFORE
-      #   HWUI initialises in the forked process (~100–200 ms into startup).
-      #   ACE reads the prop AFTER HWUI init → sees skiagl → no debug flag → no crash.
-      #
-      # ARCHITECTURE:
-      #   1. Launch game_excl_daemon.sh in background → it writes its PID to
-      #      adreno_ged_pid (same file as native binary uses).
-      #   2. Shell daemon also writes to adreno_ged_active (0/1) which the GOS
-      #      prop watchdog below reads — same interface as native binary.
-      #   3. Slim GOS watchdog runs alongside shell daemon (catches Samsung GOS /
-      #      OEM perf daemon resetting debug.hwui.renderer mid-session).
-      #   4. If game_excl_daemon.sh is missing, fall back to original inline
-      #      /proc poll daemon as last resort.
-      _GED_SH="$MODDIR/game_excl_daemon.sh"
-      _GED_SH_LAUNCHED=false
-
-      if [ -f "$_GED_SH" ]; then
-        # Make executable in case permissions were lost during install
-        chmod +x "$_GED_SH" 2>/dev/null || true
-
-        # Normalize restore mode: skiavk_all is not a valid renderer value.
-        # The daemon's only job is to restore Vulkan after a game exits; that
-        # is always "skiavk". skiavk_all is a boot-time force-stop flag.
-        _GED_RESTORE="skiavk"
-
-        /system/bin/sh "$_GED_SH" "$_GED_RESTORE" "$MODDIR" >/dev/null 2>&1 &
-        _GED_SH_BGPID=$!
-        log_service "=========================================="
-        log_service "GAME COMPAT DAEMON (shell — game_excl_daemon.sh)"
-        log_service "  PID          : $_GED_SH_BGPID"
-        log_service "  Restore mode : $_GED_RESTORE"
-        log_service "  Detection    : logcat am_proc_start (~5-20ms latency)"
-        log_service "  Death watch  : /proc/\$PID sleep-loop (1s)"
-        log_service "  ACE fix      : skiagl set BEFORE HWUI init (PUBG/Tencent safe)"
-        log_service "=========================================="
-        _GED_SH_LAUNCHED=true
-        unset _GED_RESTORE _GED_SH_BGPID
-      else
-        log_service "[!] WARN: game_excl_daemon.sh not found at $_GED_SH"
-        log_service "    Falling back to inline /proc poll daemon (1s latency — slow)"
-        log_service "    PUBG/ACE anti-cheat may still trigger with this fallback."
-      fi
-
-      if [ "$_GED_SH_LAUNCHED" = "true" ]; then
-
-        # ── Slim GOS/OEM prop watchdog for the shell daemon path ─────────────
-        # Same logic as the native binary path above: when adreno_ged_active="1"
-        # (shell daemon set it), re-apply skiagl if Samsung GOS or an OEM perf
-        # daemon resets debug.hwui.renderer mid-session.
-        # The shell daemon writes /data/local/tmp/adreno_ged_active (same file as
-        # native ged.c write_state()) so this watchdog works identically for both.
-        (
-          _GOS_SF_SH="$_GED_ACTIVE_FILE"  # /data/local/tmp/adreno_ged_active
-          while true; do
-            sleep 3
-            { IFS= read -r _gs_sh; } < "$_GOS_SF_SH" 2>/dev/null || _gs_sh="0"
-            [ "$_gs_sh" != "1" ] && continue  # no game active — nothing to watch
-            _gc_sh=$(getprop debug.hwui.renderer 2>/dev/null || echo '')
-            if [ -n "$_gc_sh" ] && [ "$_gc_sh" != "skiagl" ]; then
-              resetprop debug.hwui.renderer skiagl 2>/dev/null || true
-              printf '[ADRENO][SVC-GOS-SH] renderer reset by GOS/OEM (%s→skiagl) re-applied\n' \
-                "$_gc_sh" > /dev/kmsg 2>/dev/null || true
-            fi
-          done
-        ) >/dev/null 2>&1 &
-        log_service "[OK] GOS prop watchdog (shell daemon mode) PID=$! — 3s check while game active"
-
-      else
-
-        # ── Inline /proc polling daemon — last resort only ────────────────────
-        # Only runs if game_excl_daemon.sh is missing from the module directory.
-        # This path has 1s latency and WILL lose the PUBG/ACE race condition.
-        (
-          # FIX: restore target is always "skiavk", never "skiavk_all".
-          # "skiavk_all" is not a valid debug.hwui.renderer value — HWUI silently
-          # falls back to the device default for any unrecognised string.
-          # skiavk_all is a boot-time force-stop mode, not a renderer name.
-          _RESTORE="skiavk"
-
-          # Fallback uses adreno_daemon_active (no ged binary, so no ged_active)
-          _SF="/data/local/tmp/adreno_daemon_active"
-
-          _any_excl_running() {
-            local _cf _rb _rbase
-            for _cf in /proc/[0-9]*/cmdline; do
-              [ -f "$_cf" ] || continue
-              { IFS= read -r _rb; } < "$_cf" 2>/dev/null || continue
-              [ -n "$_rb" ] || continue
-              _rbase="${_rb%%:*}"
-              _game_pkg_excluded "$_rbase" && return 0
-            done
-            return 1
-          }
-
-          # Startup scan
-          { IFS= read -r _sf_val; } < "$_SF" 2>/dev/null || _sf_val="0"
-          if [ "$_sf_val" != "1" ] && _any_excl_running; then
-            resetprop debug.hwui.renderer skiagl 2>/dev/null || true
-            printf '1\n' > "$_SF" 2>/dev/null || true
-            printf '[ADRENO][POLL-FB] startup: excl pkg running → skiagl\n' \
-              > /dev/kmsg 2>/dev/null || true
-          fi
-          unset _sf_val
-
-          # Poll every 1s — tighter window than old 3s to catch HWUI init in time
-          while true; do
-            sleep 1
-            { IFS= read -r _ps; } < "$_SF" 2>/dev/null || _ps="0"
-            if [ "$_ps" = "0" ]; then
-              if _any_excl_running; then
-                resetprop debug.hwui.renderer skiagl 2>/dev/null || true
-                printf '1\n' > "$_SF" 2>/dev/null || true
-                printf '[ADRENO][POLL-FB] excl pkg detected → skiagl\n' \
-                  > /dev/kmsg 2>/dev/null || true
-              fi
-            else
-              _cur=$(getprop debug.hwui.renderer 2>/dev/null || echo '')
-              if [ -n "$_cur" ] && [ "$_cur" != "skiagl" ]; then
-                resetprop debug.hwui.renderer skiagl 2>/dev/null || true
-                printf '[ADRENO][POLL-FB] GOS reset (%s→skiagl)\n' \
-                  "$_cur" > /dev/kmsg 2>/dev/null || true
-              fi
-              unset _cur
-              if ! _any_excl_running; then
-                resetprop debug.hwui.renderer "$_RESTORE" 2>/dev/null || true
-                printf '0\n' > "$_SF" 2>/dev/null || true
-                printf '[ADRENO][POLL-FB] all excl pkgs gone → %s\n' \
-                  "$_RESTORE" > /dev/kmsg 2>/dev/null || true
-              fi
-            fi
-          done
-        ) >/dev/null 2>&1 &
-        log_service "[OK] Fallback game compat daemon PID=$! — 1s /proc poll (game_excl_daemon.sh missing), skiagl↔skiavk"
-
-      fi
-
-      unset _GED_SH _GED_SH_LAUNCHED
-
-    fi  # closes if [ "$_GED_RUNNING" = "true" ] — FIX: was missing, caused entire service.sh to fail at parse time
-
-    unset _GED_RUNNING _GED_ACTIVE_FILE
+# ========================================
+# GAME EXCLUSION DAEMON STATUS CHECK
+# ========================================
+# The GED is launched exclusively from post-fs-data.sh background subshell
+# (waits for boot_completed internally before starting).
+# service.sh only logs its liveness — the GED manages skiagl↔skiavk switching
+# and GOS/OEM prop re-enforcement entirely on its own.
+#
+# Log whether the daemon is alive so the boot log confirms state.
+  _ged_pid=""
+  [ -f "/data/local/tmp/adreno_ged_pid" ] && \
+    { IFS= read -r _ged_pid; } < "/data/local/tmp/adreno_ged_pid" 2>/dev/null || _ged_pid=""
+  if [ -n "$_ged_pid" ] && kill -0 "$_ged_pid" 2>/dev/null; then
+    log_service "[OK] Game exclusion daemon running (PID=$_ged_pid) — launched by post-fs-data.sh"
+    log_service "     GOS re-enforcement: ACTIVE inside GED (~5s interval per active game)"
+  else
+    log_service "[!] Game exclusion daemon not detected. Check post-fs-data.sh log."
+    log_service "    If GAME_EXCLUSION_DAEMON is disabled in config, this is expected."
   fi
+  unset _ged_pid
 fi
+
 
 # ========================================
 # SECONDARY SKIA PIPELINE CACHE CLEARING
@@ -838,12 +593,14 @@ if [ "$RENDER_MODE" != "$_SVC_EARLY_LAST_MODE" ]; then
   log_service "  Removing any caches not caught by post-fs-data.sh early clear."
   log_service "========================================"
   rm -rf /data/misc/hwui/ 2>/dev/null || true
-  find /data/user_de/0 -maxdepth 2 -type d -name "app_skia_pipeline_cache" \
+  # DEPTH NOTE: app_skia_pipeline_cache lives at <pkg>/code_cache/app_skia_pipeline_cache/
+  # — 3 levels deep from /data/user_de/0. -maxdepth 2 would stop at code_cache and miss it.
+  find /data/user_de/0 -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
       -exec rm -rf {} + 2>/dev/null || true
-  find /data/data -maxdepth 2 -type d -name "app_skia_pipeline_cache" \
+  find /data/data -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
       -exec rm -rf {} + 2>/dev/null || true
-  find /data/user_de/0 -maxdepth 2 -name "*.shader_journal" -delete 2>/dev/null || true
-  find /data/user_de/0 -maxdepth 2 -type d \( -name "skia_shaders" -o -name "shader_cache" \) \
+  find /data/user_de/0 -maxdepth 3 -name "*.shader_journal" -delete 2>/dev/null || true
+  find /data/user_de/0 -maxdepth 3 -type d \( -name "skia_shaders" -o -name "shader_cache" \) \
       -exec rm -rf {} + 2>/dev/null || true
   log_service "[OK] Secondary Skia cache clear complete (mode changed)"
 else
@@ -1437,12 +1194,22 @@ if [ "$RENDER_MODE" = "skiavk_all" ]; then
     # _game_pkg_excluded uses an unquoted case pattern (exact-glob) so
     # "com.tencent.ig" only matches "com.tencent.ig", not "com.tencent.igplugin".
     _is_native_vk_game_running() {
-      local _cf _cl
+      # Fast path: GED daemon maintains an active-game counter file.
+      # Reading one file is O(1) vs scanning all of /proc at boot+35s peak load.
+      local _v=0
+      { IFS= read -r _v; } < "/data/local/tmp/adreno_ged_active" 2>/dev/null || _v=0
+      _v="${_v%%[^0-9]*}"
+      if [ "${_v:-0}" != "0" ]; then return 0; fi
+      # If GED state file exists and says 0, trust it — no game running.
+      [ -f "/data/local/tmp/adreno_ged_active" ] && return 1
+      # GED not running or file absent — fall back to /proc scan.
+      local _cf _cl _pkg
       for _cf in /proc/[0-9]*/cmdline; do
         [ -f "$_cf" ] || continue
         { IFS= read -r _cl; } < "$_cf" 2>/dev/null || continue
         [ -n "$_cl" ] || continue
-        _game_pkg_excluded "$_cl" && return 0
+        _pkg="${_cl%%:*}"
+        _game_pkg_excluded "$_pkg" && return 0
       done
       return 1
     }
@@ -1482,14 +1249,15 @@ if [ "$RENDER_MODE" = "skiavk_all" ]; then
       # Global HWUI cache
       rm -rf /data/misc/hwui/ 2>/dev/null || true
       # Per-app Skia pipeline caches (the main crash culprit on GL→VK switch)
-      find /data/user_de/0 -maxdepth 2 -type d -name "app_skia_pipeline_cache" \
+      # DEPTH: <pkg>/code_cache/app_skia_pipeline_cache/ = 3 levels from /data/user_de/0
+      find /data/user_de/0 -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
           -exec rm -rf {} + 2>/dev/null || true
       # Fallback: legacy /data/data path (pre-Android 7 / direct boot disabled)
-      find /data/data -maxdepth 2 -type d -name "app_skia_pipeline_cache" \
+      find /data/data -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
           -exec rm -rf {} + 2>/dev/null || true
       # Per-app Skia shader caches
-      find /data/user_de/0 -maxdepth 2 -name "*.shader_journal" -delete 2>/dev/null || true
-      find /data/user_de/0 -maxdepth 2 -type d \( -name "skia_shaders" -o -name "shader_cache" \) \
+      find /data/user_de/0 -maxdepth 3 -name "*.shader_journal" -delete 2>/dev/null || true
+      find /data/user_de/0 -maxdepth 3 -type d \( -name "skia_shaders" -o -name "shader_cache" \) \
           -exec rm -rf {} + 2>/dev/null || true
       _skia_log "[OK] Stale Skia pipeline & shader caches cleared (mode change: ${_S0_LAST_MODE:-<none>} → $RENDER_MODE)"
     else
@@ -1590,7 +1358,14 @@ if [ "$RENDER_MODE" = "skiavk_all" ]; then
     # word-split and iterated as fake package names. `while read` processes
     # line-by-line, is safe against pm errors (bad lines are skipped by the
     # empty check below), and starts processing immediately.
-    pm list packages -3 2>/dev/null | cut -f2 -d: | while IFS= read -r _pkg; do
+    #
+    # SUBSHELL FIX: `cmd | while read` runs the while body in a subshell on
+    # POSIX sh (mksh/dash/ash).  Counter increments inside the loop are lost
+    # after `done`.  Fix: write pm output to a temp file first, then redirect
+    # the while loop from it — this keeps the loop in the parent shell.
+    _P2_TMP="/data/local/tmp/adreno_pkgs3_$$"
+    pm list packages -3 2>/dev/null | cut -f2 -d: > "$_P2_TMP" 2>/dev/null || true
+    while IFS= read -r _pkg; do
       [ -z "$_pkg" ] && continue
       case "$_pkg" in
         # BUG1 FIX: Original patterns had `|        ` (pipe + 8 spaces) as separator,
@@ -1601,21 +1376,14 @@ if [ "$RENDER_MODE" = "skiavk_all" ]; then
         # GMS auth service crash, Google account loss, and OOM-triggered app crashes.
         # Fix: each pattern on its own line with no leading whitespace, properly
         # pipe-separated on continuation lines.
-        com.google.android.gms|\
-        com.google.android.gms.*|\
-        com.google.android.gsf|\
-        com.google.android.gsf.*|\
-        com.google.android.gmscore|\
-        com.android.vending|\
-        com.facebook.katana|\
-        com.facebook.orca|\
-        com.facebook.lite|\
-        com.facebook.mlite|\
-        com.instagram.android|\
-        com.instagram.lite|\
-        com.whatsapp|\
-        com.whatsapp.w4b)
+        com.google.android.gms|com.google.android.gms.*|com.google.android.gsf|com.google.android.gsf.*|com.google.android.gmscore|com.android.vending|com.facebook.katana|com.facebook.orca|com.facebook.lite|com.facebook.mlite|com.facebook.appmanager|com.facebook.services|com.facebook.system|com.instagram.android|com.instagram.lite|com.instagram.barcelona|com.whatsapp|com.whatsapp.w4b)
           # GMS/Meta: OAuth token corruption risk — always excluded.
+          # com.facebook.appmanager / .services / .system: Meta App Manager /
+          # Services / System are preinstalled system components on Samsung,
+          # Xiaomi, etc. Force-stopping them breaks Meta app update & sync
+          # infrastructure (token exchange, cross-app library sync).
+          # com.instagram.barcelona: Threads (Instagram) — same GMS-OAuth
+          # infrastructure; shares AccountManager tokens with Instagram.
           # Games are handled by _game_pkg_excluded() from game_exclusion_list.sh.
           _THIRD_SKIPPED=$((_THIRD_SKIPPED + 1))
           continue ;;
@@ -1631,7 +1399,9 @@ if [ "$RENDER_MODE" = "skiavk_all" ]; then
       # 150ms is sufficient for KGSL cleanup on all tested Adreno generations.
       # Without this, concurrent KGSL teardowns corrupt the context table.
       sleep 0.15
-    done
+    done < "$_P2_TMP"
+    rm -f "$_P2_TMP" 2>/dev/null || true
+    unset _P2_TMP
     _skia_log "[OK] 3rd-party: stopped=$_THIRD_STOPPED skipped=$_THIRD_SKIPPED (GMS/Meta/Play excluded)"
 
     # ── STEP 3: Force-stop non-critical system UI packages (THROTTLED) ───────
@@ -1640,56 +1410,28 @@ if [ "$RENDER_MODE" = "skiavk_all" ]; then
     _skia_log "Step 3: Force-stopping non-critical system packages (throttled)..."
     _SYS_STOPPED=0
     # BUG4 FIX: Same rationale as Step 2 — while read instead of for $(...).
-    pm list packages -s 2>/dev/null | cut -f2 -d: | while IFS= read -r _pkg; do
+    # SUBSHELL FIX: Same as Step 2 — temp file to keep while loop in parent shell.
+    _P3_TMP="/data/local/tmp/adreno_pkgss_$$"
+    pm list packages -s 2>/dev/null | cut -f2 -d: > "$_P3_TMP" 2>/dev/null || true
+    while IFS= read -r _pkg; do
       [ -z "$_pkg" ] && continue
       # BUG1 FIX: Same leading-whitespace fix as Step 2 case statement.
       # Each critical system package pattern on its own line, no leading spaces.
       case "$_pkg" in
-        android|\
-        android.*|\
-        com.android.phone*|\
-        com.android.bluetooth*|\
-        com.android.nfc*|\
-        com.android.server*|\
-        com.android.telephony*|\
-        com.android.providers*|\
-        com.android.se|\
-        com.android.carrierconfig*|\
-        com.android.ims*|\
-        com.android.networkstack*|\
-        com.android.wifi*|\
-        com.android.systemui|\
-        com.google.android.gms*|\
-        com.google.android.gsf*|\
-        com.google.android.gmscore|\
-        com.qualcomm.qti.telephony*|\
-        com.qualcomm.qti.server*|\
-        com.qti.phone|\
-        com.samsung.android.incallui*|\
-        com.samsung.android.telephony*|\
-        com.samsung.android.providers*|\
-        com.miui.phone|\
-        com.miui.core|\
-        com.miui.daemon|\
-        com.miui.providers*|\
-        com.oppo.providers*|\
-        com.vivo.providers*|\
-        com.android.launcher*|\
-        com.miui.home|\
-        com.sec.android.app.launcher|\
-        com.google.android.apps.nexuslauncher|\
-        com.samsung.android.app.spage|\
-        com.coloros.launcher*|\
-        com.oppo.launcher*|\
-        com.oneplus.launcher|\
-        com.hihonor.launcher|\
-        com.asus.launcher*)
+        android|android.*|com.android.phone*|com.android.bluetooth*|com.android.nfc*|com.android.server*|com.android.telephony*|com.android.providers*|com.android.se|com.android.carrierconfig*|com.android.ims*|com.android.networkstack*|com.android.wifi*|com.android.systemui|com.google.android.gms*|com.google.android.gsf*|com.google.android.gmscore|com.qualcomm.qti.telephony*|com.qualcomm.qti.server*|com.qti.phone|com.samsung.android.incallui*|com.samsung.android.telephony*|com.samsung.android.providers*|com.miui.phone|com.miui.core|com.miui.daemon|com.miui.telephony|com.miui.providers*|com.oppo.providers*|com.vivo.providers*|com.android.launcher*|com.miui.home|com.sec.android.app.launcher|com.google.android.apps.nexuslauncher|com.samsung.android.app.spage|com.coloros.launcher*|com.oppo.launcher*|com.oneplus.launcher|com.hihonor.launcher|com.asus.launcher*|com.facebook.appmanager|com.facebook.services|com.facebook.system)
+          # facebook.appmanager/.services/.system: Meta App Manager, Meta Services,
+          # Meta System — preinstalled system components on Samsung/Xiaomi that
+          # coordinate Meta app library synchronization and crash diagnostics.
+          # Force-stopping them mid-boot causes cross-app AccountManager token
+          # invalidation (same root cause as GMS exclusion above).
           continue ;;
       esac
       am force-stop "$_pkg" 2>/dev/null || true
       _SYS_STOPPED=$((_SYS_STOPPED + 1))
       sleep 0.15
-    done
+    done < "$_P3_TMP"
+    rm -f "$_P3_TMP" 2>/dev/null || true
+    unset _P3_TMP
     _skia_log "[OK] System UI packages force-stopped (throttled): $_SYS_STOPPED"
 
     # ── STEP 4: am kill-all — INTENTIONALLY NOT USED ────────────────────────
@@ -1779,6 +1521,24 @@ if [ -d "/sdcard/Android" ]; then
 else
   log_service "WARNING: SD card not mounted after 30s - logs may fail"
 fi
+
+# ── Mirror SD config to /data/local/tmp for post-fs-data.sh ─────────────────
+# post-fs-data.sh runs before FUSE/sdcardfs is mounted, so it cannot read
+# /sdcard/Adreno_Driver/Config/adreno_config.txt directly. We mirror the SD
+# config here (service.sh, after sdcard is confirmed mounted) to
+# /data/local/tmp/adreno_config.txt — which IS accessible at post-fs-data time.
+# On the NEXT boot, post-fs-data.sh will read this cached copy first.
+_sd_cfg="/sdcard/Adreno_Driver/Config/adreno_config.txt"
+_dt_cfg="/data/local/tmp/adreno_config.txt"
+if [ -f "$_sd_cfg" ]; then
+  if cp -f "$_sd_cfg" "$_dt_cfg" 2>/dev/null; then
+    log_service "[OK] SD config mirrored to $_dt_cfg (available to post-fs-data next boot)"
+  else
+    log_service "[!] Failed to mirror SD config to $_dt_cfg"
+  fi
+fi
+unset _sd_cfg _dt_cfg
+# ── END config mirror ────────────────────────────────────────────────────────
 
 # ========================================
 # AUTO-COPY LOGS TO SD CARD
@@ -2046,7 +1806,7 @@ if [ -c /dev/kgsl-3d0 ]; then
   if [ -r /sys/class/kgsl/kgsl-3d0/gpu_model ]; then
     GPU_MODEL=""
     { IFS= read -r GPU_MODEL; } < /sys/class/kgsl/kgsl-3d0/gpu_model 2>/dev/null
-    GPU_MODEL="${GPU_MODEL%$'\r'}"
+    GPU_MODEL="${GPU_MODEL%$(printf '\r')}"
     if [ -n "$GPU_MODEL" ]; then
       log_service "  GPU Model: $GPU_MODEL"
       log_service "[OK] GPU device is functional and accessible"
@@ -2306,386 +2066,20 @@ else
 fi
 
 # ========================================
-# PERSIST RENDER MODE TO SYSTEM.PROP
+# SYSTEM.PROP OWNERSHIP: post-fs-data.sh
 # ========================================
-# Write debug.hwui.renderer to system.prop so the root manager (Magisk/KSU/APatch)
-# loads it automatically on every subsequent boot — before any script runs.
-# This is the MOST reliable persistence mechanism: it does not depend on resetprop
-# working at post-fs-data time, and survives any timing issue or path problem.
+# Renderer props (debug.hwui.renderer and all HWUI/EGL/SF/perf props) are
+# written to system.prop exclusively by post-fs-data.sh on every boot,
+# before SurfaceFlinger starts. service.sh no longer writes system.prop.
 #
-# WHY we do this in service.sh (not post-fs-data):
-#   We run AFTER boot_completed, meaning the GPU driver is confirmed loaded,
-#   all apps are running, and the system is fully stable. Writing here means
-#   the prop is validated-safe before it ever appears in system.prop.
-#
-# BOTH debug.hwui.renderer AND debug.renderengine.backend are written to system.prop.
-#   We have reached boot_completed with the custom Vulkan driver already loaded and
-#   confirmed working. Magic mount overlays the module system.prop before init reads
-#   it on the NEXT boot, so the driver will be present when SF reads the property.
-#   Safe on Magisk ≥v20.4 / KernelSU ≥v0.6.6 / APatch with magic mount.
-#
-# Vulkan safety for skiavk: we have reached boot_completed with the custom driver
-# loaded — this proves Vulkan is functional. The file check is belt-and-suspenders.
+# Rationale: post-fs-data.sh runs before SF, so it can safely set
+# debug.renderengine.backend via resetprop with no OEM watcher risk.
+# It writes system.prop for next-boot persistence in the same pass.
+# service.sh performs live resetprop enforcement below (belt-and-suspenders)
+# but does NOT strip or rewrite system.prop — that caused a race where the
+# awk strip ran but the rewrite was silently skipped on certain code paths,
+# leaving system.prop empty of render props.
 # ========================================
-
-log_service "========================================"
-log_service "PERSISTING RENDER MODE TO SYSTEM.PROP"
-log_service "========================================"
-log_service "Render mode: $RENDER_MODE"
-
-SYSPR="$MODDIR/system.prop"
-
-# Step 1: always strip ALL render/SF/stability/OEM-compat/EGL props from system.prop,
-# then re-add the correct set for the current mode below.
-if [ -f "$SYSPR" ]; then
-  awk '!/^debug\.hwui\.renderer=/ && \
-       !/^debug\.renderengine\.backend=/ && \
-       !/^debug\.sf\.latch_unsignaled=/ && \
-       !/^debug\.sf\.auto_latch_unsignaled=/ && \
-       !/^debug\.sf\.disable_backpressure=/ && \
-       !/^debug\.sf\.enable_hwc_vds=/ && \
-       !/^debug\.sf\.enable_transaction_tracing=/ && \
-       !/^debug\.sf\.client_composition_cache_size=/ && \
-       !/^ro\.sf\.disable_triple_buffer=/ && \
-       !/^ro\.surface_flinger\.use_context_priority=/ && \
-       !/^ro\.surface_flinger\.max_frame_buffer_acquired_buffers=/ && \
-       !/^ro\.surface_flinger\.force_hwc_copy_for_virtual_displays=/ && \
-       !/^debug\.hwui\.use_buffer_age=/ && \
-       !/^debug\.hwui\.use_partial_updates=/ && \
-       !/^debug\.hwui\.use_gpu_pixel_buffers=/ && \
-       !/^renderthread\.skia\.reduceopstasksplitting=/ && \
-       !/^debug\.hwui\.skip_empty_damage=/ && \
-       !/^debug\.hwui\.webview_overlays_enabled=/ && \
-       !/^debug\.hwui\.skia_tracing_enabled=/ && \
-       !/^debug\.hwui\.skia_use_perfetto_track_events=/ && \
-       !/^debug\.hwui\.capture_skp_enabled=/ && \
-       !/^debug\.hwui\.skia_atrace_enabled=/ && \
-       !/^debug\.hwui\.use_hint_manager=/ && \
-       !/^debug\.hwui\.target_cpu_time_percent=/ && \
-       !/^com\.qc\.hardware=/ && \
-       !/^persist\.sys\.force_sw_gles=/ && \
-       !/^debug\.vulkan\.layers=/ && \
-       !/^ro\.hwui\.use_vulkan=/ && \
-       !/^debug\.hwui\.recycled_buffer_cache_size=/ && \
-       !/^debug\.hwui\.overdraw=/ && \
-       !/^debug\.hwui\.profile=/ && \
-       !/^debug\.hwui\.show_dirty_regions=/ && \
-       !/^graphics\.gpu\.profiler\.support=/ && \
-       !/^ro\.egl\.blobcache\.multifile=/ && \
-       !/^ro\.egl\.blobcache\.multifile_limit=/ && \
-       !/^debug\.hwui\.fps_divisor=/ && \
-       !/^debug\.hwui\.render_thread=/ && \
-       !/^debug\.hwui\.render_dirty_regions=/ && \
-       !/^debug\.hwui\.show_layers_updates=/ && \
-       !/^debug\.hwui\.filter_test_overhead=/ && \
-       !/^debug\.hwui\.nv_profiling=/ && \
-       !/^debug\.hwui\.clip_surfaceviews=/ && \
-       !/^debug\.hwui\.8bit_hdr_headroom=/ && \
-       !/^debug\.hwui\.skip_eglmanager_telemetry=/ && \
-       !/^debug\.hwui\.initialize_gl_always=/ && \
-       !/^debug\.hwui\.level=/ && \
-       !/^debug\.hwui\.disable_vsync=/ && \
-       !/^hwui\.disable_vsync=/ && \
-       !/^debug\.vulkan\.layers\.enable=/ && \
-       !/^persist\.device_config\.runtime_native\.usap_pool_enabled=/ && \
-       !/^debug\.gralloc\.enable_fb_ubwc=/ && \
-       !/^persist\.sys\.perf\.topAppRenderThreadBoost\.enable=/ && \
-       !/^persist\.sys\.gpu\.working_thread_priority=/ && \
-       !/^debug\.sf\.early_phase_offset_ns=/ && \
-       !/^debug\.sf\.early_app_phase_offset_ns=/ && \
-       !/^debug\.sf\.early_gl_phase_offset_ns=/ && \
-       !/^debug\.sf\.early_gl_app_phase_offset_ns=/ && \
-       !/^debug\.hwui\.use_skia_graphite=/ && \
-       !/^ro\.surface_flinger\.supports_background_blur=/ && \
-       !/^persist\.sys\.sf\.disable_blurs=/ && \
-       !/^ro\.sf\.blurs_are_expensive=/ && \
-       !/^vendor\.gralloc\.enable_fb_ubwc=/ && \
-       !/^ro\.config\.vulkan\.enabled=/ && \
-       !/^persist\.vendor\.vulkan\.enable=/ && \
-       !/^persist\.graphics\.vulkan\.disable_pre_rotation=/ && \
-       !/^debug\.sf\.use_phase_offsets_as_durations=/ && \
-       !/^debug\.hwui\.texture_cache_size=/ && \
-       !/^debug\.hwui\.layer_cache_size=/ && \
-       !/^debug\.hwui\.path_cache_size=/ && \
-       !/^debug\.hwui\.force_dark=/ && \
-       !/^ro\.hwui\.text_small_cache_width=/ && \
-       !/^ro\.hwui\.text_small_cache_height=/ && \
-       !/^ro\.hwui\.text_large_cache_width=/ && \
-       !/^ro\.hwui\.text_large_cache_height=/ && \
-       !/^ro\.hwui\.drop_shadow_cache_size=/ && \
-       !/^ro\.hwui\.gradient_cache_size=/ && \
-       !/^persist\.sys\.sf\.native_mode=/ && \
-       !/^debug\.sf\.treat_170m_as_sRGB=/ && \
-       !/^debug\.egl\.debug_proc=/ && \
-       !/^debug\.sf\.hw=/ && \
-       !/^persist\.sys\.ui\.hw=/ && \
-       !/^debug\.egl\.hw=/ && \
-       !/^debug\.egl\.profiler=/ && \
-       !/^debug\.egl\.trace=/ && \
-       !/^debug\.vulkan\.dev\.layers=/ && \
-       !/^persist\.graphics\.vulkan\.validation_enable=/ && \
-       !/^debug\.hwui\.drawing_enabled=/ && \
-       !/^hwui\.disable_vsync=/' \
-    "$SYSPR" > "${SYSPR}.tmp" 2>/dev/null && \
-    mv "${SYSPR}.tmp" "$SYSPR" 2>/dev/null || \
-    rm -f "${SYSPR}.tmp" 2>/dev/null
-  log_service "[OK] system.prop: cleared all old render/SF/HWUI/perf props"
-else
-  touch "$SYSPR" 2>/dev/null || true
-fi
-
-# Step 2: write the correct props for the next boot
-# ── Android version detection for renderengine.backend ───────────────────────
-# debug.renderengine.backend=skiavkthreaded requires Android 14 (API 34+).
-# On Android ≤ 13, SurfaceFlinger does not implement SkiaVkRenderEngine.
-# Fallback: skiaglthreaded (threaded GL compositor) — safe on all versions.
-# FORCE_SKIAVKTHREADED_BACKEND=y overrides this gate at the user's own risk.
-_SDK_VER=$(getprop ro.build.version.sdk 2>/dev/null || echo "0")
-_SDK_VER="${_SDK_VER%%[^0-9]*}"
-_SDK_VER="${_SDK_VER:-0}"
-# _THREADED_ANDROID14_OK=true → use skiavkthreaded backend; false → skiaglthreaded
-_THREADED_ANDROID14_OK=false
-if [ "$_SDK_VER" -ge 34 ] 2>/dev/null || [ "$FORCE_SKIAVKTHREADED_BACKEND" = "y" ]; then
-  _THREADED_ANDROID14_OK=true
-fi
-log_service "Android SDK: $_SDK_VER | FORCE_SKIAVKTHREADED_BACKEND=$FORCE_SKIAVKTHREADED_BACKEND | threaded backend eligible: $_THREADED_ANDROID14_OK"
-
-case "$RENDER_MODE" in
-  skiavk|skiavk_all)
-    _VK_HW=$(getprop ro.hardware.vulkan 2>/dev/null || echo "")
-    _VK_OK=false
-    [ -f "/vendor/lib64/hw/vulkan.adreno.so" ]  && _VK_OK=true
-    [ -f "/vendor/lib64/egl/vulkan.adreno.so" ] && _VK_OK=true
-    [ -n "$_VK_HW" ] && [ -f "/vendor/lib64/hw/vulkan.${_VK_HW}.so" ] && _VK_OK=true
-    [ -n "$_VK_HW" ] && [ -f "/vendor/lib64/egl/vulkan.${_VK_HW}.so" ] && _VK_OK=true
-    [ -f "$MODDIR/system/vendor/lib64/hw/vulkan.adreno.so" ]  && _VK_OK=true
-    [ -f "$MODDIR/system/vendor/lib64/egl/vulkan.adreno.so" ] && _VK_OK=true
-    # Boot reached boot_completed → Vulkan confirmed regardless of file paths
-    _VK_OK=true
-
-    {
-      # ── DANGEROUS SF PROPS INTENTIONALLY OMITTED ─────────────────────────────
-      # The following were present in older module versions and caused the
-      # "shows for a second then whole screen black" crash:
-      #   debug.sf.latch_unsignaled, debug.sf.auto_latch_unsignaled,
-      #   debug.sf.disable_backpressure, debug.sf.enable_hwc_vds,
-      #   ro.sf.disable_triple_buffer, debug.sf.client_composition_cache_size,
-      #   debug.sf.enable_transaction_tracing, ro.surface_flinger.use_context_priority,
-      #   ro.surface_flinger.max_frame_buffer_acquired_buffers,
-      #   ro.surface_flinger.force_hwc_copy_for_virtual_displays,
-      #   debug.sf.use_phase_offsets_as_durations
-      #
-      # ROOT CAUSE: latch_unsignaled tells SF to present frames BEFORE GPU fence
-      # signals. On custom Adreno drivers with broken fence FD export, the fence
-      # NEVER signals → SF presents frame 1 (visible for ~1s), then ALL buffers
-      # stall waiting for unsignaled fences → HWUI deadlock → black screen.
-      # disable_backpressure removes the only safety valve. disable_triple_buffer
-      # and max_frame_buffer=2 starve the pipeline. use_phase_offsets_as_durations
-      # is Samsung-specific and breaks vsync scheduling on all other OEM ROMs.
-      # These props are now kept in the strip/delete lists only for cleanup.
-      # Write renderer props to system.prop — boot_completed confirms Vulkan is functional.
-      # debug.hwui.renderer: persisted for per-process HWUI initialization on next boot.
-      # debug.renderengine.backend: written here so init loads it BEFORE SF starts.
-      #   skiavkthreaded if SDK>=34 or FORCE_SKIAVKTHREADED_BACKEND=y; else skiaglthreaded.
-      #   This is safe in system.prop (init reads before SF) — NOT safe as live resetprop.
-      echo "debug.hwui.renderer=skiavk"
-      if [ "$_THREADED_ANDROID14_OK" = "true" ]; then
-        echo "debug.renderengine.backend=skiavkthreaded"
-      else
-        echo "debug.renderengine.backend=skiaglthreaded"
-      fi
-      echo "com.qc.hardware=true"
-      echo "persist.sys.force_sw_gles=0"
-      echo "debug.hwui.use_buffer_age=false"
-      echo "debug.hwui.use_partial_updates=false"
-      echo "debug.hwui.use_gpu_pixel_buffers=false"
-      # reduceopstasksplitting=false — AOSP default. true causes rendering artifacts
-      echo "renderthread.skia.reduceopstasksplitting=false"
-      echo "debug.hwui.skip_empty_damage=true"
-      echo "debug.hwui.webview_overlays_enabled=true"
-      echo "debug.hwui.skia_tracing_enabled=false"
-      echo "debug.hwui.skia_use_perfetto_track_events=false"
-      echo "debug.hwui.capture_skp_enabled=false"
-      echo "debug.hwui.skia_atrace_enabled=false"
-      echo "debug.hwui.use_hint_manager=true"
-      echo "debug.hwui.target_cpu_time_percent=33"  # 33% CPU, 67% GPU — optimal for Vulkan async thread
-      echo "debug.vulkan.layers="
-      echo "ro.hwui.use_vulkan=true"
-      echo "debug.hwui.recycled_buffer_cache_size=4"
-      echo "debug.hwui.overdraw=false"
-      echo "debug.hwui.profile=false"
-      echo "debug.hwui.show_dirty_regions=false"
-      echo "graphics.gpu.profiler.support=false"
-      echo "ro.egl.blobcache.multifile=true"
-      echo "ro.egl.blobcache.multifile_limit=33554432"
-      echo "debug.hwui.render_thread=true"
-      echo "debug.hwui.render_dirty_regions=false"
-      echo "debug.hwui.show_layers_updates=false"
-      echo "debug.hwui.filter_test_overhead=false"
-      echo "debug.hwui.nv_profiling=false"
-      # clip_surfaceviews: NOT written. AOSP default (true) clips SurfaceViews correctly.
-      # Writing false causes video/camera SurfaceView to bleed outside player bounds.
-      echo "debug.hwui.8bit_hdr_headroom=false"
-      echo "debug.hwui.skip_eglmanager_telemetry=true"
-      echo "debug.hwui.initialize_gl_always=false"
-      echo "debug.hwui.level=0"
-      echo "debug.hwui.disable_vsync=false"
-      echo "persist.device_config.runtime_native.usap_pool_enabled=true"
-      echo "debug.gralloc.enable_fb_ubwc=1"
-      echo "persist.sys.perf.topAppRenderThreadBoost.enable=true"
-      echo "persist.sys.gpu.working_thread_priority=1"
-      # Phase offset props omitted — SM8150-specific values
-      # (500µs SF, 3ms GL) cause systematic vsync starvation on Adreno 6xx/7xx
-      # at 90/120Hz: too tight → SF misses vsync → frame drops → watchdog → reboot loop.
-      # Device tree provides correctly-tuned values for each SoC.
-      echo "debug.hwui.use_skia_graphite=false"
-      # blur disable: NOT applied in SkiaVK — blanket disable causes UI regression on Samsung/MIUI.
-      echo "ro.sf.blurs_are_expensive=1"
-      echo "vendor.gralloc.enable_fb_ubwc=1"
-      echo "ro.config.vulkan.enabled=true"
-      echo "persist.vendor.vulkan.enable=1"
-      # disable_pre_rotation: NOT set. UE4/Unity handle pre-rotation in projection matrix.
-      # Setting true -> swapchain dimension mismatch -> VK_ERROR_OUT_OF_DATE_KHR loop -> crash.
-      echo "debug.hwui.force_dark=false"
-      # ── Text atlas: AOSP defaults restored (glyph overflow -> font corruption -> crash fix) ──
-      echo "ro.hwui.text_small_cache_width=1024"
-      echo "ro.hwui.text_small_cache_height=512"
-      echo "ro.hwui.text_large_cache_width=2048"
-      echo "ro.hwui.text_large_cache_height=1024"
-      # Shadow/gradient cache: further reduce peak VRAM budget
-      echo "ro.hwui.drop_shadow_cache_size=3"
-      echo "ro.hwui.gradient_cache_size=1"
-      # native_mode=0: NOT set. Forces sRGB globally, disables HDR/WCG on capable displays.
-      # HDR output determined by display capabilities, not forced via prop.
-      # Samsung/Xiaomi WCG: map BT.601/170M -> VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-      echo "debug.sf.treat_170m_as_sRGB=1"
-      # Clear OEM EGL debug hook (MIUI/HyperOS/ColorOS ABI mismatch → SIGSEGV in libvulkan)
-      echo "debug.egl.debug_proc="
-      # ── Always-active HW path reinforcement ──
-      # OEM init scripts may reset these after boot_completed.
-      # Writing them to system.prop ensures they persist from next boot onward,
-      # AND service.sh re-enforces them live (below in resetprop section).
-      echo "debug.sf.hw=1"
-      echo "persist.sys.ui.hw=1"
-      echo "debug.egl.hw=1"
-      echo "debug.egl.profiler=0"
-      echo "debug.egl.trace=0"
-      # OEM Vulkan dev/validation layers — vendor namespace, SEPARATE from debug.vulkan.layers
-      echo "debug.vulkan.dev.layers="
-      echo "persist.graphics.vulkan.validation_enable=0"
-      # HWUI drawing state + non-debug vsync clear
-      echo "debug.hwui.drawing_enabled=true"
-      echo "hwui.disable_vsync=false"
-      # ── HWUI render caches — reduce texture/layer stalls (stripped but never re-set) ──
-      echo "debug.hwui.texture_cache_size=72"
-      echo "debug.hwui.layer_cache_size=48"
-      echo "debug.hwui.path_cache_size=32"
-    } >> "$SYSPR" 2>/dev/null && \
-      log_service "[OK] system.prop: skiavk renderer+HWUI+OEM+EGL+perf+compat+VKfix props written (dangerous SF fence/buffer props EXCLUDED — see inline comments; phase offsets OMITTED — SM8150-specific, cause vsync reboot loops on other SoCs)" || \
-      log_service "[!] WARNING: Failed to write one or more props to system.prop"
-    unset _VK_HW _VK_OK
-    ;;
-
-  skiagl)
-    # OpenGL is always safe — no Vulkan dependency.
-    {
-      echo "debug.hwui.renderer=skiagl"
-      # debug.renderengine.backend=skiaglthreaded: written to system.prop so init
-      # loads it before SF starts on next boot. skiaglthreaded is safe on all Android
-      # versions — no version gate needed. NOT set live (SF running, OEM callbacks).
-      echo "debug.renderengine.backend=skiaglthreaded"
-      echo "persist.sys.force_sw_gles=0"
-      echo "com.qc.hardware=true"
-      # GL partial-update extensions disabled — unreliable on custom Adreno drivers.
-      # EGL_EXT_buffer_age and EGL_KHR_partial_update incorrect values cause stale-pixel
-      # glitches (old frame content visible in unrepainted regions). Full-frame safer.
-      echo "debug.hwui.use_buffer_age=false"
-      echo "debug.hwui.use_partial_updates=false"
-      echo "debug.hwui.render_dirty_regions=false"
-      echo "debug.hwui.webview_overlays_enabled=true"
-      # reduceopstasksplitting=false — AOSP default. true causes rendering artifacts.
-      echo "renderthread.skia.reduceopstasksplitting=false"
-      echo "debug.hwui.skia_tracing_enabled=false"
-      echo "debug.hwui.skia_use_perfetto_track_events=false"
-      echo "debug.hwui.capture_skp_enabled=false"
-      echo "debug.hwui.skia_atrace_enabled=false"
-      echo "debug.hwui.overdraw=false"
-      echo "debug.hwui.profile=false"
-      echo "debug.hwui.show_dirty_regions=false"
-      echo "debug.hwui.show_layers_updates=false"
-      echo "ro.egl.blobcache.multifile=true"
-      echo "ro.egl.blobcache.multifile_limit=33554432"
-      echo "debug.hwui.render_thread=true"
-      echo "debug.hwui.use_hint_manager=true"
-      echo "debug.hwui.target_cpu_time_percent=66"
-      echo "debug.hwui.skip_eglmanager_telemetry=true"
-      # initialize_gl_always=false — CRASH FIX: same reason as post-fs-data.sh.
-      # ro.zygote.disable_gl_preload=true prevents Zygote preloading stock driver.
-      # initialize_gl_always=true would force EGL init in every process at startup,
-      # including NDK/game apps that also init their own Vulkan from another thread.
-      # The custom Adreno driver has a race between these two GPU contexts → SIGSEGV.
-      echo "debug.hwui.initialize_gl_always=false"
-      echo "debug.hwui.disable_vsync=false"
-      echo "debug.hwui.level=0"
-      echo "debug.gralloc.enable_fb_ubwc=1"
-      echo "vendor.gralloc.enable_fb_ubwc=1"
-      echo "persist.device_config.runtime_native.usap_pool_enabled=true"
-      echo "persist.sys.perf.topAppRenderThreadBoost.enable=true"
-      echo "persist.sys.gpu.working_thread_priority=1"
-      echo "debug.hwui.use_skia_graphite=false"
-      # blur: ENABLED in SkiaGL — GL-based blur uses standard EGL/GL paths that work correctly.
-      # Disabling breaks WindowBlurBehind on Samsung One UI / MIUI.
-      echo "ro.sf.blurs_are_expensive=1"
-      # ── CRASH-FIX PROPS (same as skiavk, required in GL mode) ─────────────────
-      # graphics.gpu.profiler.support=false: Snapdragon Profiler intercepts both GL
-      # and Vulkan. Custom driver has different internal function table → wrong ABI
-      # when profiler hooks GL calls → SIGSEGV. Must be explicitly false (not deleted,
-      # as deletion reverts to OEM default which is often true on Snapdragon devices).
-      echo "graphics.gpu.profiler.support=false"
-      # use_gpu_pixel_buffers=false: PBO readback race exists on custom Adreno GL path
-      # too (not only Vulkan). Triggers during screenshots/multitasking → SIGSEGV.
-      echo "debug.hwui.use_gpu_pixel_buffers=false"
-      # recycled_buffer_cache_size=4: AOSP default; OEM builds may ship value=2,
-      # causing constant GL buffer realloc under pressure → OOM crash.
-      echo "debug.hwui.recycled_buffer_cache_size=4"
-      # skip_empty_damage / stability props
-      echo "debug.hwui.skip_empty_damage=true"
-      echo "debug.hwui.8bit_hdr_headroom=false"
-      echo "debug.hwui.nv_profiling=false"
-      echo "debug.hwui.filter_test_overhead=false"
-      echo "debug.sf.hw=1"
-      echo "persist.sys.ui.hw=1"
-      echo "debug.egl.hw=1"
-      echo "debug.egl.profiler=0"
-      echo "debug.egl.trace=0"
-      echo "debug.vulkan.dev.layers="
-      echo "persist.graphics.vulkan.validation_enable=0"
-      echo "debug.hwui.drawing_enabled=true"
-      echo "hwui.disable_vsync=false"
-      echo "debug.egl.debug_proc="
-      echo "debug.hwui.force_dark=false"
-      # ── HWUI render caches — reduce texture/layer stalls in GL mode ──
-      echo "debug.hwui.texture_cache_size=72"
-      echo "debug.hwui.layer_cache_size=48"
-      echo "debug.hwui.path_cache_size=32"
-    } >> "$SYSPR" 2>/dev/null && \
-      log_service "[OK] system.prop: 66 skiagl+renderengine+stability+crash-fix+perf+compat props written. initialize_gl_always=false (CRASH FIX). profiler.support=false (Snapdragon profiler crash fix). use_gpu_pixel_buffers=false (PBO race fix). Blur ENABLED in GL mode." || \
-      log_service "[!] WARNING: Failed to write one or more props to system.prop"
-    log_service "  Next boot: root manager will load these automatically"
-    ;;
-
-  normal|*)
-    # Normal mode: no render prop in system.prop — system uses its default renderer.
-    # We already stripped the old value above, so system.prop is now clean.
-    log_service "[OK] system.prop: render mode=normal, no hwui.renderer prop written"
-    ;;
-esac
-
-unset _SDK_VER _THREADED_ANDROID14_OK
-
-log_service "========================================"
-log_service "RENDER MODE PERSISTENCE COMPLETE"
-log_service "========================================"
 
 # ========================================
 # LIVE RESETPROP: OEM OVERRIDE ENFORCEMENT
@@ -2722,7 +2116,9 @@ if cmd_exists resetprop; then
   log_service "LIVE RESETPROP: Enforcing OEM-override-resistant props"
   log_service "========================================"
 
-  # Always enforce globally (all render modes)
+  # Legacy EGL/SF props: parsed only on Android 8 and earlier; ignored by Android 9+.
+  # Kept for belt-and-suspenders compatibility with ancient vendor partitions that
+  # still ship these in their init.rc. Setting them is a no-op on modern devices.
   resetprop debug.sf.hw 1 2>/dev/null || true
   resetprop persist.sys.ui.hw 1 2>/dev/null || true
   resetprop debug.egl.hw 1 2>/dev/null || true
@@ -2742,7 +2138,8 @@ if cmd_exists resetprop; then
       # debug.renderengine.backend intentionally NOT live-resetprop'd here.
       # SF is active; OEM ROM property watchers fire a RenderEngine reinit on change
       # → SF crash → all apps lose window surfaces → watchdog reboot.
-      # It is set safely via resetprop BEFORE SF starts in post-fs-data.sh.      resetprop ro.hwui.use_vulkan true 2>/dev/null || true
+      # It is set safely via resetprop BEFORE SF starts in post-fs-data.sh.
+      resetprop ro.hwui.use_vulkan true 2>/dev/null || true
       resetprop persist.vendor.vulkan.enable 1 2>/dev/null || true
       resetprop ro.config.vulkan.enabled true 2>/dev/null || true
       resetprop persist.sys.force_sw_gles 0 2>/dev/null || true
@@ -2750,8 +2147,13 @@ if cmd_exists resetprop; then
       # Explicitly DELETE it to clear any value set by a previous module version.
       resetprop --delete persist.graphics.vulkan.disable_pre_rotation 2>/dev/null || true
       resetprop debug.vulkan.layers "" 2>/dev/null || true
-      # native_mode: NOT enforced. Forces sRGB, disables HDR on WCG displays.
-      resetprop debug.sf.treat_170m_as_sRGB 1 2>/dev/null || true
+      # treat_170m_as_sRGB: safe only on non-WCG (sRGB-only) displays.
+      # Skip on WCG/HDR devices (ro.surface_flinger.use_color_management=1).
+      _wcg_svc=$(getprop ro.surface_flinger.use_color_management 2>/dev/null || echo "")
+      if [ "$_wcg_svc" != "1" ] && [ "$_wcg_svc" != "true" ]; then
+        resetprop debug.sf.treat_170m_as_sRGB 1 2>/dev/null || true
+      fi
+      unset _wcg_svc
       # blur: NOT disabled in SkiaVK — blanket disable causes Samsung/MIUI UI regression.
       resetprop --delete ro.surface_flinger.supports_background_blur 2>/dev/null || true
       resetprop --delete persist.sys.sf.disable_blurs 2>/dev/null || true
@@ -2857,7 +2259,7 @@ if cmd_exists resetprop; then
     # Per-app Skia pipeline caches (the main crash culprit on GL→Vulkan switch)
     find /data/user_de -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
         -exec rm -rf {} + 2>/dev/null || true
-    find /data/data -maxdepth 2 -type d -name "app_skia_pipeline_cache" \
+    find /data/data -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
         -exec rm -rf {} + 2>/dev/null || true
     log_service "[OK] Stale Skia/HWUI pipeline caches cleared (mode change: ${_LAST_MODE:-<none>} → $RENDER_MODE)"
   else

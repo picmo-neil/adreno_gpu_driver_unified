@@ -21,9 +21,9 @@
  *   skiavk        — restore to skiavk
  *   skiavk_all    — restore to skiavk (skiavk_all is not a valid
  *                   hwui.renderer value; normalized to skiavk)
- *   skiavkthreaded — restore to skiavkthreaded on Android 14+
- *                    (API ≥ 34); falls back to skiavk on Android <14
- *                    (SkiaVkRenderEngine absent — OEM bootloop risk)
+ *   skiavkthreaded — restore to skiavk (skiavkthreaded is only valid for
+ *                    debug.renderengine.backend, not debug.hwui.renderer;
+ *                    HWUI only accepts "skiavk" and "skiagl")
  *   skiaglthreaded — restore to skiagl (skiaglthreaded is only valid
  *                    for debug.renderengine.backend, not hwui.renderer)
  *
@@ -114,6 +114,7 @@
 #include <linux/netlink.h>
 #include <linux/connector.h>
 #include <linux/cn_proc.h>
+#include <sys/system_properties.h>   /* __system_property_get, PROP_VALUE_MAX */
 
 /* pidfd_open syscall — not in all bionic versions */
 #ifndef __NR_pidfd_open
@@ -124,7 +125,7 @@ static inline int sys_pidfd_open(pid_t pid, unsigned int flags) {
 }
 
 /* ── Limits ──────────────────────────────────────────────────────────────── */
-#define MAX_PKGS          128
+#define MAX_PKGS          256   /* was 128; increased for large user-custom lists */
 #define MAX_PKG_LEN       256
 #define MAX_ACTIVE        64
 #define MAX_PENDING       128
@@ -146,7 +147,7 @@ static const char *LIST_PATHS[] = {
     NULL
 };
 static const char *DEFAULT_PKGS[] = {
-    "com.tencent.ig", "com.pubg.krmobile", "com.pubg.imobile",
+    "com.tencent.ig", "com.pubg.krmobile", "com.pubg.imobile", "com.pubg.newstate",
     "com.vng.pubgmobile", "com.rekoo.pubgm", "com.tencent.tmgp.pubgmhd",
     "com.epicgames.*",
     "com.activision.callofduty.shooter", "com.garena.game.codm",
@@ -190,6 +191,16 @@ static int  g_signal_fd = -1;
 static int  g_kmsg_fd   = -1;
 static char g_restore_mode[32] = "skiavk";  /* configured mode (argv[1]) */
 static char g_restore_hwui[32] = "skiavk";  /* actual hwui.renderer to restore after game exits */
+
+/* GOS/OEM re-enforcement: counts 1-second epoll ticks that fire while at
+ * least one listed game is active.  Every GOS_ENFORCE_INTERVAL ticks we
+ * read debug.hwui.renderer and re-apply "skiagl" if it was reset externally.
+ * Samsung GOS and some OEM perf daemons can reset the property mid-session;
+ * without this check the game gets a dual-VkDevice crash on the next
+ * vkCreateDevice call.  getprop is a tiny binder call (~0.5 ms); running it
+ * every 5 s adds no meaningful CPU overhead. */
+#define GOS_ENFORCE_INTERVAL 5   /* re-enforce every 5 one-second ticks */
+static int  g_enforce_ticks = 0;
 static char g_moddir[512]      = {0};
 static int  g_nl_failed        = 0;
 static int  g_sdk_ver          = 0;          /* ro.build.version.sdk — read once at startup */
@@ -272,6 +283,15 @@ static void load_pkg_list_from_file(const char *path) {
         if (loaded < MAX_PKGS) {
             strncpy(g_pkgs[loaded], p, MAX_PKG_LEN - 1);
             g_pkgs[loaded++][MAX_PKG_LEN - 1] = '\0';
+        } else {
+            /* Silently truncated entries beyond MAX_PKGS.
+             * Log once when the limit is first hit so the user knows. */
+            static int _warned = 0;
+            if (!_warned) {
+                klog("WARNING: pkg list exceeds MAX_PKGS=%d — extra entries ignored. "
+                     "Increase MAX_PKGS and rebuild if needed.", MAX_PKGS);
+                _warned = 1;
+            }
         }
     }
     fclose(f);
@@ -314,8 +334,19 @@ static int read_cmdline(pid_t pid, char *out, size_t outsz) {
     close(fd);
     if (n <= 0) return 0;
     out[n] = '\0';
+    /*
+     * /proc/$PID/cmdline is NUL-separated argv.  argv[0] is the process name.
+     * The first embedded NUL is the separator between argv[0] and argv[1].
+     * strlen() stops there naturally, but make it explicit so downstream
+     * string functions see only argv[0] even if the buffer has more bytes.
+     */
+    size_t arglen = strlen(out);   /* stops at first embedded NUL */
+    out[arglen] = '\0';
+    /* Strip ':processname' suffix (e.g. "com.tencent.ig:remote" → "com.tencent.ig").
+     * Android sub-processes set argv[0] to "pkg:procname". */
     char *colon = strchr(out, ':');
     if (colon) *colon = '\0';
+    /* Reject kernel threads ([kworker/...], [migration/...]) and empty names. */
     if (!out[0] || out[0] == '[') return 0;
     return 1;
 }
@@ -348,10 +379,21 @@ static void set_renderer(const char *mode) {
         execv("/data/adb/magisk/resetprop", argv);
         execv("/data/adb/ksu/bin/resetprop",  argv);
         execv("/data/adb/ap/bin/resetprop",   argv);
+        /* Some ROMs (MIUI GKI, custom builds) ship resetprop at /system/bin/
+         * as a standalone binary separate from the root manager's bundle. */
+        execv("/system/bin/resetprop",        argv);
         execvp("resetprop", argv);
         /* resetprop not found: fall back to setprop */
         char *sargv[] = { "setprop", "debug.hwui.renderer", (char *)mode, NULL };
         execvp("setprop", sargv);
+        /* Both exec paths failed — log to kmsg before exiting so the failure
+         * is visible. g_kmsg_fd is inherited across fork. */
+        if (g_kmsg_fd >= 0) {
+            char _msg[128];
+            int _n = snprintf(_msg, sizeof(_msg),
+                "[ADRENO-GED] set_renderer: neither resetprop nor setprop found\n");
+            (void)write(g_kmsg_fd, _msg, (size_t)_n);
+        }
         _exit(1);
     } else if (child < 0) {
         /* fork failed: try setprop directly (no child to reap) */
@@ -478,8 +520,10 @@ static void game_open(const char *pkg, pid_t pid) {
     }
 }
 static void close_game_at(int idx) {
-    char pkg[MAX_PKG_LEN]; pid_t pid = g_active[idx].pid;
-    strncpy(pkg, g_active[idx].pkg, MAX_PKG_LEN);
+    char pkg[MAX_PKG_LEN];
+    pid_t pid = g_active[idx].pid;
+    strncpy(pkg, g_active[idx].pkg, MAX_PKG_LEN - 1);
+    pkg[MAX_PKG_LEN - 1] = '\0';
     if (g_active[idx].pidfd >= 0) {
         epoll_ctl(g_epoll_fd, EPOLL_CTL_DEL, g_active[idx].pidfd, NULL);
         close(g_active[idx].pidfd);
@@ -537,6 +581,33 @@ static void proc_scan_for_games(void) {
 /* ═══════════════════════════════════════════════════════════════════════════
  * Netlink setup
  * ═══════════════════════════════════════════════════════════════════════════ */
+/* Send PROC_CN_MCAST_IGNORE before closing the netlink socket on clean exit.
+ * The kernel's proc_event_num_listeners counter is NOT decremented when the
+ * socket is closed — only PROC_CN_MCAST_IGNORE decrements it.  Without this,
+ * a daemon restart loop (OOM-kill + relaunch) accumulates the counter upward.
+ * While this causes no functional problem for our single listener (events still
+ * flow as long as count > 0), sending IGNORE is correct kernel-citizen behavior
+ * and keeps the counter accurate for any other proc-connector users on the device.
+ * Not called on SIGKILL (cannot run cleanup code); only on SIGTERM/SIGINT. */
+static void nl_send_ignore(void) {
+    if (g_nl_sock < 0) return;
+    unsigned char buf[NLMSG_SPACE(sizeof(struct cn_msg) + sizeof(enum proc_cn_mcast_op))];
+    memset(buf, 0, sizeof(buf));
+    struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
+    nlh->nlmsg_len  = sizeof(buf);
+    nlh->nlmsg_type = NLMSG_DONE;
+    nlh->nlmsg_pid  = (unsigned int)getpid();
+    struct cn_msg *cn = (struct cn_msg *)NLMSG_DATA(nlh);
+    cn->id.idx = CN_IDX_PROC; cn->id.val = CN_VAL_PROC;
+    cn->len    = sizeof(enum proc_cn_mcast_op);
+    *((enum proc_cn_mcast_op *)cn->data) = PROC_CN_MCAST_IGNORE;
+    struct sockaddr_nl dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.nl_family = AF_NETLINK; dest.nl_pid = 0; dest.nl_groups = CN_IDX_PROC;
+    (void)sendto(g_nl_sock, buf, sizeof(buf), 0,
+                 (struct sockaddr *)&dest, sizeof(dest));
+}
+
 static int netlink_open(void) {
     int sock = socket(PF_NETLINK, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, NETLINK_CONNECTOR);
     if (sock < 0) { klog("nl socket: %s", strerror(errno)); return -1; }
@@ -762,6 +833,10 @@ static void handle_signal(void) {
             while (waitpid(-1, NULL, WNOHANG) > 0) {}
             for (int i = 0; i < g_nactive; i++)
                 if (g_active[i].pidfd >= 0) close(g_active[i].pidfd);
+            /* Send PROC_CN_MCAST_IGNORE so the kernel decrements its listener
+             * count for this socket before we close it.  Keeps proc_event_num_listeners
+             * accurate across daemon restarts (OOM-kill cannot do this cleanup). */
+            nl_send_ignore();
             unlink(PID_FILE);
             if (g_nl_sock   >= 0) close(g_nl_sock);
             if (g_epoll_fd  >= 0) close(g_epoll_fd);
@@ -790,6 +865,28 @@ static void startup_scan(void) {
         char pkg[MAX_PKG_LEN];
         if(!read_cmdline(pid,pkg,sizeof(pkg))) continue;
         if(!pkg_matches(pkg)) continue;
+        /*
+         * BUG FIX: skip Meta background services in startup_scan.
+         *
+         * Meta apps (Facebook/Messenger/Instagram/WhatsApp) are on the exclusion
+         * list for GROUP 2 (UBWC green-line artifact). Their background service
+         * processes live in /proc permanently and never exit. If the daemon crashes
+         * and restarts while a Meta service is alive, startup_scan would register
+         * it as an active game, call set_renderer("skiagl"), and g_active_cnt
+         * would never reach 0 — the renderer stays at skiagl permanently until
+         * reboot.
+         *
+         * proc_scan_for_games() already has this skip. startup_scan() was the
+         * only path missing it. The COMM handler detects genuine foreground
+         * Meta launches via the process-age guard (st_ctime < 5s).
+         */
+        if (strncmp(pkg, "com.facebook.",  13) == 0 ||
+            strncmp(pkg, "com.instagram.", 14) == 0 ||
+            strcmp(pkg,  "com.whatsapp")       == 0 ||
+            strcmp(pkg,  "com.whatsapp.w4b")   == 0) {
+            klog("startup: skip Meta background service %s PID=%d", pkg, (int)pid);
+            continue;
+        }
         klog("startup: found %s PID=%d", pkg,(int)pid);
         game_open(pkg,pid);
     }
@@ -811,8 +908,8 @@ int main(int argc, char *argv[]) {
      * Mode → g_restore_hwui mapping:
      *   skiavk        → "skiavk"
      *   skiavk_all    → "skiavk"         (skiavk_all is not a hwui.renderer value)
-     *   skiavkthreaded→ "skiavkthreaded" on Android 14+ (API ≥ 34)
-     *                   "skiavk"         on Android <14  (SkiaVkRenderEngine absent)
+     *   skiavkthreaded→ "skiavk"         (skiavkthreaded is not a hwui.renderer value;
+     *                                    HWUI only accepts "skiavk"/"skiagl")
      *   skiaglthreaded→ "skiagl"         (skiaglthreaded is only for renderengine.backend)
      *   anything else → "skiavk"         (safe default)
      */
@@ -825,7 +922,7 @@ int main(int argc, char *argv[]) {
         g_moddir[sizeof(g_moddir) - 1] = '\0';
     }
 
-    /* Read SDK version once — needed for skiavkthreaded gate */
+    /* Read SDK version once — logged at startup */
     g_sdk_ver = read_sdk_ver();
 
     /* Compute hwui.renderer restore value */
@@ -833,17 +930,14 @@ int main(int argc, char *argv[]) {
         strcmp(g_restore_mode, "skiavk_all") == 0) {
         strncpy(g_restore_hwui, "skiavk", sizeof(g_restore_hwui) - 1);
     } else if (strcmp(g_restore_mode, "skiavkthreaded") == 0) {
-        if (g_sdk_ver >= 34) {
-            /* Android 14+: SkiaVkRenderEngine present, skiavkthreaded valid */
-            strncpy(g_restore_hwui, "skiavkthreaded", sizeof(g_restore_hwui) - 1);
-        } else {
-            /* Android <14: HWUI does not recognise "skiavkthreaded" → fall
-             * back to plain skiavk (Vulkan HWUI, best available on <14).
-             * OEM ROMs on Android 12/13 will silently ignore "skiavkthreaded"
-             * and default to whatever their ro.hwui.use_vulkan says, which is
-             * unpredictable.  Explicit "skiavk" is always correct here. */
-            strncpy(g_restore_hwui, "skiavk", sizeof(g_restore_hwui) - 1);
-        }
+        /* "skiavkthreaded" is only a valid value for
+         * debug.renderengine.backend (SurfaceFlinger compositor), NOT for
+         * debug.hwui.renderer (per-process HWUI app renderer).
+         * HWUI only recognises "skiavk" and "skiagl" as renderer strings.
+         * Setting "skiavkthreaded" via resetprop debug.hwui.renderer is silently
+         * ignored — HWUI stays at skiagl after game exit forever.
+         * Map to "skiavk" unconditionally. */
+        strncpy(g_restore_hwui, "skiavk", sizeof(g_restore_hwui) - 1);
     } else if (strcmp(g_restore_mode, "skiaglthreaded") == 0) {
         /* "skiaglthreaded" is a debug.renderengine.backend value, not a valid
          * debug.hwui.renderer value.  For HWUI we use "skiagl". */
@@ -924,6 +1018,11 @@ int main(int argc, char *argv[]) {
             for (int i = 0; i < g_nactive; i++)
                 if (g_active[i].use_poll) { timeout = 1000; break; }
         }
+        /* If any game is active, cap timeout at 1000ms so the nev==0 branch
+         * fires every ~1 s and can run the GOS_ENFORCE_INTERVAL check.
+         * Without this, pure netlink+pidfd mode would sleep indefinitely
+         * (timeout == -1) and never re-enforce the renderer while games run. */
+        if (g_active_cnt > 0 && timeout < 0) timeout = 1000;
 
         int nev = epoll_wait(g_epoll_fd, events, MAX_EPOLL_EVENTS, timeout);
         if (nev < 0) { if (errno==EINTR) continue; klog("epoll_wait: %s",strerror(errno)); break; }
@@ -931,6 +1030,25 @@ int main(int argc, char *argv[]) {
         if (nev == 0) {
             if (g_nl_failed) proc_scan_for_games();
             poll_active_games();
+
+            /* GOS/OEM re-enforcement: every GOS_ENFORCE_INTERVAL 1-second
+             * ticks while at least one listed game is running, read the live
+             * value of debug.hwui.renderer and re-apply "skiagl" if anything
+             * (Samsung GOS, OEM perf daemon, another root module) reset it. */
+            if (g_active_cnt > 0) {
+                g_enforce_ticks++;
+                if (g_enforce_ticks >= GOS_ENFORCE_INTERVAL) {
+                    g_enforce_ticks = 0;
+                    char cur[PROP_VALUE_MAX] = "";
+                    __system_property_get("debug.hwui.renderer", cur);
+                    if (strcmp(cur, "skiagl") != 0) {
+                        klog("GOS-ENFORCE: renderer was '%s', re-applying skiagl", cur);
+                        set_renderer("skiagl");
+                    }
+                }
+            } else {
+                g_enforce_ticks = 0;  /* reset counter when no games active */
+            }
             continue;
         }
 

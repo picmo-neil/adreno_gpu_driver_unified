@@ -15,10 +15,10 @@
 # Compatible with: Magisk, KernelSU, APatch
 #
 # NOTE: Renderer props (debug.hwui.renderer, debug.renderengine.backend)
-# are now intentionally persisted to system.prop by service.sh after a
-# confirmed successful skiavk boot.  Stripping them here would fight that
-# mechanism and cause SF to miss the renderer on the next boot.
-# The render-mode case below strips/rewrites all render props atomically.
+# are persisted to system.prop exclusively by post-fs-data.sh (this script).
+# service.sh no longer writes system.prop — it only enforces props live via
+# resetprop after boot_completed. This avoids a race where service.sh's awk
+# strip ran but the rewrite was silently skipped, leaving system.prop empty.
 # ========================================
 
 # ========================================
@@ -86,7 +86,10 @@ elif [ -f "$_GAME_EXCL_MOD" ]; then
   . "$_GAME_EXCL_MOD"
 else
   # Fallback inline definition (matches bundled game_exclusion_list.sh defaults)
-  GAME_EXCLUSION_PKGS="com.tencent.ig com.pubg.krmobile com.pubg.imobile com.vng.pubgmobile com.rekoo.pubgm com.tencent.tmgp.pubgmhd com.epicgames.* com.activision.callofduty.shooter com.garena.game.codm com.tencent.tmgp.cod com.vng.codmvn com.miHoYo.GenshinImpact com.cognosphere.GenshinImpact com.miHoYo.enterprise.HSRPrism com.HoYoverse.hkrpgoversea com.levelinfinite.hotta com.proximabeta.mfh com.HoYoverse.Nap com.miHoYo.ZZZ"
+  # NOTE: Meta packages (Facebook/Instagram/WhatsApp) included here to match
+  # service.sh (line ~56) and game_excl_daemon.sh — prevents force-stop of Meta
+  # apps during boot which causes dangling ANativeWindow handles.
+  GAME_EXCLUSION_PKGS="com.tencent.ig com.pubg.krmobile com.pubg.imobile com.pubg.newstate com.vng.pubgmobile com.rekoo.pubgm com.tencent.tmgp.pubgmhd com.epicgames.* com.activision.callofduty.shooter com.garena.game.codm com.tencent.tmgp.cod com.vng.codmvn com.miHoYo.GenshinImpact com.cognosphere.GenshinImpact com.miHoYo.enterprise.HSRPrism com.HoYoverse.hkrpgoversea com.levelinfinite.hotta com.proximabeta.mfh com.HoYoverse.Nap com.miHoYo.ZZZ com.facebook.katana com.facebook.orca com.facebook.lite com.facebook.mlite com.instagram.android com.instagram.lite com.whatsapp com.whatsapp.w4b"
   _game_pkg_excluded() { local _p="$1" _e; for _e in $GAME_EXCLUSION_PKGS; do case "$_p" in $_e) return 0;; esac; done; return 1; }
 fi
 unset _GAME_EXCL_SD _GAME_EXCL_MOD _GAME_EXCL_DATA
@@ -239,13 +242,20 @@ QGL="n"
 PLT="n"
 RENDER_MODE="normal"
 GAME_EXCLUSION_DAEMON="n"
-FORCE_SKIAVKTHREADED_BACKEND="n"
 
 CONFIG_FILE="/sdcard/Adreno_Driver/Config/adreno_config.txt"
+# /data/local/tmp path: readable at post-fs-data (unlike /sdcard which is FUSE-mounted
+# later). service.sh can mirror the SD config here for next-boot pickup.
+DATA_CONFIG="/data/local/tmp/adreno_config.txt"
 ALT_CONFIG="$MODDIR/adreno_config.txt"
 
-if ! load_config "$CONFIG_FILE"; then
-  load_config "$ALT_CONFIG" || true
+# Priority: /data/local/tmp (always accessible at post-fs-data) →
+#           /sdcard (may not be mounted yet, usually skipped here) →
+#           $MODDIR (module bundled defaults)
+if ! load_config "$DATA_CONFIG"; then
+  if ! load_config "$CONFIG_FILE"; then
+    load_config "$ALT_CONFIG" || true
+  fi
 fi
 
 [ "$VERBOSE" != "y" ]   && VERBOSE="n"
@@ -263,7 +273,25 @@ RENDER_MODE=$(printf '%s' "$RENDER_MODE" | tr '[:upper:]' '[:lower:]')
 # common.sh normalizes them on load, but guard here defensively.
 [ "$RENDER_MODE" = "skiavkthreaded" ] && RENDER_MODE="skiavk"
 [ "$RENDER_MODE" = "skiaglthreaded" ] && RENDER_MODE="skiagl"
-[ "$FORCE_SKIAVKTHREADED_BACKEND" != "y" ] && FORCE_SKIAVKTHREADED_BACKEND="n"
+# BUG 3 FIX: Auto-enable GED for skiavk/skiavk_all modes.
+# Without the GED, native-Vulkan games (PUBG, Genshin, CoD, Fortnite) crash on
+# every open in skiavk mode. Root cause: the game engine creates a VkDevice from
+# its RHI/render thread. HWUI in skiavk mode creates a SECOND VkDevice in the same
+# process via vkCreateDevice. Two VkDevices in one process = SIGSEGV in libgsl.so
+# / VK_ERROR_DEVICE_LOST. The GED switches HWUI to skiagl before the game opens,
+# so only the game's VkDevice is created → no race → no crash.
+# Users who explicitly set GAME_EXCLUSION_DAEMON=y are unaffected (already "y").
+# Users who set GAME_EXCLUSION_DAEMON=n have opted out intentionally — respected.
+if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
+  [ "$GAME_EXCLUSION_DAEMON" != "y" ] && [ "$GAME_EXCLUSION_DAEMON" != "n" ] && GAME_EXCLUSION_DAEMON="y"
+  # If user never set it (default "n" from line above), promote to "y".
+  # Re-apply: the default-to-"n" guard above fires before this block.
+  if [ "$GAME_EXCLUSION_DAEMON" = "n" ]; then
+    GAME_EXCLUSION_DAEMON="y"
+    # Log the auto-enable on the first logging pass (after log init).
+    _GED_AUTO_ENABLED=1
+  fi
+fi
 
 # ========================================
 # LOGGING SETUP
@@ -579,6 +607,8 @@ else
 fi
 
 log_boot "Configuration: PLT=$PLT, QGL=$QGL, ARM64_OPT=$ARM64_OPT, RENDER=$RENDER_MODE, GAME_EXCLUSION_DAEMON=$GAME_EXCLUSION_DAEMON"
+[ "${_GED_AUTO_ENABLED:-0}" = "1" ] && \
+  log_boot "[AUTO] GAME_EXCLUSION_DAEMON auto-enabled for RENDER_MODE=$RENDER_MODE (prevents dual-VkDevice crash in native-Vulkan games). Set GAME_EXCLUSION_DAEMON=n to opt out."
 
 # ========================================
 # SYNC MODULE STATE TO CURRENT CONFIG
@@ -1209,7 +1239,7 @@ log_boot "Selected render mode: $RENDER_MODE"
 SYSTEM_PROP_FILE="$MODDIR/system.prop"
 
 # Always strip old render + SF + stability props first, then write the correct set
-_RENDER_PROPS='debug\.hwui\.renderer=|debug\.renderengine\.backend=|debug\.sf\.latch_unsignaled=|debug\.sf\.auto_latch_unsignaled=|debug\.sf\.disable_backpressure=|debug\.sf\.enable_hwc_vds=|debug\.sf\.enable_transaction_tracing=|debug\.sf\.client_composition_cache_size=|ro\.sf\.disable_triple_buffer=|ro\.surface_flinger\.use_context_priority=|ro\.surface_flinger\.max_frame_buffer_acquired_buffers=|ro\.surface_flinger\.force_hwc_copy_for_virtual_displays=|debug\.hwui\.use_buffer_age=|debug\.hwui\.use_partial_updates=|debug\.hwui\.use_gpu_pixel_buffers=|renderthread\.skia\.reduceopstasksplitting=|debug\.hwui\.skip_empty_damage=|debug\.hwui\.webview_overlays_enabled=|debug\.hwui\.skia_tracing_enabled=|debug\.hwui\.skia_use_perfetto_track_events=|debug\.hwui\.capture_skp_enabled=|debug\.hwui\.skia_atrace_enabled=|debug\.hwui\.use_hint_manager=|debug\.hwui\.target_cpu_time_percent=|com\.qc\.hardware=|persist\.sys\.force_sw_gles=|debug\.vulkan\.layers=|ro\.hwui\.use_vulkan=|debug\.hwui\.recycled_buffer_cache_size=|debug\.hwui\.overdraw=|debug\.hwui\.profile=|debug\.hwui\.show_dirty_regions=|graphics\.gpu\.profiler\.support=|ro\.egl\.blobcache\.multifile=|ro\.egl\.blobcache\.multifile_limit=|debug\.hwui\.fps_divisor=|debug\.hwui\.render_thread=|debug\.hwui\.render_dirty_regions=|debug\.hwui\.show_layers_updates=|debug\.hwui\.filter_test_overhead=|debug\.hwui\.nv_profiling=|debug\.hwui\.clip_surfaceviews=|debug\.hwui\.8bit_hdr_headroom=|debug\.hwui\.skip_eglmanager_telemetry=|debug\.hwui\.initialize_gl_always=|debug\.hwui\.level=|debug\.hwui\.disable_vsync=|hwui\.disable_vsync=|debug\.vulkan\.layers\.enable=|persist\.device_config\.runtime_native\.usap_pool_enabled=|debug\.gralloc\.enable_fb_ubwc=|vendor\.gralloc\.enable_fb_ubwc=|persist\.sys\.perf\.topAppRenderThreadBoost\.enable=|persist\.sys\.gpu\.working_thread_priority=|debug\.sf\.early_phase_offset_ns=|debug\.sf\.early_app_phase_offset_ns=|debug\.sf\.early_gl_phase_offset_ns=|debug\.sf\.early_gl_app_phase_offset_ns=|debug\.hwui\.use_skia_graphite=|ro\.surface_flinger\.supports_background_blur=|persist\.sys\.sf\.disable_blurs=|ro\.sf\.blurs_are_expensive=|ro\.config\.vulkan\.enabled=|persist\.vendor\.vulkan\.enable=|persist\.graphics\.vulkan\.disable_pre_rotation=|debug\.sf\.use_phase_offsets_as_durations=|debug\.hwui\.texture_cache_size=|debug\.hwui\.layer_cache_size=|debug\.hwui\.path_cache_size=|debug\.hwui\.force_dark=|ro\\.config\\.vulkan\\.enabled=|persist\\.vendor\\.vulkan\\.enable=|ro\.hwui\.text_small_cache_width=|ro\.hwui\.text_small_cache_height=|ro\.hwui\.text_large_cache_width=|ro\.hwui\.text_large_cache_height=|ro\.hwui\.drop_shadow_cache_size=|ro\.hwui\.gradient_cache_size=|persist\.sys\.sf\.native_mode=|debug\.sf\.treat_170m_as_sRGB=|debug\.egl\.debug_proc='
+_RENDER_PROPS='debug\.hwui\.renderer=|debug\.renderengine\.backend=|debug\.sf\.latch_unsignaled=|debug\.sf\.auto_latch_unsignaled=|debug\.sf\.disable_backpressure=|debug\.sf\.enable_hwc_vds=|debug\.sf\.enable_transaction_tracing=|debug\.sf\.client_composition_cache_size=|ro\.sf\.disable_triple_buffer=|ro\.surface_flinger\.use_context_priority=|ro\.surface_flinger\.max_frame_buffer_acquired_buffers=|ro\.surface_flinger\.force_hwc_copy_for_virtual_displays=|debug\.hwui\.use_buffer_age=|debug\.hwui\.use_partial_updates=|debug\.hwui\.use_gpu_pixel_buffers=|renderthread\.skia\.reduceopstasksplitting=|debug\.hwui\.skip_empty_damage=|debug\.hwui\.webview_overlays_enabled=|debug\.hwui\.skia_tracing_enabled=|debug\.hwui\.skia_use_perfetto_track_events=|debug\.hwui\.capture_skp_enabled=|debug\.hwui\.skia_atrace_enabled=|debug\.hwui\.use_hint_manager=|debug\.hwui\.target_cpu_time_percent=|com\.qc\.hardware=|persist\.sys\.force_sw_gles=|debug\.vulkan\.layers=|ro\.hwui\.use_vulkan=|debug\.hwui\.recycled_buffer_cache_size=|debug\.hwui\.overdraw=|debug\.hwui\.profile=|debug\.hwui\.show_dirty_regions=|graphics\.gpu\.profiler\.support=|ro\.egl\.blobcache\.multifile=|ro\.egl\.blobcache\.multifile_limit=|debug\.hwui\.fps_divisor=|debug\.hwui\.render_thread=|debug\.hwui\.render_dirty_regions=|debug\.hwui\.show_layers_updates=|debug\.hwui\.filter_test_overhead=|debug\.hwui\.nv_profiling=|debug\.hwui\.clip_surfaceviews=|debug\.hwui\.8bit_hdr_headroom=|debug\.hwui\.skip_eglmanager_telemetry=|debug\.hwui\.initialize_gl_always=|debug\.hwui\.level=|debug\.hwui\.disable_vsync=|hwui\.disable_vsync=|debug\.vulkan\.layers\.enable=|persist\.device_config\.runtime_native\.usap_pool_enabled=|debug\.gralloc\.enable_fb_ubwc=|vendor\.gralloc\.enable_fb_ubwc=|persist\.sys\.perf\.topAppRenderThreadBoost\.enable=|persist\.sys\.gpu\.working_thread_priority=|debug\.sf\.early_phase_offset_ns=|debug\.sf\.early_app_phase_offset_ns=|debug\.sf\.early_gl_phase_offset_ns=|debug\.sf\.early_gl_app_phase_offset_ns=|debug\.hwui\.use_skia_graphite=|ro\.surface_flinger\.supports_background_blur=|persist\.sys\.sf\.disable_blurs=|ro\.sf\.blurs_are_expensive=|ro\.config\.vulkan\.enabled=|persist\.vendor\.vulkan\.enable=|persist\.graphics\.vulkan\.disable_pre_rotation=|debug\.sf\.use_phase_offsets_as_durations=|debug\.hwui\.texture_cache_size=|debug\.hwui\.layer_cache_size=|debug\.hwui\.path_cache_size=|debug\.hwui\.force_dark=|ro\.hwui\.text_small_cache_width=|ro\.hwui\.text_small_cache_height=|ro\.hwui\.text_large_cache_width=|ro\.hwui\.text_large_cache_height=|ro\.hwui\.drop_shadow_cache_size=|ro\.hwui\.gradient_cache_size=|persist\.sys\.sf\.native_mode=|debug\.sf\.treat_170m_as_sRGB=|debug\.egl\.debug_proc='
 if [ -f "$SYSTEM_PROP_FILE" ]; then
   awk -v pat="$_RENDER_PROPS" '{ if ($0 ~ pat) next; print }' \
     "$SYSTEM_PROP_FILE" > "${SYSTEM_PROP_FILE}.tmp" 2>/dev/null && \
@@ -1220,43 +1250,15 @@ else
 fi
 unset _RENDER_PROPS
 
-# ── FIRST BOOT AFTER INSTALL SAFETY CHECK ────────────────────────────────────
-# On the very first boot after a fresh install with skiavk/skiavk_all pre-set,
-# the Vulkan driver has not yet been validated by the system (zero shader cache,
-# driver freshly placed by overlay). Forcing Vulkan mode on first boot causes
-# SurfaceFlinger to fail during Vulkan driver init → BOOTLOOP.
-#
-# Solution: detect first boot via .first_boot_pending marker, skip skiavk on
-# this boot (use normal), remove marker so 2nd boot applies the real mode.
-# Marker is created by customize.sh at install time.
-# ─────────────────────────────────────────────────────────────────────────────
-
-FIRST_BOOT_PENDING=false
-if [ -f "$MODDIR/.first_boot_pending" ]; then
-  FIRST_BOOT_PENDING=true
-  if rm -f "$MODDIR/.first_boot_pending" 2>/dev/null; then
-    log_boot "[OK] First boot pending marker removed"
-  fi
-  log_boot "========================================"
-  log_boot "FIRST BOOT AFTER INSTALL DETECTED"
-  log_boot "========================================"
-  log_boot "Renderer override ($RENDER_MODE) is DEFERRED to next boot."
-  log_boot "Reason: Vulkan/GL driver not yet validated on pristine install."
-  log_boot "This boot uses the system-default renderer (no debug.hwui.renderer override)."
-  log_boot "All other stability and compatibility props ARE applied this boot."
-  log_boot "NOTE: First boot is NOT 'stock/normal mode' — HWUI/EGL/GPU props are active."
-  log_boot "      Only the renderer prop (skiavk/skiagl) is withheld until boot 2."
-  log_boot "From the NEXT boot onwards, $RENDER_MODE renderer will be fully active."
-  log_boot "========================================"
-
-  # Tell service.sh to skip renderer activation this boot too.
-  # post-fs-data.sh defers the renderer here, but service.sh runs independently
-  # at boot_completed+2s and has no way to know it's first boot (marker already gone).
-  # Without this second marker, service.sh would resetprop skiavk at boot_completed+2s
-  # → apps opened after that point start with skiavk, Vulkan not yet validated → crash.
-  touch "$MODDIR/.service_skip_render" 2>/dev/null && \
-    log_boot "[OK] Created service skip marker — service.sh will not set renderer this boot"
-fi
+# ── FIRST BOOT SAFETY CHECK: REMOVED (Q7 decision) ───────────────────────────
+# First-boot deferral removed. Renderer is now always applied on first boot.
+# Vulkan safety is provided by the VK compat gate above (auto-degrades to
+# skiagl when VK_DRIVER_FOUND=false), which is a real structural check rather
+# than a blanket 2-boot delay. Clean up any stale markers from previous installs.
+FIRST_BOOT_PENDING=false  # kept as variable for remaining code compatibility; always false now
+rm -f "$MODDIR/.first_boot_pending" 2>/dev/null || true
+rm -f "$MODDIR/.service_skip_render" 2>/dev/null || true
+log_boot "[OK] First-boot deferral disabled — renderer applied immediately"
 
 # ========================================
 # BOOT SUCCESS MARKER: clear stale marker from previous boot
@@ -1327,12 +1329,8 @@ if [ -f "$_EARLY_LAST_MODE_FILE" ]; then
   { IFS= read -r _EARLY_LAST_MODE; } < "$_EARLY_LAST_MODE_FILE" 2>/dev/null || _EARLY_LAST_MODE=""
 fi
 
-# On first boot (FIRST_BOOT_PENDING=true) the renderer is withheld and the
-# effective mode is "normal". Compare the effective mode against last recorded.
-# This way a previous skiavk install switching to "first-boot normal" also
-# triggers a correct cache clear on the first post-install boot.
 _EARLY_EFFECTIVE_MODE="$RENDER_MODE"
-[ "$FIRST_BOOT_PENDING" = "true" ] && _EARLY_EFFECTIVE_MODE="normal"
+# FIRST_BOOT_PENDING always false — no first-boot normal override needed
 
 # Determine if a clear is needed and record the reason.
 _EARLY_CLEAR_REASON=""
@@ -1363,15 +1361,23 @@ if [ -n "$_EARLY_CLEAR_REASON" ]; then
   # Global HWUI pipeline key cache directory
   rm -rf /data/misc/hwui/ 2>/dev/null || true
   # Per-app Skia Vulkan/GL pipeline caches — the primary crash culprit on mode switch
-  find /data/user_de/0 -maxdepth 2 -type d -name "app_skia_pipeline_cache" \
+  # DEPTH NOTE: /data/user_de/<uid>/<pkg>/code_cache/app_skia_pipeline_cache/ is 4 levels
+  # deep from /data/user_de — -maxdepth 3 never found it (stopped at code_cache).
+  # O-7 FIX: was /data/user_de/0 — only cleared primary user. Work-profile users
+  # (uid 10, 11, ...) live at /data/user_de/10/, /data/user_de/11/, etc. and their
+  # stale pipeline caches caused mode-mismatch crashes on managed/work-profile devices.
+  # Use /data/user_de (all users) with -maxdepth 4 to account for the extra uid level.
+  # service.sh late clear already uses /data/user_de correctly — this now matches it.
+  find /data/user_de -maxdepth 4 -type d -name "app_skia_pipeline_cache" \
       -exec rm -rf {} + 2>/dev/null || true
   # Fallback: legacy /data/data path (pre-Android-7 / direct-boot disabled devices)
-  find /data/data -maxdepth 2 -type d -name "app_skia_pipeline_cache" \
+  # /data/data/<pkg>/code_cache/app_skia_pipeline_cache/ is also 3 levels deep.
+  find /data/data -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
       -exec rm -rf {} + 2>/dev/null || true
-  # Skia shader journal manifests
-  find /data/user_de/0 -maxdepth 2 -name "*.shader_journal" -delete 2>/dev/null || true
-  # Skia per-app shader and pipeline cache sub-directories
-  find /data/user_de/0 -maxdepth 2 -type d \( -name "skia_shaders" -o -name "shader_cache" \) \
+  # Skia shader journal manifests (all users, +1 depth for uid level)
+  find /data/user_de -maxdepth 4 -name "*.shader_journal" -delete 2>/dev/null || true
+  # Skia per-app shader and pipeline cache sub-directories (all users)
+  find /data/user_de -maxdepth 4 -type d \( -name "skia_shaders" -o -name "shader_cache" \) \
       -exec rm -rf {} + 2>/dev/null || true
   log_boot "[OK] Early Skia pipeline & shader cache clear complete."
   log_boot "     Apps will recompile shaders fresh — no mode-mismatch or session-key crashes."
@@ -1429,18 +1435,25 @@ if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
   _DEGRADE_REASON=""
 
   if [ "$VK_COMPAT_LEVEL" = "blocked" ]; then
-    # LENIENT: blocked no longer auto-degrades to skiagl.
-    # The probe is a conservative heuristic — many real devices hit "blocked"
-    # (e.g. old vendor + gralloc mismatch) and run skiavk perfectly fine.
-    # Silently overriding the user's explicit choice is worse than a warning.
-    # We log clearly and proceed. Only risky+no_driver (driver .so absent)
-    # still degrades, because Vulkan is structurally impossible without it.
-    log_boot "========================================="
-    log_boot "[WARNING] compat=blocked (score=${VK_COMPAT_SCORE}/100) — proceeding with $RENDER_MODE anyway"
-    log_boot "  Reasons: ${VK_COMPAT_REASONS:-none recorded}"
-    log_boot "  Vulkan may fail silently on this ROM/vendor; if it does HWUI falls back to GL automatically."
-    log_boot "  To force skiagl regardless: echo skiagl > /sdcard/Adreno_Driver/Config/adreno_config.txt"
-    log_boot "========================================="
+    # Q3 decision: auto-degrade ONLY when no Vulkan driver .so is found (structurally
+    # impossible to run Vulkan). If the driver .so exists, warn and stay — the probe
+    # is a conservative heuristic; many real devices score "blocked" due to gralloc
+    # mismatch or old vendor strings but run skiavk perfectly fine.
+    if [ -f "$_FORCE_OVERRIDE_MARKER" ]; then
+      log_boot "[OVERRIDE] compat=blocked but force-override present — keeping $RENDER_MODE"
+    elif [ "$VK_DRIVER_FOUND" = "false" ]; then
+      # No vulkan.*.so anywhere — Vulkan is structurally impossible.
+      _DEGRADE_REASON="compat_blocked_no_driver(score=${VK_COMPAT_SCORE})"
+      log_boot "[AUTO-DEGRADE] compat=blocked + no Vulkan driver .so found → skiagl"
+      log_boot "  Cannot use skiavk: no vulkan.*.so found in vendor/system paths"
+    else
+      log_boot "========================================="
+      log_boot "[WARNING] compat=blocked (score=${VK_COMPAT_SCORE}/100) but driver present — proceeding with $RENDER_MODE"
+      log_boot "  Reasons: ${VK_COMPAT_REASONS:-none recorded}"
+      log_boot "  Vulkan may exhibit glitches on this ROM/vendor; HWUI falls back to GL automatically if it fails."
+      log_boot "  To force skiagl: echo skiagl > /sdcard/Adreno_Driver/Config/adreno_config.txt"
+      log_boot "========================================="
+    fi
 
   elif [ "$VK_COMPAT_LEVEL" = "risky" ]; then
     if [ -f "$_FORCE_OVERRIDE_MARKER" ]; then
@@ -1455,6 +1468,10 @@ if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
       log_boot "[RISKY] score=${VK_COMPAT_SCORE} — keeping $RENDER_MODE (driver present)"
       log_boot "  Reasons: ${VK_COMPAT_REASONS}"
       log_boot "  If skiavk causes black screen: rm /data/local/tmp/adreno_vk_compat_score && reboot"
+      # DEGRADE-MARKER FIX: delete stale degraded marker so service.sh BUG3-fix
+      # does not override RENDER_MODE to skiagl in the live resetprop block.
+      # risky+driver = module proceeds with skiavk; marker is not applicable.
+      rm -f "/data/local/tmp/adreno_skiavk_degraded" 2>/dev/null || true
       if [ "$RENDER_MODE" = "skiavk_all" ]; then
         RENDER_MODE="skiavk"
         log_boot "  [AUTO] skiavk_all → skiavk (risky: force-stop disabled as precaution)"
@@ -1463,6 +1480,10 @@ if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
 
   elif [ "$VK_COMPAT_LEVEL" = "marginal" ]; then
     log_boot "[MARGINAL] score=${VK_COMPAT_SCORE} — keeping $RENDER_MODE with watchdog"
+    # DEGRADE-MARKER FIX: delete stale degraded marker — marginal means proceed
+    # with skiavk (watchdog active). Keeping the marker would cause service.sh
+    # to override RENDER_MODE to skiagl in the live resetprop block every boot.
+    rm -f "/data/local/tmp/adreno_skiavk_degraded" 2>/dev/null || true
     if [ "$RENDER_MODE" = "skiavk_all" ]; then
       RENDER_MODE="skiavk"
       log_boot "  [AUTO] skiavk_all → skiavk (marginal: force-stop disabled as precaution)"
@@ -1729,24 +1750,25 @@ case "$RENDER_MODE" in
       # Renderer props persist to system.prop so SF reads them at init
       
       
-      if [ "$FIRST_BOOT_PENDING" = "false" ]; then
-        printf 'debug.hwui.renderer=skiavk\n'
-        # debug.renderengine.backend intentionally NOT written to system.prop.
-        # OEM ROMs (MIUI/HyperOS, Samsung OneUI, ColorOS) register a live
-        # SystemProperties::addChangeCallback for this prop. If init loads it from
-        # system.prop and its value changes at runtime, SurfaceFlinger fires a
-        # RenderEngine reinitialization mid-frame → SF crash → all apps lose surfaces
-        # → watchdog reboot. Set exclusively via resetprop BEFORE SF starts (below).
-      fi
+      # FIRST_BOOT_PENDING guard removed — always applies now (Q7)
+      printf 'debug.hwui.renderer=skiavk\n'
+      # debug.renderengine.backend intentionally NOT written to system.prop.
+      # OEM ROMs (MIUI/HyperOS, Samsung OneUI, ColorOS) register a live
+      # SystemProperties::addChangeCallback for this prop. If init loads it from
+      # system.prop and its value changes at runtime, SurfaceFlinger fires a
+      # RenderEngine reinitialization mid-frame → SF crash → all apps lose surfaces
+      # → watchdog reboot. Set exclusively via resetprop BEFORE SF starts (below).
       printf 'com.qc.hardware=true\n'
       printf 'persist.sys.force_sw_gles=0\n'
       printf 'debug.hwui.use_buffer_age=false\n'
       printf 'debug.hwui.use_partial_updates=false\n'
       printf 'debug.hwui.use_gpu_pixel_buffers=false\n'
-      # reduceopstasksplitting=false — AOSP default. Setting true reduces Skia OpsTask
-      # splits in the render thread (larger batches), which causes rendering order
-      # failures and visual artifacts in apps with complex custom draw operations
-      # (e-readers, maps, games with HWUI UI overlay). Leave at safe default false.
+      # reduceopstasksplitting: AOSP default is TRUE (Properties.h: "improves GPU
+      # efficiency but may increase VRAM consumption"). This module sets FALSE to
+      # preserve strict OpsTask ordering. Custom Adreno drivers handle concurrent
+      # OpsTask batches less reliably than stock, causing rendering order failures
+      # and visual artifacts in apps with complex draw operations (e-readers, maps,
+      # HWUI-overlay games). Performance cost of false is negligible on Adreno.
       printf 'renderthread.skia.reduceopstasksplitting=false\n'
       printf 'debug.hwui.skip_empty_damage=true\n'
       printf 'debug.hwui.webview_overlays_enabled=true\n'
@@ -1847,9 +1869,15 @@ case "$RENDER_MODE" in
       # Shadow/gradient cache: reduce peak VRAM budget
       printf 'ro.hwui.drop_shadow_cache_size=3\n'
       printf 'ro.hwui.gradient_cache_size=1\n'
-      # native_mode=0: NOT set. Forces sRGB globally, disables HDR/WCG on capable displays.
-      # Samsung/Xiaomi WCG: map BT.601/170M → VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-      printf 'debug.sf.treat_170m_as_sRGB=1\n'
+      # treat_170m_as_sRGB=1: Maps BT.601/SMPTE-170M colour space to sRGB so SurfaceFlinger
+      # uses VK_COLOR_SPACE_SRGB_NONLINEAR_KHR for the swapchain. Prevents green-tint
+      # artefacts on non-WCG (sRGB-only) Adreno devices. SKIP on WCG/HDR displays:
+      # those use ro.surface_flinger.use_color_management=1 and need BT.601 passthrough.
+      _wcg=$(getprop ro.surface_flinger.use_color_management 2>/dev/null || echo "")
+      if [ "$_wcg" != "1" ] && [ "$_wcg" != "true" ]; then
+        printf 'debug.sf.treat_170m_as_sRGB=1\n'
+      fi
+      unset _wcg
       # Clear OEM EGL debug hook (MIUI/HyperOS/ColorOS ABI mismatch → SIGSEGV in libvulkan)
       printf 'debug.egl.debug_proc=\n'
       # ── HWUI render caches — reduce texture/layer/path upload stalls ──────────
@@ -1859,66 +1887,47 @@ case "$RENDER_MODE" in
       printf 'debug.hwui.texture_cache_size=72\n'
       printf 'debug.hwui.layer_cache_size=48\n'
       printf 'debug.hwui.path_cache_size=32\n'
+      # ── Always-active HW path reinforcement ──────────────────────────────────
+      # These were previously written only by service.sh. Moving here so they are
+      # in system.prop from init on every boot (no timing dependency on service.sh).
+      # service.sh live resetprop still re-enforces them as a belt-and-suspenders.
+      printf 'debug.sf.hw=1\n'
+      printf 'persist.sys.ui.hw=1\n'
+      printf 'debug.egl.hw=1\n'
+      printf 'debug.egl.profiler=0\n'
+      printf 'debug.egl.trace=0\n'
+      # Clear OEM Vulkan dev/validation layer overrides
+      printf 'debug.vulkan.dev.layers=\n'
+      printf 'persist.graphics.vulkan.validation_enable=0\n'
+      # HWUI drawing state + non-debug vsync
+      printf 'debug.hwui.drawing_enabled=true\n'
+      printf 'hwui.disable_vsync=false\n'
     } >> "$SYSTEM_PROP_FILE" 2>/dev/null
-    log_boot "[OK] system.prop: skiavk props written (65 props). disable_pre_rotation and native_mode REMOVED (fixed PUBG/UE4/game crashes). Blur ENABLED. Text cache AOSP defaults restored."
+    log_boot "[OK] system.prop: skiavk props written (74 props). disable_pre_rotation and native_mode REMOVED (fixed PUBG/UE4/game crashes). Blur ENABLED. Text cache AOSP defaults restored. Always-active HW props added."
     # Apply live for this boot session via resetprop
     # ── CRITICAL: renderer props set ONLY via resetprop, NEVER system.prop ──
     # This ensures the renderer is only activated AFTER the module's Vulkan
     # driver overlay is mounted, preventing crashes on legacy/OEM devices where
     # system.prop is loaded before module overlays are applied.
-    if [ "$FIRST_BOOT_PENDING" = "true" ]; then
-      log_boot "[OK] FIRST BOOT: renderer props deferred — NOT applying skiavk this boot (Vulkan not yet validated)"
-      log_boot "     All other props (SF/HWUI tweaks) applied via resetprop for system stability"
-    fi
+    # First-boot deferral removed (Q7) — renderer always applied.
     if command -v resetprop >/dev/null 2>&1; then
-      # ── Both skiavk and skiavk_all: set SF compositor to skiavkthreaded ────────
-      # debug.renderengine.backend controls SurfaceFlinger's compositor engine,
-      # entirely separate from HWUI (debug.hwui.renderer controls app rendering).
-      # skiavkthreaded = SKIA_VK_THREADED (enum 6, RenderEngine.h) — SF composites
-      # using Vulkan via a dedicated RenderThread. Implemented in Android 14
-      # (SkiaVkRenderEngine.cpp); required default in Android 15+. Setting it
-      # here (pre-SF, post-fs-data) is safe. Setting it after SF starts triggers
-      # OEM property watchers → RenderEngine reinit mid-frame → SF crash.
-      if [ "$FIRST_BOOT_PENDING" = "false" ]; then
-        resetprop debug.hwui.renderer skiavk
-        # debug.renderengine.backend: set via resetprop BEFORE SF starts.
-        # skiavkthreaded = SkiaVkRenderEngine (Android 14+ / API 34+).
-        # skiaglthreaded = fallback threaded GL compositor (all Android versions).
-        # DO NOT set this live in service.sh — SF is running, OEM ROM property
-        # watchers fire a RenderEngine reinit mid-frame → SF crash → watchdog reboot.
-        # DO NOT set in system.prop alone (loaded before module overlays mount →
-        # no Vulkan driver present → SF silently falls back, ignoring the prop).
-        # Here (post-fs-data, pre-SF) is the only safe window to set it.
-        #
-        # Gate: API >= 34 OR FORCE_SKIAVKTHREADED_BACKEND=y (user override).
-        # On Android < 14: OEM SFs reject unknown backend strings → bootloop.
-        # Only bypass if FORCE flag is set AND .boot_success confirmed safe.
-        _re_sdk=$(getprop ro.build.version.sdk 2>/dev/null || echo "0")
-        _re_threaded_ok=false
-        if [ "$_re_sdk" -ge 34 ] 2>/dev/null; then
-          _re_threaded_ok=true
-        elif [ "$FORCE_SKIAVKTHREADED_BACKEND" = "y" ]; then
-          _re_threaded_ok=true
-          log_boot "[WARN] FORCE_SKIAVKTHREADED_BACKEND=y: SDK=${_re_sdk} < 34 — skiavkthreaded forced by user (bootloop risk on strict OEM ROMs)"
-        fi
-        if [ "$_re_threaded_ok" = "true" ]; then
-          if [ -f "$MODDIR/.boot_success" ]; then
-            # Previous boot reached boot_completed with skiavk active — safe to enable
-            resetprop debug.renderengine.backend skiavkthreaded
-            log_boot "[OK] renderengine.backend=skiavkthreaded: .boot_success confirmed, SDK=${_re_sdk}$([ "$FORCE_SKIAVKTHREADED_BACKEND" = "y" ] && echo " (FORCED)")"
-          else
-            # First real boot after install, or previous boot froze before boot_completed.
-            # Use skiaglthreaded so SF starts cleanly. Next boot promotes to skiavkthreaded.
-            resetprop debug.renderengine.backend skiaglthreaded
-            log_boot "[SAFE] renderengine.backend=skiaglthreaded: no .boot_success — safe GL backend this boot"
-            log_boot "       skiavkthreaded activates next boot after service.sh writes .boot_success"
-          fi
-        else
-          log_boot "[SKIP] skiavkthreaded backend: SDK=${_re_sdk} < 34, SkiaVkRenderEngine absent — using skiaglthreaded fallback"
-          resetprop debug.renderengine.backend skiaglthreaded
-        fi
-        unset _re_sdk _re_threaded_ok
+      # ── Both skiavk and skiavk_all: set HWUI renderer + SF compositor ────────
+      # debug.hwui.renderer   — per-app HWUI rendering (Vulkan via skiavk)
+      # debug.renderengine.backend — SurfaceFlinger compositor engine
+      #   skiavkthreaded = SkiaVkRenderEngine (Android 14+ / API 34+)
+      #   skiaglthreaded = threaded GL compositor (all Android versions, safe fallback)
+      # Must be set here (post-fs-data, pre-SF). Setting after SF starts triggers OEM
+      # addChangeCallback → RenderEngine reinit mid-frame → SF crash.
+      resetprop debug.hwui.renderer skiavk
+      _re_sdk=$(getprop ro.build.version.sdk 2>/dev/null || echo "0")
+      if [ "$_re_sdk" -ge 34 ] 2>/dev/null; then
+        resetprop debug.renderengine.backend skiavkthreaded
+        log_boot "[OK] renderengine.backend=skiavkthreaded (SDK=${_re_sdk})"
+      else
+        resetprop debug.renderengine.backend skiaglthreaded
+        log_boot "[OK] renderengine.backend=skiaglthreaded (SDK=${_re_sdk} < 34, SkiaVkRenderEngine not available)"
       fi
+      unset _re_sdk
       # ── Dangerous SF props INTENTIONALLY NOT SET via resetprop ──────────────
       # (latch_unsignaled, disable_backpressure, disable_triple_buffer, etc.)
       # See system.prop comment above for root cause. These are DELETED below
@@ -1942,8 +1951,8 @@ case "$RENDER_MODE" in
       resetprop debug.hwui.use_buffer_age false
       resetprop debug.hwui.use_partial_updates false
       resetprop debug.hwui.use_gpu_pixel_buffers false
-      # reduceopstasksplitting=false — AOSP default. true causes rendering artifacts
-      # in apps with complex Canvas/Skia operations (maps, e-readers, game UI overlays).
+      # reduceopstasksplitting: AOSP default is TRUE but module sets FALSE for
+      # rendering order stability with custom Adreno drivers (see system.prop block).
       resetprop renderthread.skia.reduceopstasksplitting false
       resetprop debug.hwui.skip_empty_damage true
       resetprop debug.hwui.webview_overlays_enabled true
@@ -1996,8 +2005,13 @@ case "$RENDER_MODE" in
       resetprop ro.hwui.text_large_cache_height 1024
       resetprop ro.hwui.drop_shadow_cache_size 3
       resetprop ro.hwui.gradient_cache_size 1
-      # native_mode: NOT set. Disables HDR/WCG on capable displays.
-      resetprop debug.sf.treat_170m_as_sRGB 1
+      # treat_170m_as_sRGB: only safe on sRGB-only (non-WCG) displays.
+      # Skip on WCG/HDR devices (ro.surface_flinger.use_color_management=1).
+      _wcg=$(getprop ro.surface_flinger.use_color_management 2>/dev/null || echo "")
+      if [ "$_wcg" != "1" ] && [ "$_wcg" != "true" ]; then
+        resetprop debug.sf.treat_170m_as_sRGB 1
+      fi
+      unset _wcg
       resetprop debug.egl.debug_proc ""
       # ── OEM-override-resistant props ─────────────────────────────────────
       resetprop debug.sf.hw 1
@@ -2052,7 +2066,8 @@ case "$RENDER_MODE" in
     #          service window on even the slowest custom ROMs.
     # ══════════════════════════════════════════════════════════════════════════
 
-    if [ "$FIRST_BOOT_PENDING" = "false" ] && command -v resetprop >/dev/null 2>&1; then
+    # FIRST_BOOT_PENDING guard removed (Q7); resetprop check kept.
+    if command -v resetprop >/dev/null 2>&1; then
 
       detect_old_vendor_extended
 
@@ -2128,8 +2143,8 @@ case "$RENDER_MODE" in
     # ══ END OLD VENDOR DETECTION ═════════════════════════════════════════════
 
     # ── BACKGROUND RESTART TASK ──────────────────────────────────────────────
-    # After boot_completed, re-apply renderer props and crash SystemUI so it
-    # cold-restarts with skiavk.
+    # After boot_completed, re-apply renderer props and force-stop 3rd-party apps
+    # so they cold-restart with skiavk.
     #
     # Why needed: debug.hwui.renderer is read ONCE per process at first HWUI
     # init, then cached as a static var in Properties.cpp → sRenderPipelineType.
@@ -2140,11 +2155,11 @@ case "$RENDER_MODE" in
     # skiavk: force-stops 3rd-party apps (below) — RESTORED from old working files.
     # skiavk_all: also gets service.sh's additional system-package force-stop (boot+32s).
     # SystemUI is NOT crashed in any mode — that caused GMS account loss + watchdog reboots.
-    if [ "$FIRST_BOOT_PENDING" = "false" ]; then
-      (
+    # FIRST_BOOT_PENDING guard removed (Q7).
+    (
         # Wait for boot_completed — max 90s.
         # Beyond 90s the user is actively using the device; any action that disrupts
-        # running processes (like crashing SystemUI) would appear as an unexpected crash.
+        # running processes (force-stopping apps) would appear as an unexpected crash.
         # 90s is sufficient for any normally-booting device.
         _WAIT=0
         while [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ] && [ $_WAIT -lt 90 ]; do
@@ -2188,56 +2203,58 @@ case "$RENDER_MODE" in
         # screens, GMS account loss, and Android watchdog reboots on custom ROMs.
         # SystemUI picks up skiavk on the NEXT reboot via system.prop.
         sleep 15
-        pm list packages -3 2>/dev/null | while IFS=: read -r _ pkg; do
-          pkg="${pkg%$'\r'}"
-          # Skip GMS/GSF (OAuth mid-sync → account loss if killed), Meta
-          # (ANativeWindow dangling ref), Play Store, core Android namespace.
-          #
-          # NOTE: UE4/native-Vulkan games (PUBG, CoD Mobile, Fortnite, Genshin)
-          # are NO LONGER excluded here. The game-compatibility daemon (service.sh)
-          # starts at boot_completed+2s and switches debug.hwui.renderer to skiagl
-          # within 1s of any native-Vulkan game being detected in /proc. When the
-          # user reopens a game after this force-stop, HWUI initialises with skiagl
-          # (GL), not skiavk (Vulkan) — so no dual-VkDevice conflict occurs. The
-          # original exclusion assumed HWUI would be skiavk at game launch, but the
-          # daemon prevents that. Force-stopping here ensures games cold-start AFTER
-          # the daemon is active, closing the race window on boot 2.
-          #
-          # The game package list is defined in game_exclusion_list.sh (sourced at
-          # boot top) and is editable via the Adreno Manager WebUI. The daemon's
-          # own /proc scanner (service.sh) still uses the full list independently.
+        # BUG-1 FIX: pipe-while runs loop body in subshell (POSIX sh / ash / mksh).
+        # Also, "pm list packages -3" outputs "package:com.example.app" but may emit
+        # warning lines without a colon on slow boots — IFS=: read then assigns the
+        # whole warning line to _ and leaves pkg empty, silently skipping real pkgs.
+        # Fix: pre-cut the package names into a temp file, then read from it directly.
+        _PFD_SKIP_TMP="/data/local/tmp/adreno_pkgs_skiavk_$$"
+        pm list packages -3 2>/dev/null | cut -f2 -d: > "$_PFD_SKIP_TMP" 2>/dev/null || true
+        # Skip GMS/GSF (OAuth mid-sync → account loss if killed), Meta
+        # (ANativeWindow dangling ref), Play Store, core Android namespace.
+        #
+        # NOTE: UE4/native-Vulkan games (PUBG, CoD Mobile, Fortnite, Genshin)
+        # are NO LONGER excluded here. The game-compatibility daemon (service.sh)
+        # starts at boot_completed+2s and switches debug.hwui.renderer to skiagl
+        # within 1s of any native-Vulkan game being detected in /proc. When the
+        # user reopens a game after this force-stop, HWUI initialises with skiagl
+        # (GL), not skiavk (Vulkan) — so no dual-VkDevice conflict occurs. The
+        # original exclusion assumed HWUI would be skiavk at game launch, but the
+        # daemon prevents that. Force-stopping here ensures games cold-start AFTER
+        # the daemon is active, closing the race window on boot 2.
+        #
+        # The game package list is defined in game_exclusion_list.sh (sourced at
+        # boot top) and is editable via the Adreno Manager WebUI. The daemon's
+        # own /proc scanner (service.sh) still uses the full list independently.
+        while IFS= read -r pkg; do
+          [ -z "$pkg" ] && continue
+          pkg="${pkg%$(printf '\r')}"
           case "$pkg" in
-            android*|com.android.*|com.google.*|\
-            com.google.android.gms|com.google.android.gms.*|\
-            com.google.android.gsf|com.google.android.gsf.*|\
-            com.google.android.gmscore|com.android.vending|\
-            com.facebook.katana|com.facebook.orca|com.facebook.lite|\
-            com.facebook.mlite|com.instagram.android|com.instagram.lite|\
-            com.whatsapp|com.whatsapp.w4b)
+            android*|com.android.*|com.google.*|com.google.android.gms|com.google.android.gms.*|com.google.android.gsf|com.google.android.gsf.*|com.google.android.gmscore|com.android.vending|com.facebook.katana|com.facebook.orca|com.facebook.lite|com.facebook.mlite|com.facebook.appmanager|com.facebook.services|com.facebook.system|com.instagram.android|com.instagram.lite|com.instagram.barcelona|com.whatsapp|com.whatsapp.w4b)
               continue ;;
           esac
           am force-stop "$pkg" 2>/dev/null || true
           sleep 0.15
-        done
+        done < "$_PFD_SKIP_TMP"
+        rm -f "$_PFD_SKIP_TMP" 2>/dev/null || true
 
       ) >/dev/null 2>&1 &
       log_boot "[OK] skiavk background task: props re-applied + 3rd-party apps force-stopped to cold-start with skiavk renderer"
-    fi
 
     # ── GAME EXCLUSION DAEMON LAUNCH ──────────────────────────────────────────
     # Launches the native adreno_ged binary if available (zero overhead),
     # falls back to game_excl_daemon.sh (shell, low overhead) if not.
     #
     # Native binary architecture (truly zero overhead):
-    #   inotify on /proc: kernel wakes daemon only when a new process spawns.
-    #   pidfd per game: kernel delivers death event exactly when game exits.
-    #   epoll: single blocking wait covers all events. Zero CPU between events.
-    #   No logcat pipe, no polling loop, no shell interpreter overhead.
+    #   NETLINK_CONNECTOR PROC_EVENT_FORK+COMM: kernel delivers fork/comm events
+    #   via netlink socket — zero CPU between events. No polling, no logcat pipe.
+    #   pidfd per game (kernel 5.3+): epoll wakes on game exit. Fallback: 1s
+    #   /proc/$PID stat poll for kernels < 5.3. No shell interpreter overhead.
     #
     # Shell fallback architecture (low overhead):
     #   logcat -b events: blocks in kernel between am_proc_start events.
     #   sleep 1 loop per active game: ~1 µs/sec CPU per game.
-    if [ "$GAME_EXCLUSION_DAEMON" = "y" ] && [ "$FIRST_BOOT_PENDING" = "false" ]; then
+    if [ "$GAME_EXCLUSION_DAEMON" = "y" ]; then
       (
         # Wait for boot_completed before launching daemon.
         _GED_WAIT=0
@@ -2287,7 +2304,7 @@ case "$RENDER_MODE" in
           exit 1
         fi
 
-        /system/bin/sh "$_GED_SCRIPT" "$RENDER_MODE" &
+        /system/bin/sh "$_GED_SCRIPT" "$RENDER_MODE" "$MODDIR" &
         echo "[ADRENO] Game exclusion daemon (SHELL fallback) launched PID=$! script=$_GED_SCRIPT mode=$RENDER_MODE" \
           > /dev/kmsg 2>/dev/null || true
       ) &
@@ -2299,11 +2316,11 @@ case "$RENDER_MODE" in
 
   skiagl)
     {
-      # Renderer props: hwui.renderer for per-process HWUI; renderengine.backend
-      # for SurfaceFlinger compositor. Both persisted here for next boot.
-      # renderengine.backend is also set via resetprop below (pre-SF, this boot).
+      # Renderer prop: hwui.renderer for per-process HWUI app rendering.
+      # debug.renderengine.backend (SurfaceFlinger compositor) is NOT written to
+      # system.prop — set exclusively via resetprop below (pre-SF, this boot).
+      # OEM ROM property watchers crash SF if the value changes after SF starts.
       printf 'debug.hwui.renderer=skiagl\n'
-      printf 'debug.renderengine.backend=skiaglthreaded\n'
       # force_sw_gles=0 — use hardware GLES (not software fallback)
       printf 'persist.sys.force_sw_gles=0\n'
       # Qualcomm hardware acceleration gate — enables Qualcomm ION buffer paths in gralloc
@@ -2321,9 +2338,8 @@ case "$RENDER_MODE" in
       printf 'debug.hwui.render_dirty_regions=false\n'
       # WebView overlay compositing — GL mode supports this safely
       printf 'debug.hwui.webview_overlays_enabled=true\n'
-      # reduceopstasksplitting=false — AOSP default. Setting true reduces Skia OpsTask
-      # split granularity (larger GPU batches), causing rendering order failures and
-      # visual artifacts in apps with complex custom draw operations. Leave at false.
+      # reduceopstasksplitting: AOSP default is TRUE but module sets FALSE for
+      # rendering order stability with custom Adreno drivers (see skiavk block).
       printf 'renderthread.skia.reduceopstasksplitting=false\n'
       # Disable all Skia tracing/profiling overhead in GL mode too
       printf 'debug.hwui.skia_tracing_enabled=false\n'
@@ -2401,14 +2417,24 @@ case "$RENDER_MODE" in
       printf 'debug.hwui.texture_cache_size=72\n'
       printf 'debug.hwui.layer_cache_size=48\n'
       printf 'debug.hwui.path_cache_size=32\n'
+      # ── Always-active HW path reinforcement ──────────────────────────────────
+      # Moved from service.sh system.prop block — now persisted from init on every boot.
+      printf 'debug.sf.hw=1\n'
+      printf 'persist.sys.ui.hw=1\n'
+      printf 'debug.egl.hw=1\n'
+      printf 'debug.egl.profiler=0\n'
+      printf 'debug.egl.trace=0\n'
+      printf 'debug.vulkan.dev.layers=\n'
+      printf 'persist.graphics.vulkan.validation_enable=0\n'
+      printf 'debug.hwui.drawing_enabled=true\n'
+      printf 'hwui.disable_vsync=false\n'
     } >> "$SYSTEM_PROP_FILE" 2>/dev/null
-    log_boot "[OK] system.prop: skiagl stability+perf+compat+crash-fix props written (49 props). initialize_gl_always=false (crash fix), profiler.support=false (Snapdragon profiler crash fix), use_gpu_pixel_buffers=false (PBO race fix). Blur ENABLED."
+    log_boot "[OK] system.prop: skiagl stability+perf+compat+crash-fix props written (58 props). initialize_gl_always=false (crash fix), profiler.support=false (Snapdragon profiler crash fix), use_gpu_pixel_buffers=false (PBO race fix). Blur ENABLED. Always-active HW props added."
     if command -v resetprop >/dev/null 2>&1; then
       # ── renderer props set ONLY via resetprop (see skiavk section for why) ──
-      if [ "$FIRST_BOOT_PENDING" = "false" ]; then
-        resetprop debug.hwui.renderer skiagl
-        resetprop debug.renderengine.backend skiaglthreaded
-      fi
+      # FIRST_BOOT_PENDING guard removed (Q7) — always applies now.
+      resetprop debug.hwui.renderer skiagl
+      resetprop debug.renderengine.backend skiaglthreaded
       resetprop persist.sys.force_sw_gles 0
       resetprop com.qc.hardware true
       # use_buffer_age=false — EGL_EXT_buffer_age unreliable on custom Adreno drivers
@@ -2418,7 +2444,8 @@ case "$RENDER_MODE" in
       # render_dirty_regions=false — paired with above to prevent stale-pixel glitches
       resetprop debug.hwui.render_dirty_regions false
       resetprop debug.hwui.webview_overlays_enabled true
-      # reduceopstasksplitting=false — AOSP default; true causes rendering artifacts
+      # reduceopstasksplitting: AOSP default is TRUE but module sets FALSE for
+      # rendering order stability with custom Adreno drivers.
       resetprop renderthread.skia.reduceopstasksplitting false
       resetprop debug.hwui.skia_tracing_enabled false
       resetprop debug.hwui.skia_use_perfetto_track_events false
@@ -2524,15 +2551,17 @@ case "$RENDER_MODE" in
     log_boot "[OK] Render mode applied: skiagl"
 
     # ── BACKGROUND RESTART TASK (skiagl) ─────────────────────────────────────
-    # After boot_completed, re-apply renderer props and crash SystemUI so it
-    # restarts with skiagl. Rationale: debug.hwui.renderer is cached per-process.
-    # SystemUI crash ensures the compositor uses skiagl correctly.
+    # After boot_completed, re-apply debug.hwui.renderer=skiagl and force-stop
+    # 3rd-party apps so they cold-start with skiagl on next open.
+    # NOTE: SystemUI is NOT crashed. am crash systemui was removed because it
+    # caused black screen + GMS OAuth account loss + Android watchdog reboot on
+    # custom ROMs. system.prop ensures SystemUI picks up skiagl on next cold-start.
     # Third-party apps are NOT force-stopped in skiagl mode — they naturally adopt
     # skiagl on their next cold start and there is no "mixed state" problem in
     # GL mode (GL is always available as a fallback). Force-stopping was the
     # cause of "some apps crash" reports from users in skiagl mode.
-    if [ "$FIRST_BOOT_PENDING" = "false" ]; then
-      (
+    # FIRST_BOOT_PENDING guard removed (Q7) — skiagl background task always runs.
+    (
         # Max 90s wait. Beyond this the user is actively using the device —
         # any disruptive action (SystemUI crash) would appear as an unexpected crash.
         _WAIT=0
@@ -2554,40 +2583,31 @@ case "$RENDER_MODE" in
         # Apps running with cached GL renderer / old driver state need a cold-start
         # to pick up skiagl cleanly. Same exclusions and throttle as skiavk above.
         sleep 15
-        pm list packages -3 2>/dev/null | while IFS=: read -r _ pkg; do
-          pkg="${pkg%$'\r'}"
-          # Delegate to _game_pkg_excluded() — single source of truth for GMS,
-          # Meta, and game exclusions. WebUI updates to game_exclusion_list.sh
-          # are reflected here automatically without editing this block.
-          if _game_pkg_excluded "$pkg"; then continue; fi
+        # BUG-1 FIX: use temp-file pattern (same as service.sh _P2_TMP / _P3_TMP).
+        # pipe-while runs the loop body in a subshell — same fragile IFS=: parsing fix.
+        _PFD_GL_TMP="/data/local/tmp/adreno_pkgs_skiagl_$$"
+        pm list packages -3 2>/dev/null | cut -f2 -d: > "$_PFD_GL_TMP" 2>/dev/null || true
+        # In skiagl mode: force-stop all 3rd-party apps to cold-start with GL renderer.
+        # Games are NOT excluded — they use native Vulkan (not HWUI), so force-stopping
+        # them is harmless and ensures a clean renderer state for any HWUI components.
+        # Only skip GMS/core system packages that break if force-stopped.
+        while IFS= read -r pkg; do
+          [ -z "$pkg" ] && continue
+          pkg="${pkg%$(printf '\r')}"
+          # Skip GMS core and account-sync packages — force-stopping breaks push
+          # notifications, account sync, and Play Store background updates.
+          case "$pkg" in
+            com.google.android.gms|com.google.android.gsf|com.google.android.gsf.login|com.google.process.gapps|com.google.android.syncadapters.*|com.android.providers.downloads|com.android.vending) continue ;;
+          esac
           am force-stop "$pkg" 2>/dev/null || true
           sleep 0.15
-        done
+        done < "$_PFD_GL_TMP"
+        rm -f "$_PFD_GL_TMP" 2>/dev/null || true
 
       ) >/dev/null 2>&1 &
       log_boot "[OK] skiagl background task: props re-applied + 3rd-party apps force-stopped to cold-start with skiagl renderer"
-    fi
     ;;
 
-  skiavkthreaded)
-    # ── LEGACY: skiavkthreaded was removed as a separate RENDER_MODE ─────────
-    # common.sh normalizes this to 'skiavk' on load. This branch is only reached
-    # if the config was written directly without going through common.sh.
-    # Redirect to skiavk behaviour by falling through after normalization.
-    log_boot "[LEGACY] RENDER_MODE=skiavkthreaded normalized to skiavk (renderengine.backend handled by skiavk block)"
-    RENDER_MODE="skiavk"
-    # Note: RENDER_MODE change here does NOT re-execute the skiavk case above.
-    # The renderengine.backend will be set on next boot. Log for diagnostics.
-    log_boot "         Reboot to apply renderengine.backend=skiavkthreaded (or skiaglthreaded fallback)"
-    ;;
-
-  skiaglthreaded)
-    # ── LEGACY: skiaglthreaded was removed as a separate RENDER_MODE ─────────
-    # common.sh normalizes this to 'skiagl' on load. Same as above.
-    log_boot "[LEGACY] RENDER_MODE=skiaglthreaded normalized to skiagl (renderengine.backend=skiaglthreaded handled by skiagl block)"
-    RENDER_MODE="skiagl"
-    log_boot "         Reboot to apply renderengine.backend=skiaglthreaded via skiagl block"
-    ;;
 
   normal|*)
     log_boot "[OK] system.prop: no render prop written (normal mode)"
@@ -2965,7 +2985,7 @@ done
 
 log_boot "========================================"
 log_boot "post-fs-data.sh completed successfully"
-log_boot "Configuration: PLT=$PLT, QGL=$QGL, RENDER=$RENDER_MODE, GAME_EXCLUSION_DAEMON=$GAME_EXCLUSION_DAEMON, FIRST_BOOT_DEFERRED=$FIRST_BOOT_PENDING"
+log_boot "Configuration: PLT=$PLT, QGL=$QGL, RENDER=$RENDER_MODE, GAME_EXCLUSION_DAEMON=$GAME_EXCLUSION_DAEMON, FIRST_BOOT_DEFERRAL=disabled"
 log_boot "Metamodule active: $METAMODULE_ACTIVE"
 log_boot "SUSFS (root hiding): $SUSFS_ACTIVE"
 log_boot "OEM ROM: $OEM_TYPE"

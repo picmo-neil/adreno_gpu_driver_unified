@@ -23,7 +23,7 @@ load_config() {
     # Skip blank lines and comments
     case "$_k" in '#'*|'') continue ;; esac
     # Strip carriage return from value (Windows line endings)
-    _v="${_v%$'\r'}"
+    _v="${_v%"$(printf '\r')"}"
     # Normalise boolean keys
     case "$_k" in
       VERBOSE|ARM64_OPT|QGL|PLT|GAME_EXCLUSION_DAEMON|FORCE_SKIAVKTHREADED_BACKEND)
@@ -80,8 +80,8 @@ detect_metamodule() {
        [ ! -f "$META_LINK/disable" ] && [ ! -f "$META_LINK/remove" ]; then
       while IFS='=' read -r _mk _mv; do
         case "$_mk" in
-          id)   METAMODULE_ID="${_mv%$'\r'}" ;;
-          name) METAMODULE_NAME="${_mv%$'\r'}" ;;
+          id)   METAMODULE_ID="${_mv%"$(printf '\r')"}" ;;
+          name) METAMODULE_NAME="${_mv%"$(printf '\r')"}" ;;
         esac
       done < "$META_LINK/module.prop" 2>/dev/null
       METAMODULE_ACTIVE=true
@@ -97,7 +97,7 @@ detect_metamodule() {
         METAMODULE_ID="$meta_id"
         METAMODULE_NAME="$meta_id"
         while IFS='=' read -r _mk _mv; do
-          case "$_mk" in name) METAMODULE_NAME="${_mv%$'\r'}"; break ;; esac
+          case "$_mk" in name) METAMODULE_NAME="${_mv%"$(printf '\r')"}"; break ;; esac
         done < "$mod_dir/module.prop" 2>/dev/null
         METAMODULE_ACTIVE=true
         return 0
@@ -533,464 +533,6 @@ detect_kgsl_version() {
   return 0
 }
 
-# ============================================================
-# probe_vulkan_stack_compatibility()
-# ============================================================
-# Comprehensive multi-layer hardware compatibility analysis for skiavk.
-# Probes: Vulkan driver existence, KGSL/kernel version, gralloc HAL
-# version, EGL fence sync support, UBWC/HWC compatibility, vendor
-# prop wars, and VNDK API delta.
-#
-# CALL ORDER REQUIREMENTS:
-#   Must be called AFTER detect_old_vendor_extended() (needs OLD_VENDOR,
-#   VENDOR_RC_OVERRIDE, VENDOR_SCRIPT_OVERRIDE), and AFTER
-#   detect_kgsl_version() (needs KERNEL_VERSION_MAJOR/MINOR).
-#   detect_gralloc_hal_version() is called internally.
-#
-# SCORING SYSTEM (0–100):
-#   Each detected incompatibility deducts points based on crash severity.
-#
-#   100        = Perfect — every check passes, no issues found
-#   80 – 99    = EXCELLENT  → skiavk + skiavk_all both safe
-#   60 – 79    = GOOD       → skiavk safe, avoid skiavk_all
-#   40 – 59    = DEGRADED   → skiavk may work with visible glitches/OOM risk
-#   0  – 39    = CRITICAL   → guaranteed crash/black screen → auto-downgrade to skiagl
-#
-# DEDUCTION TABLE (matches root causes from root cause analysis):
-#   -60  NO_VULKAN_DRIVER           (no vulkan.*.so anywhere)
-#   -50  KERNEL_TOO_OLD             (kernel < 4.9, no sync_file)
-#   -45  GRALLOC2_MISMATCH          (gralloc2 with Android 12+ system)
-#   -40  KGSL_IOCTL_MISSING         (kernel 4.9–4.13, GPU CMD V2 absent)
-#   -35  GRALLOC3_ON_A12_PLUS       (gralloc3 with SDK >= 31)
-#   -30  EGL_FENCE_SYNC_MISSING     (sync_file absent in kernel)
-#   -25  KGSL_CMD_V2_ABSENT         (kernel 4.14+ but sysfs KGSL < expected)
-#   -20  HWC_UBWC_MISMATCH          (HWC 2.0 can't composite UBWC buffers)
-#   -20  SDK_DELTA_SEVERE           (system vs vendor VNDK delta > 4 levels)
-#   -15  GRALLOC_UNKNOWN            (couldn't probe gralloc version)
-#   -10  SDK_DELTA_MODERATE         (VNDK delta 3–4 levels)
-#   -10  VENDOR_RC_PROP_WAR         (vendor init.rc will override prop)
-#   -8   VENDOR_SCRIPT_PROP_WAR     (vendor post-boot script will override)
-#   -5   UBWC_EXPLICITLY_DISABLED   (vendor disabled UBWC, minor compat note)
-#   -5   HWC_VERSION_UNKNOWN        (couldn't probe HWC version)
-#
-# Sets:
-#   VK_COMPAT_SCORE         — 0–100 integer
-#   VK_COMPAT_LEVEL         — "critical" / "degraded" / "good" / "excellent"
-#   VK_COMPAT_ISSUES        — semicolon-separated list of issue codes + detail
-#   VK_RECOMMENDED_MODE     — "skiagl" / "skiavk" / "skiavk_all"
-#   VK_GRALLOC_OK           — true/false
-#   VK_KGSL_OK              — true/false
-#   VK_EGL_FENCE_OK         — true/false
-#   VK_UBWC_OK              — true/false
-#   VK_DRIVER_OK            — true/false
-#   VK_COMPAT_REPORT        — multi-line human-readable diagnosis string
-# ============================================================
-probe_vulkan_stack_compatibility() {
-  VK_COMPAT_SCORE=100
-  VK_COMPAT_LEVEL="excellent"
-  VK_COMPAT_ISSUES=""
-  VK_RECOMMENDED_MODE="skiavk"
-  VK_GRALLOC_OK=true
-  VK_KGSL_OK=true
-  VK_EGL_FENCE_OK=true
-  VK_UBWC_OK=true
-  VK_DRIVER_OK=true
-  VK_COMPAT_REPORT=""
-
-  # ── Internal helpers ──────────────────────────────────────────────────────
-  _vk_deduct() {
-    # $1 = points to deduct, $2 = issue code:detail string
-    VK_COMPAT_SCORE=$((VK_COMPAT_SCORE - $1))
-    [ "$VK_COMPAT_SCORE" -lt 0 ] && VK_COMPAT_SCORE=0
-    if [ -z "$VK_COMPAT_ISSUES" ]; then
-      VK_COMPAT_ISSUES="$2"
-    else
-      VK_COMPAT_ISSUES="${VK_COMPAT_ISSUES}; $2"
-    fi
-  }
-
-  _vk_report() {
-    if [ -z "$VK_COMPAT_REPORT" ]; then
-      VK_COMPAT_REPORT="$1"
-    else
-      VK_COMPAT_REPORT="${VK_COMPAT_REPORT}
-$1"
-    fi
-  }
-
-  # ════════════════════════════════════════════════════════════════════════
-  # CHECK 1: Vulkan driver .so existence
-  # ════════════════════════════════════════════════════════════════════════
-  # Without a Vulkan ICD, libvulkan's loader cannot find any physical device.
-  # vkCreateInstance returns VK_ERROR_INCOMPATIBLE_DRIVER immediately.
-  # HWUI silently falls back to skiagl — the prop stays "skiavk" but no
-  # Vulkan ever runs. skiavk_all then clears GL caches, force-stops apps,
-  # apps restart, all try Vulkan, all fail, all fall back to GL without cache
-  # → mass shader recompile OOM → every app crashes for 10 minutes.
-  _vk_drv_found=false
-  _vk_drv_path=""
-  for _vl in \
-    /vendor/lib64/hw/vulkan.*.so \
-    /vendor/lib/hw/vulkan.*.so \
-    /system/lib64/hw/vulkan.*.so \
-    /system/lib/hw/vulkan.*.so \
-    /vendor/lib64/libvulkan.so \
-    /system/lib64/libvulkan.so; do
-    ls "$_vl" >/dev/null 2>&1 && { _vk_drv_found=true; _vk_drv_path="$_vl"; break; }
-  done
-  if [ "$_vk_drv_found" = "true" ]; then
-    _vk_report "  [OK] Vulkan driver found: ${_vk_drv_path}"
-  else
-    VK_DRIVER_OK=false
-    _vk_deduct 60 "NO_VULKAN_DRIVER: No vulkan.*.so or libvulkan.so in vendor/system"
-    _vk_report "  [CRIT] NO VULKAN DRIVER — skiavk prop is set but no Vulkan ICD exists."
-    _vk_report "         vkCreateInstance → VK_ERROR_INCOMPATIBLE_DRIVER immediately."
-    _vk_report "         HWUI silently falls to skiagl. skiavk_all then clears GL caches"
-    _vk_report "         → apps restart without shaders → mass OOM → ALL apps crash."
-  fi
-  unset _vk_drv_found _vk_drv_path _vl
-
-  # ════════════════════════════════════════════════════════════════════════
-  # CHECK 2: Kernel version — KGSL IOCTL baseline requirements
-  # ════════════════════════════════════════════════════════════════════════
-  # The minimum kernel version requirements for Vulkan on Qualcomm:
-  #
-  # < 4.9:   No CONFIG_SYNC_FILE in-kernel → no sync FD for GPU/display sync.
-  #          EGL_ANDROID_native_fence_sync cannot be implemented.
-  #          HWUI swapchain acquire/present fence never signals → deadlock.
-  #          Also: no VK_KHR_timeline_semaphore host support → ICD crashes.
-  #
-  # 4.9–4.13: sync_file exists but KGSL command submission API is V1.
-  #           Custom Adreno drivers call IOCTL_KGSL_GPU_COMMAND_V2 (4.14+).
-  #           Kernel returns ENOTTY. Driver dereferences un-initialized struct
-  #           → SIGSEGV in vkCreateDevice. Every app crashes on open.
-  #
-  # >= 4.14:  IOCTL_KGSL_GPU_COMMAND_V2 available. Also IOCTL_KGSL_GPUOBJ_SYNC
-  #           (needed for vkMapMemory coherency). This is the baseline for
-  #           custom Adreno drivers from Xtreme Star / Banch++.
-  _kv_maj="${KERNEL_VERSION_MAJOR:-0}"
-  _kv_min="${KERNEL_VERSION_MINOR:-0}"
-
-  if [ "$_kv_maj" -lt 4 ] 2>/dev/null; then
-    VK_KGSL_OK=false
-    _vk_deduct 50 "KERNEL_TOO_OLD: Kernel ${_kv_maj}.${_kv_min} — Vulkan requires >= 4.9 minimum"
-    _vk_report "  [CRIT] KERNEL TOO OLD (${_kv_maj}.${_kv_min})."
-    _vk_report "         No CONFIG_SYNC_FILE, no KGSL IOCTL_KGSL_GPU_COMMAND."
-    _vk_report "         vkCreateDevice → SIGSEGV. Every app crashes immediately."
-
-  elif [ "$_kv_maj" -eq 4 ] && [ "$_kv_min" -lt 9 ] 2>/dev/null; then
-    VK_KGSL_OK=false
-    _vk_deduct 50 "KGSL_NO_SYNC_FILE: Kernel ${_kv_maj}.${_kv_min} — no CONFIG_SYNC_FILE"
-    _vk_report "  [CRIT] KERNEL ${_kv_maj}.${_kv_min}: No sync_file (CONFIG_SYNC_FILE added in 4.9)."
-    _vk_report "         EGL_ANDROID_native_fence_sync impossible → HWUI swapchain deadlock."
-    _vk_report "         Screen: first frame then permanent black. App: eventually ANR."
-
-  elif [ "$_kv_maj" -eq 4 ] && [ "$_kv_min" -lt 14 ] 2>/dev/null; then
-    VK_KGSL_OK=false
-    _vk_deduct 40 "KGSL_IOCTL_MISSING: Kernel ${_kv_maj}.${_kv_min} — IOCTL_KGSL_GPU_COMMAND_V2 absent"
-    _vk_report "  [HIGH] KERNEL ${_kv_maj}.${_kv_min}: KGSL GPU_COMMAND_V2 IOCTL missing (needs 4.14+)."
-    _vk_report "         Custom Adreno drivers call this IOCTL in vkQueueSubmit."
-    _vk_report "         Kernel returns ENOTTY → driver SIGSEGV → app crashes on open."
-    _vk_report "         Stock Qualcomm drivers handle this gracefully; custom do NOT."
-
-  else
-    _vk_report "  [OK] Kernel ${_kv_maj}.${_kv_min} — KGSL IOCTL baseline met (>= 4.14)"
-  fi
-  unset _kv_maj _kv_min
-
-  # ════════════════════════════════════════════════════════════════════════
-  # CHECK 3: Gralloc HAL version vs system libvulkan requirement
-  # ════════════════════════════════════════════════════════════════════════
-  # Android system libvulkan is compiled against the gralloc version the
-  # system SDK targets. It calls ANativeWindow_lock() → IMapper::importBuffer().
-  #
-  # Android 12+ (SDK 31+): libvulkan compiled for gralloc4 HIDL/AIDL.
-  #   Calling gralloc4 mapper API on a gralloc3 implementation:
-  #     → Binder finds @3.0 service, not @4.0 → SERVICE_NOT_FOUND
-  #     → IMapper::importBuffer() throws RemoteException
-  #     → Vulkan loader: NULL native buffer handle
-  #     → vkCreateSwapchainKHR: VK_ERROR_INITIALIZATION_FAILED
-  #     → HWUI falls back to skiagl (prop still says skiavk)
-  #
-  # Android 10–11 (SDK 29–30): libvulkan compatible with gralloc3.
-  #   Custom ROM on Android 12 SYSTEM + Android 10 VENDOR:
-  #   system SDK is 31+ but vendor provides only gralloc3 → guaranteed crash.
-  #
-  # gralloc2: even older, no HIDL buffer import at all. Catastrophic mismatch.
-  detect_gralloc_hal_version
-  _sys_sdk=$(getprop ro.build.version.sdk 2>/dev/null || echo "0")
-  # Sanitise: strip non-numeric suffix (some ROMs append letters)
-  _sys_sdk="${_sys_sdk%%[^0-9]*}"
-  _sys_sdk="${_sys_sdk:-0}"
-
-  case "$GRALLOC_HAL_VERSION" in
-    "unknown")
-      _vk_deduct 15 "GRALLOC_UNKNOWN: Cannot determine gralloc HAL version (method: ${GRALLOC_DETECTION_METHOD})"
-      _vk_report "  [WARN] Gralloc HAL version undetermined. Proceeding cautiously."
-      _vk_report "         If swapchain fails (black screen), gralloc version mismatch is the cause."
-      ;;
-    "2")
-      VK_GRALLOC_OK=false
-      _vk_deduct 45 "GRALLOC2_MISMATCH: Vendor has gralloc2 HIDL — system libvulkan cannot allocate swapchain buffers"
-      _vk_report "  [CRIT] GRALLOC2 DETECTED (vendor). System libvulkan compiled for gralloc3+."
-      _vk_report "         IMapper::importBuffer() call fails → null ANativeWindow buffer."
-      _vk_report "         vkCreateSwapchainKHR → VK_ERROR_INITIALIZATION_FAILED → black screen."
-      _vk_report "         Fix: skiavk requires gralloc3 minimum (gralloc4 preferred)."
-      ;;
-    "3")
-      if [ "$_sys_sdk" -ge 31 ] 2>/dev/null; then
-        # Android 12+ system on gralloc3 vendor: confirmed mismatch
-        VK_GRALLOC_OK=false
-        _vk_deduct 35 "GRALLOC3_ON_SDK${_sys_sdk}: gralloc3 vendor with Android 12+ system (SDK=${_sys_sdk})"
-        _vk_report "  [HIGH] GRALLOC3 + SDK${_sys_sdk}: Android 12+ libvulkan uses gralloc4 ABI."
-        _vk_report "         Vendor ships gralloc3 HIDL — the @4.0::IMapper service doesn't exist."
-        _vk_report "         Swapchain buffer allocation partially fails → some buffers corrupt."
-        _vk_report "         Symptom: app draws first frame (flicker) then black screen."
-      else
-        _vk_report "  [OK] Gralloc3 — compatible with this system SDK (${_sys_sdk})"
-      fi
-      ;;
-    "4")
-      if [ "$GRALLOC_IS_AIDL" = "true" ]; then
-        _vk_report "  [OK] Gralloc4 AIDL (Android 13+ optimal) — full Vulkan swapchain support"
-      else
-        _vk_report "  [OK] Gralloc4 HIDL — Vulkan swapchain buffer allocation fully supported"
-      fi
-      ;;
-    *)
-      _vk_report "  [INFO] Gralloc version: ${GRALLOC_HAL_VERSION} (unhandled case, treating as OK)"
-      ;;
-  esac
-  unset _sys_sdk
-
-  # ════════════════════════════════════════════════════════════════════════
-  # CHECK 4: EGL_ANDROID_native_fence_sync proxy check
-  # ════════════════════════════════════════════════════════════════════════
-  # HWUI skiavkthreaded uses this extension to create exportable sync FDs
-  # for the Vulkan acquire/present semaphore handshake with SurfaceFlinger.
-  #
-  # The extension requires in-kernel sync_file (CONFIG_SYNC_FILE, 4.9+)
-  # AND the vendor EGL driver must expose the extension.
-  #
-  # Shell proxy: check kernel version (definitive) + /sys/kernel/debug/sync
-  # (CONFIG_SYNC_FILE marker) + /dev/sw_sync (alternative sync path).
-  #
-  # What happens when it's missing:
-  #   HWUI's VulkanSurface::dequeueBuffer() calls eglCreateSyncKHR() for the
-  #   native fence. Returns EGL_NO_SYNC_KHR. HWUI proceeds without a fence.
-  #   SurfaceFlinger's buffer queue now has no synchronization signal for when
-  #   the GPU finishes writing each frame. SF acquires the next buffer before
-  #   GPU finishes writing → tearing → black frame → SF flips back to previous
-  #   buffer → deadlock. Screen: flicker once then freeze. System not crashed.
-  _egl_fence_ok=true
-  _egl_fence_reason=""
-
-  if [ "${KERNEL_VERSION_MAJOR:-0}" -lt 4 ] 2>/dev/null; then
-    _egl_fence_ok=false
-    _egl_fence_reason="Kernel ${KERNEL_VERSION_MAJOR}.${KERNEL_VERSION_MINOR} < 4.9"
-  elif [ "${KERNEL_VERSION_MAJOR:-0}" -eq 4 ] && \
-       [ "${KERNEL_VERSION_MINOR:-0}" -lt 9 ] 2>/dev/null; then
-    _egl_fence_ok=false
-    _egl_fence_reason="Kernel ${KERNEL_VERSION_MAJOR}.${KERNEL_VERSION_MINOR} < 4.9 (CONFIG_SYNC_FILE not available)"
-  else
-    # Kernel >= 4.9: sync_file is present. Now check if the kernel config
-    # actually compiled it in (some custom kernels explicitly disable it).
-    if [ ! -d "/sys/kernel/debug/sync" ] && \
-       [ ! -d "/sys/kernel/debug/dma_buf" ] && \
-       [ ! -e "/dev/sync" ] && \
-       [ ! -e "/dev/sw_sync" ]; then
-      # All markers absent — likely CONFIG_SYNC_FILE=n
-      # Only flag as failed if kernel is old-ish (>= 4.14 usually has it enabled)
-      if [ "${KERNEL_VERSION_MAJOR:-0}" -eq 4 ] && \
-         [ "${KERNEL_VERSION_MINOR:-0}" -lt 14 ] 2>/dev/null; then
-        _egl_fence_ok=false
-        _egl_fence_reason="Kernel ${KERNEL_VERSION_MAJOR}.${KERNEL_VERSION_MINOR}: sync_file markers absent (CONFIG_SYNC_FILE=n?)"
-      fi
-    fi
-  fi
-
-  if [ "$_egl_fence_ok" = "false" ]; then
-    VK_EGL_FENCE_OK=false
-    _vk_deduct 30 "EGL_FENCE_SYNC_MISSING: ${_egl_fence_reason}"
-    _vk_report "  [HIGH] EGL_ANDROID_native_fence_sync UNAVAILABLE: ${_egl_fence_reason}"
-    _vk_report "         HWUI swapchain acquire/present has no GPU completion signal."
-    _vk_report "         SF consumes buffers before GPU finishes → frame corruption → freeze."
-    _vk_report "         Symptom: app opens (brief flicker), then permanent black screen."
-  else
-    _vk_report "  [OK] EGL_ANDROID_native_fence_sync proxy check passed (sync_file available)"
-  fi
-  unset _egl_fence_ok _egl_fence_reason
-
-  # ════════════════════════════════════════════════════════════════════════
-  # CHECK 5: UBWC / HWC compatibility gap
-  # ════════════════════════════════════════════════════════════════════════
-  # Custom Adreno drivers (Xtreme Star etc.) allocate all GPU render targets
-  # with UBWC (Unified Buffer Write Compression) enabled. UBWC is a
-  # Qualcomm-proprietary tile compression format that increases effective
-  # memory bandwidth for the GPU.
-  #
-  # Problem: The Hardware Composer (HWC) must also understand UBWC to
-  # composite these buffers onto the display. Old vendor HWC (2.0 era)
-  # doesn't handle UBWC buffers — when the Vulkan driver marks a swapchain
-  # image as UBWC and hands it to SurfaceFlinger, SF passes it to HWC,
-  # which reads it as uncompressed → garbage output on display → black screen.
-  #
-  # Alternatively: old vendor gralloc allocates the buffer as UBWC in
-  # response to the UBWC usage flag, but the new system libvulkan doesn't
-  # set the vendor-specific UBWC usage flag (changed between gralloc3 and
-  # gralloc4) → gralloc allocates non-UBWC, driver tries to write UBWC
-  # tile data → hardware memory protection fault → GPU fault → device reset.
-  #
-  # Proxy: HWC HAL version from VINTF manifest. HWC 2.1+ added UBWC support
-  # for Qualcomm platforms. HWC 2.0 does NOT support UBWC compositing.
-  _hwc_ver="unknown"
-  _hwc_ok=true
-  for _hwcmf in /vendor/etc/vintf/manifest.xml /vendor/manifest.xml \
-                /odm/etc/vintf/manifest.xml /odm/manifest.xml; do
-    [ -f "$_hwcmf" ] || continue
-    grep -q "android.hardware.graphics.composer" "$_hwcmf" 2>/dev/null || continue
-
-    # Check for AIDL composer (Android 14+ / HWC3+)
-    if grep -q 'android.hardware.graphics.composer3' "$_hwcmf" 2>/dev/null || \
-       (grep -q 'android.hardware.graphics.composer' "$_hwcmf" 2>/dev/null && \
-        grep -q 'format="aidl"' "$_hwcmf" 2>/dev/null); then
-      _hwc_ver="3_aidl"
-      _hwc_ok=true
-      break
-    fi
-    # HIDL HWC version check
-    for _hv in "4.0" "3.0" "2.4" "2.3" "2.2" "2.1" "2.0"; do
-      if grep -q "android.hardware.graphics.composer@${_hv}" "$_hwcmf" 2>/dev/null; then
-        _hwc_ver="$_hv"
-        # HWC 2.0 lacks UBWC support for compositing
-        [ "$_hv" = "2.0" ] && _hwc_ok=false
-        break 2
-      fi
-    done
-    unset _hv
-  done
-  unset _hwcmf
-
-  # Also check: vendor gralloc.disable_ubwc prop
-  _ubwc_disabled=$(getprop vendor.gralloc.disable_ubwc 2>/dev/null || echo "")
-  if [ "$_ubwc_disabled" = "1" ] || [ "$_ubwc_disabled" = "true" ]; then
-    # Vendor explicitly disabled UBWC — this actually helps old vendor compat
-    # (driver won't produce UBWC-compressed buffers HWC can't read)
-    _vk_deduct 5 "UBWC_DISABLED: vendor.gralloc.disable_ubwc=1 (UBWC off, minor perf loss)"
-    _vk_report "  [NOTE] vendor.gralloc.disable_ubwc=1: UBWC compression disabled by vendor."
-    _vk_report "         Good for old HWC compatibility, minor GPU throughput reduction."
-  elif [ "$_hwc_ok" = "false" ]; then
-    VK_UBWC_OK=false
-    _vk_deduct 20 "HWC_UBWC_MISMATCH: HWC ${_hwc_ver} cannot composite UBWC buffers from custom Adreno driver"
-    _vk_report "  [HIGH] HWC ${_hwc_ver} CANNOT COMPOSITE UBWC BUFFERS."
-    _vk_report "         Custom Adreno driver enables UBWC on swapchain images."
-    _vk_report "         HWC 2.0 reads UBWC buffers as uncompressed → scrambled / black display."
-    _vk_report "         Symptom: display shows garbage or stays black after first frame."
-    _vk_report "         Fix: vendor.gralloc.disable_ubwc=1 in system.prop disables UBWC."
-  elif [ "$_hwc_ver" = "unknown" ]; then
-    _vk_deduct 5 "HWC_VERSION_UNKNOWN: Cannot determine HWC HAL version from VINTF manifest"
-    _vk_report "  [WARN] HWC version undetermined. Cannot verify UBWC compatibility."
-  else
-    _vk_report "  [OK] HWC ${_hwc_ver} — UBWC compositing supported"
-  fi
-  unset _hwc_ver _hwc_ok _ubwc_disabled
-
-  # ════════════════════════════════════════════════════════════════════════
-  # CHECK 6: VNDK / SDK version delta (system vs vendor ABI gap)
-  # ════════════════════════════════════════════════════════════════════════
-  # ro.vndk.version = API level the vendor image was built for.
-  # ro.build.version.sdk = API level of the current system image.
-  # Delta > 3 API levels means the Vulkan ICD dispatch table ABI (function
-  # pointer offsets in VkLayerDispatchTable) diverged significantly.
-  # System libvulkan calls GetDeviceProcAddr for extension functions the old
-  # ICD doesn't know about → NULL pointers in dispatch table → SIGSEGV on
-  # first Vulkan API call that uses a newer extension (e.g., VK_KHR_timeline_semaphore).
-  _sys_sdk2=$(getprop ro.build.version.sdk 2>/dev/null || echo "0")
-  _sys_sdk2="${_sys_sdk2%%[^0-9]*}"
-  _vndk_ver=$(getprop ro.vndk.version 2>/dev/null || echo "")
-  _vndk_ver="${_vndk_ver%%[^0-9]*}"
-
-  if [ -n "$_vndk_ver" ] && [ -n "$_sys_sdk2" ] && \
-     [ "$_vndk_ver" -gt 0 ] 2>/dev/null && [ "$_sys_sdk2" -gt 0 ] 2>/dev/null; then
-    _sdk_delta=$((_sys_sdk2 - _vndk_ver)) 2>/dev/null || _sdk_delta=0
-    if [ "$_sdk_delta" -gt 4 ] 2>/dev/null; then
-      _vk_deduct 20 "SDK_DELTA_SEVERE: System SDK=${_sys_sdk2}, Vendor VNDK=${_vndk_ver}, delta=${_sdk_delta} API levels"
-      _vk_report "  [HIGH] SEVERE VNDK DELTA: System SDK=${_sys_sdk2} vs Vendor VNDK=${_vndk_ver} (Δ${_sdk_delta})."
-      _vk_report "         Vulkan ICD dispatch table ABI diverged — new function pointers missing."
-      _vk_report "         libvulkan calls GetDeviceProcAddr for newer extensions → NULL ptr."
-      _vk_report "         First call to missing function → SIGSEGV in libvulkan.so."
-    elif [ "$_sdk_delta" -gt 2 ] 2>/dev/null; then
-      _vk_deduct 10 "SDK_DELTA_MODERATE: System SDK=${_sys_sdk2}, Vendor VNDK=${_vndk_ver}, delta=${_sdk_delta}"
-      _vk_report "  [WARN] MODERATE VNDK DELTA: System SDK=${_sys_sdk2} vs Vendor VNDK=${_vndk_ver} (Δ${_sdk_delta})."
-      _vk_report "         Some newer Vulkan extensions may be unsupported → VK_ERROR_EXTENSION_NOT_PRESENT."
-    else
-      _vk_report "  [OK] VNDK delta acceptable: System SDK=${_sys_sdk2}, Vendor VNDK=${_vndk_ver} (Δ${_sdk_delta})"
-    fi
-  else
-    _vk_report "  [INFO] VNDK delta check skipped (ro.vndk.version not set or not parseable)"
-  fi
-  unset _sys_sdk2 _vndk_ver _sdk_delta
-
-  # ════════════════════════════════════════════════════════════════════════
-  # CHECK 7: Vendor RC prop override war
-  # ════════════════════════════════════════════════════════════════════════
-  # If detect_old_vendor_extended() found an RC file with a setprop override,
-  # that file will fire after boot_completed and reset our skiavk → skiagl.
-  # This is a "prop war" — not a crash risk per se, but means skiavk won't
-  # actually stick without the watchdog. Deduct points to flag it.
-  if [ "${OLD_VENDOR:-false}" = "true" ] && [ -n "${VENDOR_RC_OVERRIDE:-}" ]; then
-    _vk_deduct 10 "VENDOR_RC_PROP_WAR: ${VENDOR_RC_OVERRIDE##*/} overrides debug.hwui.renderer after boot_completed"
-    _vk_report "  [WARN] VENDOR RC PROP WAR: ${VENDOR_RC_OVERRIDE##*/}"
-    _vk_report "         This init.rc fires after boot_completed and resets debug.hwui.renderer."
-    _vk_report "         The service.sh watchdog will re-enforce skiavk — but there is a race window."
-    _vk_report "         Apps opened in that window start with the wrong renderer."
-  fi
-
-  if [ "${OLD_VENDOR:-false}" = "true" ] && [ -n "${VENDOR_SCRIPT_OVERRIDE:-}" ]; then
-    _vk_deduct 8 "VENDOR_SCRIPT_PROP_WAR: ${VENDOR_SCRIPT_OVERRIDE##*/} post-boot script resets debug.hwui.renderer"
-    _vk_report "  [WARN] VENDOR SCRIPT PROP WAR: ${VENDOR_SCRIPT_OVERRIDE##*/}"
-    _vk_report "         Qualcomm post_boot.sh resets the renderer prop during perf tuning."
-  fi
-
-  # ════════════════════════════════════════════════════════════════════════
-  # FINAL: Determine level and recommended mode
-  # ════════════════════════════════════════════════════════════════════════
-  if [ "$VK_COMPAT_SCORE" -le 39 ]; then
-    VK_COMPAT_LEVEL="critical"
-    VK_RECOMMENDED_MODE="skiagl"
-    _vk_report ""
-    _vk_report "  VERDICT: CRITICAL (score ${VK_COMPAT_SCORE}/100)"
-    _vk_report "  skiavk WILL cause black screen and/or app crashes on this device."
-    _vk_report "  AUTO-DOWNGRADE to skiagl recommended."
-
-  elif [ "$VK_COMPAT_SCORE" -le 59 ]; then
-    VK_COMPAT_LEVEL="degraded"
-    VK_RECOMMENDED_MODE="skiavk"
-    _vk_report ""
-    _vk_report "  VERDICT: DEGRADED (score ${VK_COMPAT_SCORE}/100)"
-    _vk_report "  skiavk may work but with glitches or occasional crashes."
-    _vk_report "  skiavk_all (force-stop) NOT safe on this device."
-
-  elif [ "$VK_COMPAT_SCORE" -le 79 ]; then
-    VK_COMPAT_LEVEL="good"
-    VK_RECOMMENDED_MODE="skiavk"
-    _vk_report ""
-    _vk_report "  VERDICT: GOOD (score ${VK_COMPAT_SCORE}/100)"
-    _vk_report "  skiavk should work. Skip skiavk_all to avoid edge-case OOM."
-
-  else
-    VK_COMPAT_LEVEL="excellent"
-    VK_RECOMMENDED_MODE="skiavk_all"
-    _vk_report ""
-    _vk_report "  VERDICT: EXCELLENT (score ${VK_COMPAT_SCORE}/100)"
-    _vk_report "  Full skiavk + skiavk_all safe on this device."
-  fi
-
-  # ── Clean up internal helpers ─────────────────────────────────────────────
-  unset -f _vk_deduct _vk_report 2>/dev/null || true
-
-  return 0
-}
 
 # ============================================================
 # write_compat_state()
@@ -1158,23 +700,49 @@ probe_vulkan_compat_extended() {
   # ══════════════════════════════════════════════════════════════════════════
   _sys_sdk=$(_pvk_int_prop ro.build.version.sdk)
 
-  # Detect gralloc version via service manifest or binary presence
-  # AIDL allocator (Android 13+)
-  if [ -f /vendor/etc/vintf/manifest.xml ] && \
-     grep -q "android.hardware.graphics.allocator" /vendor/etc/vintf/manifest.xml 2>/dev/null && \
-     grep -q "IAllocator" /vendor/etc/vintf/manifest.xml 2>/dev/null; then
-    VK_GRALLOC_VERSION="aidl"
-  # HIDL gralloc 4.0
-  elif [ -f /vendor/etc/vintf/manifest.xml ] && \
-       grep -q "android.hardware.graphics.mapper@4" /vendor/etc/vintf/manifest.xml 2>/dev/null; then
-    VK_GRALLOC_VERSION="4"
-  # HIDL gralloc 3.0
-  elif [ -f /vendor/etc/vintf/manifest.xml ] && \
-       grep -q "android.hardware.graphics.mapper@3" /vendor/etc/vintf/manifest.xml 2>/dev/null; then
-    VK_GRALLOC_VERSION="3"
-  # HIDL gralloc 2.0 (check for HAL binary presence as fallback)
-  elif [ -f /vendor/lib64/hw/gralloc.msm*.so ] || \
+  # Detect gralloc version via service manifest or binary presence.
+  # BUG-5 FIX: On Android 12+ devices, VINTF manifests may be split across
+  # /vendor/etc/vintf/manifest/*.xml fragments. A grep on only the top-level
+  # manifest.xml can miss the gralloc mapper entry entirely — returning a false
+  # "not found" and letting the code fall through to incorrect binary-presence
+  # heuristics. We now scan all manifest files (top-level + all fragments), and
+  # only commit to a VINTF result when we find a known gralloc interface string.
+  # If no fragment matches, we fall through to the .so / vendor API level path.
+  _vk_gralloc_from_vintf=""
+  for _vmf in \
+      /vendor/etc/vintf/manifest.xml \
+      /vendor/manifest.xml \
+      /odm/etc/vintf/manifest.xml \
+      /odm/manifest.xml \
+      /vendor/etc/vintf/manifest/*.xml \
+      /odm/etc/vintf/manifest/*.xml; do
+    [ -f "$_vmf" ] || continue
+    if grep -q "android.hardware.graphics.allocator" "$_vmf" 2>/dev/null && \
+       grep -q "IAllocator" "$_vmf" 2>/dev/null; then
+      _vk_gralloc_from_vintf="aidl"; break
+    fi
+    if grep -q "android.hardware.graphics.mapper@4" "$_vmf" 2>/dev/null; then
+      _vk_gralloc_from_vintf="4"; break
+    fi
+    if grep -q "android.hardware.graphics.mapper@3" "$_vmf" 2>/dev/null; then
+      _vk_gralloc_from_vintf="3"; break
+    fi
+    if grep -q "android.hardware.graphics.mapper@2" "$_vmf" 2>/dev/null; then
+      _vk_gralloc_from_vintf="2"; break
+    fi
+  done
+  unset _vmf
+
+  if [ -n "$_vk_gralloc_from_vintf" ]; then
+    # VINTF manifest (full scan including fragments) gave a definitive answer.
+    VK_GRALLOC_VERSION="$_vk_gralloc_from_vintf"
+    unset _vk_gralloc_from_vintf
+  # HIDL gralloc 2.0 (check for HAL binary presence as fallback when VINTF
+  # has no mapper entry — covers pre-Treble gralloc2 devices and split manifests
+  # where all fragment scans found nothing)
+  elif [ -n "$(ls /vendor/lib64/hw/gralloc.msm*.so 2>/dev/null | head -1)" ] || \
        [ -f /vendor/lib64/hw/gralloc.default.so ]; then
+    unset _vk_gralloc_from_vintf
     # Check if it's an old gralloc2 module (pre-Treble gralloc2 ships as
     # gralloc.<board>.so; gralloc3/4 ships as a mapper HAL service)
     if ! grep -q "android.hardware.graphics.mapper@3" \
@@ -1186,6 +754,7 @@ probe_vulkan_compat_extended() {
       VK_GRALLOC_VERSION="3"
     fi
   else
+    unset _vk_gralloc_from_vintf
     # Fallback: infer from vendor API level
     _vapi=$(_pvk_int_prop ro.vendor.api_level)
     if [ "$_vapi" -ge 33 ] 2>/dev/null; then
@@ -1273,7 +842,7 @@ probe_vulkan_compat_extended() {
       /proc/gpu/kgsl_version; do
     if [ -f "$_kp" ]; then
       { IFS= read -r _kgsl_ver; } < "$_kp" 2>/dev/null || _kgsl_ver=""
-      _kgsl_ver="${_kgsl_ver%%$'\r'}"
+      _kgsl_ver=$(printf '%s' "$_kgsl_ver" | tr -d '\r')
       break
     fi
   done

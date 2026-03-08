@@ -86,6 +86,13 @@ case "$_SKIAVK_MODE" in
   *) _SKIAVK_MODE="skiavk" ;;
 esac
 
+# BUG A FIX: _RESTORE_HWUI is the actual debug.hwui.renderer value to pass to
+# resetprop on game exit.  _SKIAVK_MODE may be "skiavk_all" (informational mode
+# string from service.sh) which is NOT a valid debug.hwui.renderer value — HWUI
+# silently ignores it and stays at skiagl forever.  Normalize to "skiavk".
+_RESTORE_HWUI="$_SKIAVK_MODE"
+[ "$_RESTORE_HWUI" = "skiavk_all" ] && _RESTORE_HWUI="skiavk"
+
 # FIX: Accept MODDIR override from $2 (service.sh passes it explicitly).
 # On KernelSU without meta-module, MODDIR is not exported to the environment;
 # without this the _GAME_EXCL_MOD path below resolves to "/game_exclusion_list.sh"
@@ -131,6 +138,7 @@ else
 com.tencent.ig
 com.pubg.krmobile
 com.pubg.imobile
+com.pubg.newstate
 com.vng.pubgmobile
 com.rekoo.pubgm
 com.tencent.tmgp.pubgmhd
@@ -153,6 +161,7 @@ com.facebook.lite
 com.facebook.mlite
 com.instagram.android
 com.instagram.lite
+com.instagram.barcelona
 com.whatsapp
 com.whatsapp.w4b
 "
@@ -177,6 +186,26 @@ fi
 
 unset _GAME_EXCL_SD _GAME_EXCL_MOD _GAME_EXCL_DATA
 
+# ── Defensive guard: ensure _game_pkg_excluded() is always defined ────────────
+# If none of the sourcing paths succeeded (file missing, unreadable, or the
+# sourced file was truncated/corrupted and did not define the function), provide
+# a safe fallback using the inline GAME_EXCLUSION_PKGS variable.  Without this,
+# the first call to _game_pkg_excluded() in the event loop would produce
+# "sh: _game_pkg_excluded: not found", silently treating every package as
+# non-excluded and breaking all game detection.
+if ! command -v _game_pkg_excluded >/dev/null 2>&1; then
+  _game_pkg_excluded() {
+    local _p="$1" _e
+    for _e in $GAME_EXCLUSION_PKGS; do
+      # shellcheck disable=SC2254
+      case "$_p" in $_e) return 0 ;; esac
+    done
+    return 1
+  }
+  echo "[ADRENO-GED] WARNING: _game_pkg_excluded() undefined after sourcing -- using inline definition" \
+    > /dev/kmsg 2>/dev/null || true
+fi
+
 # ── Atomic locking helpers ────────────────────────────────────────────────────
 # mkdir is atomic on ext4 (Android >= 4.4) and F2FS (Android >= 9).
 # 200-iteration cap: prevents infinite spin if a SIGKILL'd holder left the lock.
@@ -191,6 +220,9 @@ _acquire_lock() {
       mkdir "$_LOCK_DIR" 2>/dev/null || true
       break
     fi
+    # Brief yield between attempts — prevents tight CPU spin under contention
+    # (multiple _wait_game_death subshells closing simultaneously).
+    busybox usleep 50000 2>/dev/null || sleep 0.05 2>/dev/null || sleep 1 2>/dev/null || true
   done
 }
 
@@ -234,6 +266,11 @@ _game_open() {
   printf '%s\n' "$_cnt" > "$_ACTIVE_COUNT_FILE" 2>/dev/null || true
   _release_lock
 
+  # Mark this PID as actively monitored so _startup_scan (called on every outer
+  # loop iteration in proc-poll mode) does not double-register the same game.
+  # The flag file is removed by _game_closed() and on SIGTERM cleanup.
+  touch "/data/local/tmp/adreno_ged_w_${_pid}" 2>/dev/null || true
+
   if [ "$_cnt" -eq 1 ]; then
     # First excluded game opened -- HWUI must use GL to prevent dual-VkDevice crash
     _set_renderer skiagl
@@ -259,12 +296,18 @@ _game_closed() {
   printf '%s\n' "$_cnt" > "$_ACTIVE_COUNT_FILE" 2>/dev/null || true
   _release_lock
 
+  # Remove PID tracking flag so this PID is not skipped if the daemon restarts
+  # and finds the slot still occupied (proc recycling edge case).
+  rm -f "/data/local/tmp/adreno_ged_w_${_pid}" 2>/dev/null || true
+
   if [ "$_cnt" -eq 0 ]; then
-    # Last excluded game exited -- restore Vulkan renderer
-    _set_renderer "$_SKIAVK_MODE"
+    # Last excluded game exited -- restore Vulkan renderer.
+    # Use _RESTORE_HWUI (normalized: skiavk_all → skiavk) not _SKIAVK_MODE.
+    # skiavk_all is not a valid debug.hwui.renderer value; HWUI ignores it.
+    _set_renderer "$_RESTORE_HWUI"
     # Clear state file so service.sh GOS watchdog stops watching
     printf '0\n' > "$_GED_ACTIVE_FILE" 2>/dev/null || true
-    echo "[ADRENO-GED] GAME CLOSED: ${_pkg} (PID=${_pid}) -- active=0 -> ${_SKIAVK_MODE}" \
+    echo "[ADRENO-GED] GAME CLOSED: ${_pkg} (PID=${_pid}) -- active=0 -> ${_RESTORE_HWUI}" \
       > /dev/kmsg 2>/dev/null || true
   else
     echo "[ADRENO-GED] GAME CLOSED: ${_pkg} (PID=${_pid}) -- active=${_cnt}, staying skiagl" \
@@ -283,7 +326,7 @@ _game_closed() {
 # exits. The directory is absent before any wait(2) returns, so we never see
 # a zombie state here. The check is a simple directory existence test.
 _wait_game_death() {
-  local _pkg="$1" _pid="$2"
+  local _pkg="$1" _pid="$2" _itr=0 _cur
 
   # Handle the race where the process already exited before we started watching
   if [ ! -d "/proc/${_pid}" ]; then
@@ -291,9 +334,24 @@ _wait_game_death() {
     return
   fi
 
-  # Zero-overhead sleep loop: wakes every 1 second, checks /proc/$PID
+  # Zero-overhead sleep loop: wakes every 1 second, checks /proc/$PID.
+  # Every 5 iterations (~5 s) also re-enforces debug.hwui.renderer=skiagl.
+  # Samsung GOS and some OEM perf daemons can reset the property mid-session;
+  # without this check the game would get a dual-VkDevice crash the next time
+  # it calls vkCreateDevice after the renderer was reset back to skiavk.
+  # getprop is a tiny binder call (~0.5 ms); running it every 5 s adds no
+  # meaningful CPU load while fully closing the GOS reset window.
   while [ -d "/proc/${_pid}" ]; do
     sleep 1
+    _itr=$((_itr + 1))
+    if [ $((_itr % 5)) -eq 0 ]; then
+      _cur=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
+      if [ "$_cur" != "skiagl" ]; then
+        _set_renderer skiagl
+        echo "[ADRENO-GED] RE-ENFORCE: skiagl (was '${_cur}') for ${_pkg} (PID=${_pid})" \
+          > /dev/kmsg 2>/dev/null || true
+      fi
+    fi
   done
 
   # /proc/$PID gone -> process exited -> update counter and renderer
@@ -306,28 +364,46 @@ _wait_game_death() {
 # already running. Without this scan, the daemon would not know about games
 # that launched before it and would never restore the renderer when they exit.
 # This is O(number-of-running-processes) -- acceptable as a one-time operation.
+#
+# In /proc-poll fallback mode (logcat unavailable) this function is invoked
+# every 5s as the primary detection mechanism.  The PID tracking flag files
+# (adreno_ged_w_$PID) created by _game_open() prevent double-registration
+# across repeated calls: if a game is already tracked its flag exists and
+# we skip it.  Death detection is still handled by the existing _wait_game_death
+# sub-daemon spawned on first detection.
 _startup_scan() {
-  local _dir _pid _cmdline _pkg
-  echo "[ADRENO-GED] startup scan: checking for running excluded games..." \
-    > /dev/kmsg 2>/dev/null || true
+  local _dir _pid _pkg
+  # Suppress the "checking for running excluded games" kmsg log in proc-poll
+  # mode where this function runs every 5 seconds — /dev/kmsg would flood.
+  # Only emit the log on the very first call (counter == 0 before increment).
+  _GED_SCAN_COUNT=$((_GED_SCAN_COUNT + 1))
+  if [ "$_GED_SCAN_COUNT" -le 1 ] || [ "$_GED_USE_PROC_POLL" = "false" ]; then
+    echo "[ADRENO-GED] startup scan: checking for running excluded games..." \
+      > /dev/kmsg 2>/dev/null || true
+  fi
 
   for _dir in /proc/[0-9]*; do
     _pid="${_dir##*/}"
     [ -d "$_dir" ] || continue
 
-    # Read the process cmdline file (NUL-separated argv array)
-    _cmdline=""
-    { IFS= read -r _cmdline; } < "${_dir}/cmdline" 2>/dev/null || continue
-    [ -z "$_cmdline" ] && continue
+    # Skip PIDs already being tracked (set by _game_open, cleared by _game_closed).
+    # Prevents double-counting in /proc-poll mode where this runs every 5s.
+    [ -f "/data/local/tmp/adreno_ged_w_${_pid}" ] && continue
 
-    # Extract the package name from argv[0]:
-    #   - Strip :processname suffix (e.g. com.tencent.ig:remote)
-    #   - Strip NUL bytes that may appear from the raw read
-    _pkg="${_cmdline%%:*}"
-    _pkg="${_pkg%%${_pkg##*[! ]}}"    # rtrim spaces (POSIX parameter expansion)
-    _pkg="${_pkg##"${_pkg%%[! ]*}"}"  # ltrim spaces
-    # Strip any embedded NUL (shell reads NUL as end-of-string on most Android sh)
-    _pkg="${_pkg%%$'\0'*}"
+    # Read argv[0] from /proc/pid/cmdline. The kernel stores argv as NUL-separated
+    # strings (POSIX: "a set of strings separated by null bytes").
+    # tr replaces NUL separators with newlines; head -1 then returns exactly argv[0].
+    # This is portable across bash, mksh, ash, and busybox sh.
+    # Background: the previous approach used $'\0' (an ANSI-C bash extension).
+    # In mksh (Android's /system/bin/sh on Android 11 and earlier) $'\0' expands
+    # to an empty string, so %%$'\0'* became %%* which stripped the entire _pkg
+    # variable, causing every excluded game to be missed during startup scans.
+    _pkg=""
+    _pkg=$(tr '\0' '\n' < "${_dir}/cmdline" 2>/dev/null | head -1)
+    [ -z "$_pkg" ] && continue
+
+    # Strip :processname suffix (e.g. "com.tencent.ig:remote" -> "com.tencent.ig")
+    _pkg="${_pkg%%:*}"
 
     [ -z "$_pkg" ] && continue
 
@@ -364,13 +440,15 @@ trap '
   [ -f "$_ACTIVE_COUNT_FILE" ] && { IFS= read -r _trap_cnt; } < "$_ACTIVE_COUNT_FILE" 2>/dev/null || _trap_cnt=0
   _trap_cnt="${_trap_cnt%%[^0-9]*}"; _trap_cnt="${_trap_cnt:-0}"
   if [ "$_trap_cnt" -gt 0 ]; then
-    _set_renderer "$_SKIAVK_MODE"
+    _set_renderer "$_RESTORE_HWUI"
     printf "0\n" > "$_GED_ACTIVE_FILE" 2>/dev/null || true
-    echo "[ADRENO-GED] SIGTERM: restored ${_SKIAVK_MODE} (was skiagl, count=${_trap_cnt})" \
+    echo "[ADRENO-GED] SIGTERM: restored ${_RESTORE_HWUI} (was skiagl, count=${_trap_cnt})" \
       > /dev/kmsg 2>/dev/null || true
   fi
   rm -f "$_DAEMON_PID_FILE" "$_ACTIVE_COUNT_FILE" "$_GED_ACTIVE_FILE" 2>/dev/null || true
   rmdir "$_LOCK_DIR" 2>/dev/null || true
+  # Clean up all PID tracking flag files created by _game_open()
+  rm -f /data/local/tmp/adreno_ged_w_* 2>/dev/null || true
   exit 0
 ' TERM INT
 
@@ -388,9 +466,38 @@ echo "[ADRENO-GED] Started (PID=$$, restore_mode=${_SKIAVK_MODE})" \
 # duplicate guard killed the restart immediately. Now a while-true outer loop
 # keeps the daemon alive; _startup_scan re-runs after each logcat restart to
 # catch games that launched during the down window.
+#
+# BUG4 FIX: SELinux logcat fallback.
+# On some OEM ROMs (MIUI/HyperOS 1.x, older Samsung One UI), logcat access
+# from the module's shell context is blocked by SELinux policy. The logcat
+# process starts but exits immediately (0 lines read, < 2s runtime). After
+# 3 consecutive fast exits, the daemon switches to /proc-poll mode:
+#   - _startup_scan() is called every 5s as the detection mechanism.
+#   - _startup_scan skips already-tracked PIDs (adreno_ged_w_$PID flag files)
+#     so repeated calls do not double-count running games.
+#   - Death detection is still handled by _wait_game_death sub-daemons which
+#     are already running and do not depend on logcat.
+# When in /proc-poll mode, new game launches are detected within ≤5s (vs ~0s
+# via logcat). Acceptable for the targeted game titles (PUBG, Genshin, etc.).
+# The native ged.c binary is entirely immune to this issue (uses kernel netlink
+# rather than logcat), so this fallback path only matters when the binary is
+# absent (wrong ABI or not built).
+_GED_LOGCAT_FAST_EXITS=0
+_GED_USE_PROC_POLL=false
+_GED_SCAN_COUNT=0
+
 while true; do
 
 _startup_scan
+
+if [ "$_GED_USE_PROC_POLL" = "true" ]; then
+  # /proc poll mode: logcat is unavailable. _startup_scan above detects new
+  # game launches by scanning all /proc/[0-9]*/cmdline entries.
+  # 5s interval: reduces the ~300-600 file reads/scan to at most 12/min.
+  # Detection lag is acceptable in this fallback path (native binary preferred).
+  sleep 5
+  continue
+fi
 
 # ── Main event loop ───────────────────────────────────────────────────────────
 # logcat -b events streams Android's binary event log buffer.
@@ -434,7 +541,8 @@ _startup_scan
 # The read() syscall on this pipe blocks in TASK_INTERRUPTIBLE inside the
 # kernel's pipe wait queue (logd uses epoll internally). Zero CPU between
 # process-start events -- the daemon is truly asleep in the kernel.
-logcat -b events -v brief 2>/dev/null | while IFS= read -r _line; do
+_logcat_t0=$(date +%s 2>/dev/null || echo 0)
+logcat -b events -v brief -T 1 2>/dev/null | while IFS= read -r _line; do
 
   # ── Fast pre-filter ───────────────────────────────────────────────────────
   # The events buffer contains many event types (gc_heap_info, am_activity_launch,
@@ -454,9 +562,9 @@ logcat -b events -v brief 2>/dev/null | while IFS= read -r _line; do
   _payload="${_payload%%]*}"
 
   # ── Parse comma-separated fields (no subprocess -- pure parameter expansion) ─
-  _f1="${_payload%%,*}";  _rest="${_payload#*,}"   # discard field 1 (user)
+  _rest="${_payload#*,}"                            # skip field 1 (user) — not needed
   _pid="${_rest%%,*}";    _rest="${_rest#*,}"       # field 2 = pid
-  _uid="${_rest%%,*}";    _rest="${_rest#*,}"       # discard field 3 (uid)
+  _rest="${_rest#*,}"                               # skip field 3 (uid) — not needed
   _pkg="${_rest%%,*}"                               # field 4 = package
 
   # ── Trim leading/trailing spaces ──────────────────────────────────────────
@@ -491,8 +599,42 @@ logcat -b events -v brief 2>/dev/null | while IFS= read -r _line; do
   # independently until the game process exits. & = background, no blocking.
   _wait_game_death "$_pkg" "$_pid" &
 
+  # Clean up local parse variables so they don't bleed into the next iteration.
+  unset _payload _rest _pid _pkg 2>/dev/null || true
+
 done
-# ── Pipe exited — loop back and restart logcat ────────────────────────────────
+# ── Pipe exited — check for SELinux-blocked logcat ────────────────────────────
+_logcat_t1=$(date +%s 2>/dev/null || echo 0)
+_logcat_runtime=$(( _logcat_t1 - _logcat_t0 ))
+
+if [ "$_logcat_runtime" -lt 2 ]; then
+  # logcat exited suspiciously fast — count consecutive fast exits.
+  # Root cause: SELinux blocks the 'events' log buffer read for this process
+  # context on some OEM ROMs. The pipe opens and closes without blocking.
+  _GED_LOGCAT_FAST_EXITS=$(( _GED_LOGCAT_FAST_EXITS + 1 ))
+  echo "[ADRENO-GED] logcat exited in ${_logcat_runtime}s (fast exit #${_GED_LOGCAT_FAST_EXITS})" \
+    > /dev/kmsg 2>/dev/null || true
+
+  if [ "$_GED_LOGCAT_FAST_EXITS" -ge 3 ]; then
+    # 3 consecutive sub-2s exits: logcat is permanently unavailable.
+    # Switch to /proc-poll mode. The native ged.c binary is immune to this
+    # issue (uses NETLINK_CONNECTOR proc events, not logcat). If this message
+    # appears, the native binary should be preferred.
+    _GED_USE_PROC_POLL=true
+    echo "[ADRENO-GED] WARNING: logcat unavailable after ${_GED_LOGCAT_FAST_EXITS} fast exits" \
+      > /dev/kmsg 2>/dev/null || true
+    echo "[ADRENO-GED] WARNING: switching to /proc-poll mode (5s interval)" \
+      > /dev/kmsg 2>/dev/null || true
+    echo "[ADRENO-GED] NOTE: native adreno_ged binary is immune to this -- prefer binary over shell" \
+      > /dev/kmsg 2>/dev/null || true
+    # No sleep — loop immediately to start polling
+    continue
+  fi
+else
+  # logcat ran for a reasonable time — reset fast-exit counter.
+  _GED_LOGCAT_FAST_EXITS=0
+fi
+
 echo "[ADRENO-GED] logcat pipe exited -- restarting in 5s" \
   > /dev/kmsg 2>/dev/null || true
 sleep 5

@@ -41,14 +41,19 @@ command_exists() {
 
 # Single-pass config loader with inline validation.
 # Reads file ONCE, extracts and validates all variables with zero forks.
+#
+# BUG-11 NOTE: This function must stay in sync with load_config() in common.sh.
+# Any new config key added to load_config() must be added here too.
+# Keys currently handled: VERBOSE, ARM64_OPT, QGL, PLT, RENDER_MODE,
+# GAME_EXCLUSION_DAEMON, FORCE_SKIAVKTHREADED_BACKEND.
 parse_config() {
   local cfg="$1" _k _v
   [ -f "$cfg" ] || return 1
   while IFS='= ' read -r _k _v; do
     case "$_k" in '#'*|'') continue ;; esac
-    _v="${_v%$'\r'}"
+    _v="${_v%"$(printf '\r')"}"
     case "$_k" in
-      VERBOSE|ARM64_OPT|QGL|PLT|GAME_EXCLUSION_DAEMON)
+      VERBOSE|ARM64_OPT|QGL|PLT|GAME_EXCLUSION_DAEMON|FORCE_SKIAVKTHREADED_BACKEND)
         case "$_v" in
           [Yy]|[Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee]) _v='y' ;;
           *) _v='n' ;;
@@ -60,6 +65,10 @@ parse_config() {
           [Ss][Kk][Ii][Aa][Vv][Kk])            _v='skiavk' ;;
           [Ss][Kk][Ii][Aa][Gg][Ll])            _v='skiagl' ;;
           [Ss][Kk][Ii][Aa][Vv][Kk]_[Aa][Ll][Ll]) _v='skiavk_all' ;;
+          # Legacy aliases — removed as separate modes; fold into canonical names.
+          # FORCE_SKIAVKTHREADED_BACKEND=y controls the renderengine.backend detail.
+          [Ss][Kk][Ii][Aa][Vv][Kk][Tt][Hh][Rr][Ee][Aa][Dd][Ee][Dd]) _v='skiavk' ;;
+          [Ss][Kk][Ii][Aa][Gg][Ll][Tt][Hh][Rr][Ee][Aa][Dd][Ee][Dd]) _v='skiagl' ;;
           *) _v='normal' ;;
         esac ;;
     esac
@@ -70,6 +79,7 @@ parse_config() {
       PLT)         PLT="$_v" ;;
       RENDER_MODE) RENDER_MODE="$_v" ;;
       GAME_EXCLUSION_DAEMON) GAME_EXCLUSION_DAEMON="$_v" ;;
+      FORCE_SKIAVKTHREADED_BACKEND) FORCE_SKIAVKTHREADED_BACKEND="$_v" ;;
     esac
   done < "$cfg"
   return 0
@@ -405,8 +415,8 @@ detect_metamodule() {
     if [ -n "$META_LINK" ] && [ -f "$META_LINK/module.prop" ]; then
       while IFS='=' read -r _mk _mv; do
         case "$_mk" in
-          id)   METAMODULE_ID="${_mv%$'\r'}" ;;
-          name) METAMODULE_NAME="${_mv%$'\r'}" ;;
+          id)   METAMODULE_ID="${_mv%"$(printf '\r')"}" ;;
+          name) METAMODULE_NAME="${_mv%"$(printf '\r')"}" ;;
         esac
       done < "$META_LINK/module.prop" 2>/dev/null
       if [ ! -f "$META_LINK/disable" ] && [ ! -f "$META_LINK/remove" ]; then
@@ -436,7 +446,7 @@ detect_metamodule() {
         METAMODULE_ID="$meta_id"
         METAMODULE_NAME="$meta_id"
         while IFS='=' read -r _mk _mv; do
-          case "$_mk" in name) METAMODULE_NAME="${_mv%$'\r'}"; break ;; esac
+          case "$_mk" in name) METAMODULE_NAME="${_mv%"$(printf '\r')"}"; break ;; esac
         done < "$mod_dir/module.prop" 2>/dev/null
         METAMODULE_INSTALLED=true
         METAMODULE_ACTIVE=true
@@ -728,7 +738,7 @@ if [ -n "$_req_modprop" ]; then
   while IFS='=' read -r _rk _rv; do
     # Skip blank lines, comments, and lines starting with '#'
     case "$_rk" in '#'*|'') continue ;; esac
-    _rv="${_rv%$'\r'}"
+    _rv="${_rv%"$(printf '\r')"}"
     case "$_rk" in
       Android) REQ_ANDROID="$_rv" ;;
       Adreno)  REQ_ADRENO="$_rv"  ;;
