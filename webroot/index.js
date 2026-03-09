@@ -1829,6 +1829,7 @@ const DEFAULT_GAME_EXCL_PKGS = [
     'com.tencent.ig',
     'com.pubg.krmobile',
     'com.pubg.imobile',
+    'com.pubg.newstate',
     'com.vng.pubgmobile',
     'com.rekoo.pubgm',
     'com.tencent.tmgp.pubgmhd',
@@ -1845,6 +1846,15 @@ const DEFAULT_GAME_EXCL_PKGS = [
     'com.proximabeta.mfh',
     'com.HoYoverse.Nap',
     'com.miHoYo.ZZZ',
+    'com.facebook.katana',
+    'com.facebook.orca',
+    'com.facebook.lite',
+    'com.facebook.mlite',
+    'com.instagram.android',
+    'com.instagram.lite',
+    'com.instagram.barcelona',
+    'com.whatsapp',
+    'com.whatsapp.w4b',
 ];
 
 // Build the shell file content from a package array
@@ -3326,16 +3336,22 @@ async function applyRenderNow() {
                     '_RESTORE=skiavk',
                     '_SF=/data/local/tmp/adreno_daemon_active',
                     'printf "0\\n" > "$_SF" 2>/dev/null || true',
-                    // /proc scanner — returns 0 if any excluded pkg is alive
-                    // IFS=read -r stops at NUL: for Android apps, /proc/pid/cmdline =
-                    // "com.pkg\0arg\0..." so read returns exactly the package name. ✓
-                    '_ae() { local _cf _rb _ge _gb;',
+                    // /proc scanner — returns 0 if any excluded pkg is alive.
+                    // /proc/pid/cmdline is NUL-separated argv; shell string assignment
+                    // stops at the first NUL, so _rb = argv[0] = "com.pkg" or
+                    // "com.pkg:processname". Strip :processname suffix, then use exact
+                    // glob matching — same logic as _ie(). Prior *"${_gb}"* substring
+                    // match was the same false-positive bug fixed in _ie(): e.g.
+                    // com.tencent.ig matched com.tencent.igplugin, keeping skiagl active
+                    // after the real game exited → skiavk never restored.
+                    '_ae() { local _cf _rb _pkg _ge;',
                     '  for _cf in /proc/[0-9]*/cmdline; do',
                     '    [ -f "$_cf" ] || continue',
                     '    { IFS= read -r _rb; } < "$_cf" 2>/dev/null || continue',
                     '    [ -n "$_rb" ] || continue',
-                    '    for _ge in $GAME_EXCLUSION_PKGS; do _gb="${_ge%\\*}";',
-                    '      case "$_rb" in *"${_gb}"*) return 0;; esac',
+                    '    _pkg="${_rb%%:*}"',
+                    '    for _ge in $GAME_EXCLUSION_PKGS; do',
+                    '      case "$_pkg" in $_ge) return 0;; esac',
                     '    done',
                     '  done; return 1; }',
                      // FIX: _ie() now uses exact glob matching, same as _game_pkg_excluded().

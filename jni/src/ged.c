@@ -158,7 +158,7 @@ static const char *DEFAULT_PKGS[] = {
     "com.HoYoverse.Nap", "com.miHoYo.ZZZ",
     "com.facebook.katana", "com.facebook.orca",
     "com.facebook.lite", "com.facebook.mlite",
-    "com.instagram.android", "com.instagram.lite",
+    "com.instagram.android", "com.instagram.lite", "com.instagram.barcelona",
     "com.whatsapp", "com.whatsapp.w4b",
     NULL
 };

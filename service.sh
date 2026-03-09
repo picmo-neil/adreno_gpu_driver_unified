@@ -53,7 +53,7 @@ else
   # This list is the authoritative source for BOTH behaviors:
   #   • These packages are NEVER force-stopped during skiavk_all
   #   • These packages trigger the skiagl renderer switch when running
-  GAME_EXCLUSION_PKGS="com.tencent.ig com.pubg.krmobile com.pubg.imobile com.vng.pubgmobile com.rekoo.pubgm com.tencent.tmgp.pubgmhd com.epicgames.* com.activision.callofduty.shooter com.garena.game.codm com.tencent.tmgp.cod com.vng.codmvn com.miHoYo.GenshinImpact com.cognosphere.GenshinImpact com.miHoYo.enterprise.HSRPrism com.HoYoverse.hkrpgoversea com.levelinfinite.hotta com.proximabeta.mfh com.HoYoverse.Nap com.miHoYo.ZZZ com.facebook.katana com.facebook.orca com.facebook.lite com.facebook.mlite com.instagram.android com.instagram.lite com.whatsapp com.whatsapp.w4b"
+  GAME_EXCLUSION_PKGS="com.tencent.ig com.pubg.krmobile com.pubg.imobile com.pubg.newstate com.vng.pubgmobile com.rekoo.pubgm com.tencent.tmgp.pubgmhd com.epicgames.* com.activision.callofduty.shooter com.garena.game.codm com.tencent.tmgp.cod com.vng.codmvn com.miHoYo.GenshinImpact com.cognosphere.GenshinImpact com.miHoYo.enterprise.HSRPrism com.HoYoverse.hkrpgoversea com.levelinfinite.hotta com.proximabeta.mfh com.HoYoverse.Nap com.miHoYo.ZZZ com.facebook.katana com.facebook.orca com.facebook.lite com.facebook.mlite com.instagram.android com.instagram.lite com.instagram.barcelona com.whatsapp com.whatsapp.w4b"
   _game_pkg_excluded() { local _p="$1" _e; for _e in $GAME_EXCLUSION_PKGS; do case "$_p" in $_e) return 0;; esac; done; return 1; }
 fi
 unset _GAME_EXCL_SD _GAME_EXCL_DATA _GAME_EXCL_MOD
@@ -378,15 +378,9 @@ rm -f "$MODDIR/.first_boot_pending" 2>/dev/null || true
 #   SystemUI is NOT crashed in any mode (stability fix — KGSL corruption prevention).
 # ========================================
 # Early enforcement: set debug.hwui.renderer via resetprop at boot+5s.
-# debug.renderengine.backend is NOT set here — SF is running; OEM ROM
-# change callbacks fire and crash SurfaceFlinger. Backend is set exclusively
-# before SF starts in post-fs-data.sh and persists via system.prop.
-# _THREADED_ANDROID14_OK first set removed here (Q8 dead code fix).
-# renderengine.backend is NEVER resetprop'd in service.sh — SF is running,
-# OEM change callbacks would crash it. Backend is set exclusively in
-# post-fs-data.sh BEFORE SF starts, via resetprop. The only place
-# _THREADED_ANDROID14_OK matters is the system.prop write block below
-# (~line 2440), where it is correctly re-evaluated just before use.
+# debug.renderengine.backend is NOT set here — SF is already running and OEM
+# addChangeCallback handlers would crash it.  Backend is set exclusively in
+# post-fs-data.sh before SF starts, via resetprop, and persists via system.prop.
 if cmd_exists resetprop; then
   case "$RENDER_MODE" in
     skiavk|skiavk_all)
@@ -597,14 +591,15 @@ if [ "$RENDER_MODE" != "$_SVC_EARLY_LAST_MODE" ]; then
   log_service "  Removing any caches not caught by post-fs-data.sh early clear."
   log_service "========================================"
   rm -rf /data/misc/hwui/ 2>/dev/null || true
-  # DEPTH NOTE: app_skia_pipeline_cache lives at <pkg>/code_cache/app_skia_pipeline_cache/
-  # — 3 levels deep from /data/user_de/0. -maxdepth 2 would stop at code_cache and miss it.
-  find /data/user_de/0 -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
+  # DEPTH NOTE: /data/user_de/<uid>/<pkg>/code_cache/app_skia_pipeline_cache/ is 4 levels
+  # deep from /data/user_de. Using /data/user_de/0 with -maxdepth 3 only covers the primary
+  # user; work-profile UIDs (10, 11, ...) at /data/user_de/10/ etc. were silently skipped.
+  find /data/user_de -maxdepth 4 -type d -name "app_skia_pipeline_cache" \
       -exec rm -rf {} + 2>/dev/null || true
   find /data/data -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
       -exec rm -rf {} + 2>/dev/null || true
-  find /data/user_de/0 -maxdepth 3 -name "*.shader_journal" -delete 2>/dev/null || true
-  find /data/user_de/0 -maxdepth 3 -type d \( -name "skia_shaders" -o -name "shader_cache" \) \
+  find /data/user_de -maxdepth 4 -name "*.shader_journal" -delete 2>/dev/null || true
+  find /data/user_de -maxdepth 4 -type d \( -name "skia_shaders" -o -name "shader_cache" \) \
       -exec rm -rf {} + 2>/dev/null || true
   log_service "[OK] Secondary Skia cache clear complete (mode changed)"
 else
@@ -858,7 +853,7 @@ if [ "$RENDER_MODE" = "skiavk_all" ]; then
       _skia_log "    skiavk PROP remains active — new apps will attempt Vulkan."
       _skia_log "    To retry: rm /data/local/tmp/adreno_vk_compat_score && reboot"
       _skia_log "========================================"
-      echo "prop_only" > "$_VK_COMPAT_FILE" 2>/dev/null
+      printf 'prop_only\n' > "${_VK_COMPAT_FILE}.tmp" 2>/dev/null && mv "${_VK_COMPAT_FILE}.tmp" "$_VK_COMPAT_FILE" 2>/dev/null || true
       unset _VK_STRUCT_PASS
       exit 0
     fi
@@ -887,7 +882,7 @@ if [ "$RENDER_MODE" = "skiavk_all" ]; then
       _skia_log "    Force-stop ABORTED — apps would restart on GL, no VK gain."
       _skia_log "    Persisting 'prop_only' flag — future boots skip this subshell."
       _skia_log "========================================"
-      echo "prop_only" > "$_VK_COMPAT_FILE" 2>/dev/null
+      printf 'prop_only\n' > "${_VK_COMPAT_FILE}.tmp" 2>/dev/null && mv "${_VK_COMPAT_FILE}.tmp" "$_VK_COMPAT_FILE" 2>/dev/null || true
       unset _RO_HWUI_VK _VK_COMPAT _VK_COMPAT_FILE
       exit 0
     fi
@@ -906,7 +901,7 @@ if [ "$RENDER_MODE" = "skiavk_all" ]; then
       _skia_log "    This ROM has no Vulkan driver — skiavk will always fail silently."
       _skia_log "    Force-stop ABORTED. Persisting 'incompatible' flag."
       _skia_log "========================================"
-      echo "incompatible" > "$_VK_COMPAT_FILE" 2>/dev/null
+      printf 'incompatible\n' > "${_VK_COMPAT_FILE}.tmp" 2>/dev/null && mv "${_VK_COMPAT_FILE}.tmp" "$_VK_COMPAT_FILE" 2>/dev/null || true
       unset _VK_LIB_FOUND _VK_COMPAT _VK_COMPAT_FILE
       exit 0
     fi
@@ -945,13 +940,13 @@ if [ "$RENDER_MODE" = "skiavk_all" ]; then
       _skia_log "    skiavk PROP remains active — new apps will attempt Vulkan."
       _skia_log "    To retry after ROM update: 'rm $_VK_COMPAT_FILE' then reboot."
       _skia_log "========================================"
-      echo "prop_only" > "$_VK_COMPAT_FILE" 2>/dev/null
+      printf 'prop_only\n' > "${_VK_COMPAT_FILE}.tmp" 2>/dev/null && mv "${_VK_COMPAT_FILE}.tmp" "$_VK_COMPAT_FILE" 2>/dev/null || true
       unset _SYSUI_VK_COUNT _SYSUI_PIPE _LIVE_PROP _VK_COMPAT _VK_COMPAT_FILE
       exit 0
     fi
     _skia_log "[OK] VK PROBE PASSED: SystemUI confirmed on Vulkan (${_SYSUI_VK_COUNT} Skia(Vulkan) surface(s))"
     _skia_log "     ROM/device Vulkan stack is functional — safe to proceed with force-stop"
-    echo "confirmed" > "$_VK_COMPAT_FILE" 2>/dev/null
+    printf 'confirmed\n' > "${_VK_COMPAT_FILE}.tmp" 2>/dev/null && mv "${_VK_COMPAT_FILE}.tmp" "$_VK_COMPAT_FILE" 2>/dev/null || true
     unset _SYSUI_VK_COUNT _VK_COMPAT _VK_COMPAT_FILE
     # ══ END VULKAN FUNCTIONAL PROBE ══════════════════════════════════════════
     # ══════════════════════════════════════════════════════════════════════════
@@ -1062,7 +1057,8 @@ if [ "$RENDER_MODE" = "skiavk_all" ]; then
           # If VK probe wrote "prop_only" for this same reason, clear it so
           # force-stop is not skipped (the watchdog now handles the prop).
           if [ "$_vk_compat_now" = "prop_only" ]; then
-            printf 'confirmed\n' > "/data/local/tmp/adreno_vk_compat" 2>/dev/null || true
+            printf 'confirmed\n' > "/data/local/tmp/adreno_vk_compat.tmp" 2>/dev/null && \
+              mv "/data/local/tmp/adreno_vk_compat.tmp" "/data/local/tmp/adreno_vk_compat" 2>/dev/null || true
             _skia_log "[OVERRIDE] VK compat flag cleared from 'prop_only' → 'confirmed' (old vendor prop override, not stack issue)"
           fi
           ;;
@@ -1253,15 +1249,17 @@ if [ "$RENDER_MODE" = "skiavk_all" ]; then
       # Global HWUI cache
       rm -rf /data/misc/hwui/ 2>/dev/null || true
       # Per-app Skia pipeline caches (the main crash culprit on GL→VK switch)
-      # DEPTH: <pkg>/code_cache/app_skia_pipeline_cache/ = 3 levels from /data/user_de/0
-      find /data/user_de/0 -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
+      # DEPTH: /data/user_de/<uid>/<pkg>/code_cache/app_skia_pipeline_cache/ = 4 levels
+      # from /data/user_de. Using /data/user_de/0 with -maxdepth 3 only covers the primary
+      # user; work-profile UIDs at /data/user_de/10/ etc. are silently skipped.
+      find /data/user_de -maxdepth 4 -type d -name "app_skia_pipeline_cache" \
           -exec rm -rf {} + 2>/dev/null || true
       # Fallback: legacy /data/data path (pre-Android 7 / direct boot disabled)
       find /data/data -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
           -exec rm -rf {} + 2>/dev/null || true
       # Per-app Skia shader caches
-      find /data/user_de/0 -maxdepth 3 -name "*.shader_journal" -delete 2>/dev/null || true
-      find /data/user_de/0 -maxdepth 3 -type d \( -name "skia_shaders" -o -name "shader_cache" \) \
+      find /data/user_de -maxdepth 4 -name "*.shader_journal" -delete 2>/dev/null || true
+      find /data/user_de -maxdepth 4 -type d \( -name "skia_shaders" -o -name "shader_cache" \) \
           -exec rm -rf {} + 2>/dev/null || true
       _skia_log "[OK] Stale Skia pipeline & shader caches cleared (mode change: ${_S0_LAST_MODE:-<none>} → $RENDER_MODE)"
     else
@@ -1486,7 +1484,8 @@ if [ "$RENDER_MODE" = "skiavk_all" ]; then
         _skia_log "    Old vendor state: ${_step5_ov_state}"
       else
         _skia_log "    Marking ROM as 'prop_only' for next boot (OEM prop watcher active)."
-        echo "prop_only" > "/data/local/tmp/adreno_vk_compat" 2>/dev/null
+        printf 'prop_only\n' > "/data/local/tmp/adreno_vk_compat.tmp" 2>/dev/null && \
+          mv "/data/local/tmp/adreno_vk_compat.tmp" "/data/local/tmp/adreno_vk_compat" 2>/dev/null || true
       fi
       unset _step5_ov_state
       # ── END OLD VENDOR DISTINCTION ─────────────────────────────────────
@@ -2057,17 +2056,37 @@ log_service "========================================"
 
 BOOT_ATTEMPTS_FILE="/data/local/tmp/adreno_boot_attempts"
 
-if echo 0 > "$BOOT_ATTEMPTS_FILE" 2>/dev/null; then
+# BUG-A FIX: Use atomic printf+mv pattern (same as post-fs-data.sh BUG-1/2 fix).
+# echo > file truncates then writes in two non-atomic steps; a crash between
+# truncation and the write leaves an empty file.  An empty file is read back as
+# "0" (the :-0 default) on the next boot, so the functional impact is tiny, but
+# the pattern must be consistent with every other counter write in this module.
+if printf '0\n' > "${BOOT_ATTEMPTS_FILE}.tmp" 2>/dev/null && \
+   mv "${BOOT_ATTEMPTS_FILE}.tmp" "$BOOT_ATTEMPTS_FILE" 2>/dev/null; then
   log_service "[OK] Boot attempt counter reset to 0"
 else
+  rm -f "${BOOT_ATTEMPTS_FILE}.tmp" 2>/dev/null || true
   log_service "[!] WARNING: Failed to reset boot attempt counter"
 fi
 
-if touch "$MODDIR/.boot_success" 2>/dev/null; then
+# Skip the marker if this boot confirmed Vulkan is incompatible with this device.
+# When adreno_vk_compat="incompatible", the next boot's post-fs-data.sh would see
+# _PREV_BOOT_SUCCESS=true and promote to skiavkthreaded — but Vulkan is broken, so
+# SF would freeze. Suppressing the marker forces post-fs-data.sh to stay on
+# skiaglthreaded until a future boot re-evaluates compat.
+# "prop_only" is NOT suppressed: that means the ICD runs but force-stop is risky;
+# SF's own Vulkan compositor path is independent and may still work.
+_bs_vk_compat=""
+[ -f "/data/local/tmp/adreno_vk_compat" ] && \
+  { IFS= read -r _bs_vk_compat; } < "/data/local/tmp/adreno_vk_compat" 2>/dev/null || true
+if [ "$_bs_vk_compat" = "incompatible" ]; then
+  log_service "[!] Skipping .boot_success — adreno_vk_compat=incompatible; skiavkthreaded suppressed next boot"
+elif touch "$MODDIR/.boot_success" 2>/dev/null; then
   log_service "Boot success marker created"
 else
   log_service "WARNING: Failed to create boot success marker"
 fi
+unset _bs_vk_compat
 
 # ========================================
 # SYSTEM.PROP OWNERSHIP: post-fs-data.sh
@@ -2265,7 +2284,8 @@ if cmd_exists resetprop; then
     # is unreliable in POSIX sh when no matching files exist; -rf on dir is safe).
     rm -rf /data/misc/hwui/ 2>/dev/null || true
     # Per-app Skia pipeline caches (the main crash culprit on GL→Vulkan switch)
-    find /data/user_de -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
+    # DEPTH: /data/user_de/<uid>/<pkg>/code_cache/app_skia_pipeline_cache/ = 4 levels.
+    find /data/user_de -maxdepth 4 -type d -name "app_skia_pipeline_cache" \
         -exec rm -rf {} + 2>/dev/null || true
     find /data/data -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
         -exec rm -rf {} + 2>/dev/null || true

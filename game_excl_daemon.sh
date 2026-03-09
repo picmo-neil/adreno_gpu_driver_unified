@@ -214,16 +214,22 @@ _acquire_lock() {
   local _i=0
   while ! mkdir "$_LOCK_DIR" 2>/dev/null; do
     _i=$((_i + 1))
-    if [ $_i -ge 200 ]; then
-      # Stale lock: force-remove and re-acquire
-      rmdir "$_LOCK_DIR" 2>/dev/null || rm -rf "$_LOCK_DIR" 2>/dev/null || true
-      mkdir "$_LOCK_DIR" 2>/dev/null || true
-      break
+    # Stale-lock threshold: 200 iterations at 50 ms = ~10 s, which is generous
+    # for a lock that is held for <1 ms in normal operation.  When only sleep 1
+    # is available (no busybox usleep, no fractional sleep), cap at 15 iterations
+    # (15 s) rather than letting the fallback spin for 200 s.
+    if busybox usleep 50000 2>/dev/null || sleep 0.05 2>/dev/null; then
+      [ $_i -ge 200 ] && break
+    else
+      sleep 1 2>/dev/null || true
+      [ $_i -ge 15 ] && break
     fi
-    # Brief yield between attempts — prevents tight CPU spin under contention
-    # (multiple _wait_game_death subshells closing simultaneously).
-    busybox usleep 50000 2>/dev/null || sleep 0.05 2>/dev/null || sleep 1 2>/dev/null || true
   done
+  # Force-clear a stale lock after the iteration cap is hit.
+  if ! mkdir "$_LOCK_DIR" 2>/dev/null; then
+    rmdir "$_LOCK_DIR" 2>/dev/null || rm -rf "$_LOCK_DIR" 2>/dev/null || true
+    mkdir "$_LOCK_DIR" 2>/dev/null || true
+  fi
 }
 
 _release_lock() {
@@ -236,12 +242,23 @@ _release_lock() {
 # Both change only the in-memory property value -- no build.prop is touched.
 # The change takes effect for every app process started AFTER this call;
 # debug.hwui.renderer is read once per process at its first HWUI init.
+#
+# BUG-6 NOTE (setprop path): Unlike resetprop, setprop goes through
+# property_service and will trigger any on:property=debug.hwui.renderer
+# init.rc watchers present on OEM ROMs (MIUI/HyperOS, One UI). Such watchers
+# may re-override the renderer within ~1-2s. This is a best-effort path only;
+# if the renderer flip is immediately overridden, the daemon will re-detect
+# and re-apply on its next poll cycle. No deadlock risk in service context.
 _set_renderer() {
   local _r="$1"
   if command -v resetprop >/dev/null 2>&1; then
     resetprop debug.hwui.renderer "$_r" 2>/dev/null
   else
+    # APatch lite-mode: resetprop unavailable. setprop is the only option.
+    # Logged to kmsg below; OEM init.rc watcher interference is possible.
     setprop debug.hwui.renderer "$_r" 2>/dev/null || true
+    echo "[ADRENO-GED] WARN: used setprop (APatch lite-mode; OEM watcher may override)" \
+      > /dev/kmsg 2>/dev/null || true
   fi
   echo "[ADRENO-GED] renderer -> ${_r}" > /dev/kmsg 2>/dev/null || true
 }
@@ -346,7 +363,9 @@ _wait_game_death() {
     _itr=$((_itr + 1))
     if [ $((_itr % 5)) -eq 0 ]; then
       _cur=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
-      if [ "$_cur" != "skiagl" ]; then
+      # Guard against getprop returning empty (binder error, init not ready):
+      # an empty value compares != "skiagl" and would trigger a spurious re-set.
+      if [ -n "$_cur" ] && [ "$_cur" != "skiagl" ]; then
         _set_renderer skiagl
         echo "[ADRENO-GED] RE-ENFORCE: skiagl (was '${_cur}') for ${_pkg} (PID=${_pid})" \
           > /dev/kmsg 2>/dev/null || true
@@ -541,7 +560,22 @@ fi
 # The read() syscall on this pipe blocks in TASK_INTERRUPTIBLE inside the
 # kernel's pipe wait queue (logd uses epoll internally). Zero CPU between
 # process-start events -- the daemon is truly asleep in the kernel.
-_logcat_t0=$(date +%s 2>/dev/null || echo 0)
+# Record the start time using /proc/uptime (integer seconds since boot) as the
+# primary source — available on every Android kernel regardless of toybox/busybox
+# date capabilities.  date +%s is tried first as it returns wall-clock seconds and
+# avoids any wrap-around concern, but /proc/uptime is the reliable fallback.
+_uptime_secs() {
+  local _u
+  if { IFS= read -r _u; } < /proc/uptime 2>/dev/null; then
+    # /proc/uptime: "<total_uptime_secs>.<hundredths> <idle_secs>"
+    # Strip decimal and idle columns to get integer uptime seconds.
+    _u="${_u%%.*}"
+    echo "${_u:-0}"
+  else
+    echo 0
+  fi
+}
+_logcat_t0=$(date +%s 2>/dev/null) || _logcat_t0=$(_uptime_secs)
 logcat -b events -v brief -T 1 2>/dev/null | while IFS= read -r _line; do
 
   # ── Fast pre-filter ───────────────────────────────────────────────────────
@@ -604,7 +638,7 @@ logcat -b events -v brief -T 1 2>/dev/null | while IFS= read -r _line; do
 
 done
 # ── Pipe exited — check for SELinux-blocked logcat ────────────────────────────
-_logcat_t1=$(date +%s 2>/dev/null || echo 0)
+_logcat_t1=$(date +%s 2>/dev/null) || _logcat_t1=$(_uptime_secs)
 _logcat_runtime=$(( _logcat_t1 - _logcat_t0 ))
 
 if [ "$_logcat_runtime" -lt 2 ]; then

@@ -20,16 +20,20 @@
 # ========================================
 
 safe_log() {
-  local _t; read _t _ < /proc/uptime 2>/dev/null || _t='?'
+  local _t; IFS= read -r _t _ < /proc/uptime 2>/dev/null || _t='?'
   local msg="[${_t}s] $1"
   echo "$msg" 2>/dev/null || true
-  [ -n "${LOG_FILE:-}" ] && [ "$LOG_FILE" != "/dev/null" ] && echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
+  if [ -n "${LOG_FILE:-}" ] && [ "$LOG_FILE" != "/dev/null" ]; then
+    echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
+  fi
 }
 
 safe_ui_print() {
   local msg="$1"
   echo "$msg"
-  [ -n "${LOG_FILE:-}" ] && [ "$LOG_FILE" != "/dev/null" ] && echo "[UI] $msg" >> "$LOG_FILE" 2>/dev/null || true
+  if [ -n "${LOG_FILE:-}" ] && [ "$LOG_FILE" != "/dev/null" ]; then
+    echo "[UI] $msg" >> "$LOG_FILE" 2>/dev/null || true
+  fi
 }
 
 ui_print() { safe_ui_print "$@"; }

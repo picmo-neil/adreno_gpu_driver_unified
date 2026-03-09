@@ -90,7 +90,7 @@ else
   # NOTE: Meta packages (Facebook/Instagram/WhatsApp) included here to match
   # service.sh (line ~56) and game_excl_daemon.sh — prevents force-stop of Meta
   # apps during boot which causes dangling ANativeWindow handles.
-  GAME_EXCLUSION_PKGS="com.tencent.ig com.pubg.krmobile com.pubg.imobile com.pubg.newstate com.vng.pubgmobile com.rekoo.pubgm com.tencent.tmgp.pubgmhd com.epicgames.* com.activision.callofduty.shooter com.garena.game.codm com.tencent.tmgp.cod com.vng.codmvn com.miHoYo.GenshinImpact com.cognosphere.GenshinImpact com.miHoYo.enterprise.HSRPrism com.HoYoverse.hkrpgoversea com.levelinfinite.hotta com.proximabeta.mfh com.HoYoverse.Nap com.miHoYo.ZZZ com.facebook.katana com.facebook.orca com.facebook.lite com.facebook.mlite com.instagram.android com.instagram.lite com.whatsapp com.whatsapp.w4b"
+  GAME_EXCLUSION_PKGS="com.tencent.ig com.pubg.krmobile com.pubg.imobile com.pubg.newstate com.vng.pubgmobile com.rekoo.pubgm com.tencent.tmgp.pubgmhd com.epicgames.* com.activision.callofduty.shooter com.garena.game.codm com.tencent.tmgp.cod com.vng.codmvn com.miHoYo.GenshinImpact com.cognosphere.GenshinImpact com.miHoYo.enterprise.HSRPrism com.HoYoverse.hkrpgoversea com.levelinfinite.hotta com.proximabeta.mfh com.HoYoverse.Nap com.miHoYo.ZZZ com.facebook.katana com.facebook.orca com.facebook.lite com.facebook.mlite com.instagram.android com.instagram.lite com.instagram.barcelona com.whatsapp com.whatsapp.w4b"
   _game_pkg_excluded() { local _p="$1" _e; for _e in $GAME_EXCLUSION_PKGS; do case "$_p" in $_e) return 0;; esac; done; return 1; }
 fi
 unset _GAME_EXCL_SD _GAME_EXCL_MOD _GAME_EXCL_DATA
@@ -196,7 +196,10 @@ if [ -f "$MODDIR/skip_mount" ]; then
   # CRITICAL: Reset boot attempt counter so the module does NOT auto-disable
   # itself after 4 consecutive skip_mount early-exits. skip_mount is an
   # intentional no-op state (waiting for metamodule), not a failure state.
-  echo 0 > "$BOOT_ATTEMPTS_FILE" 2>/dev/null || true
+  # Atomic write via tmp+mv: prevents a corrupted/empty counter file if power
+  # is lost between the truncate and the write that echo > file performs.
+  printf '0\n' > "${BOOT_ATTEMPTS_FILE}.tmp" 2>/dev/null && \
+    mv "${BOOT_ATTEMPTS_FILE}.tmp" "$BOOT_ATTEMPTS_FILE" 2>/dev/null || true
 
   exit 0
 fi
@@ -211,7 +214,12 @@ MAX_BOOT_ATTEMPTS=3
 BOOT_ATTEMPTS="${BOOT_ATTEMPTS:-0}"
 BOOT_ATTEMPTS=$((BOOT_ATTEMPTS + 1))
 
-echo "$BOOT_ATTEMPTS" > "$BOOT_ATTEMPTS_FILE" 2>/dev/null
+# Atomic write via tmp+mv: if power is lost between truncate and write (which
+# echo > file performs as two non-atomic steps), the counter file is left empty
+# and the bootloop guard reads 0 on the next boot — silently resetting the
+# safety net. printf > .tmp followed by mv is atomic on all Linux filesystems.
+printf '%d\n' "$BOOT_ATTEMPTS" > "${BOOT_ATTEMPTS_FILE}.tmp" 2>/dev/null && \
+  mv "${BOOT_ATTEMPTS_FILE}.tmp" "$BOOT_ATTEMPTS_FILE" 2>/dev/null || true
 
 if [ "$BOOT_ATTEMPTS" -gt "$MAX_BOOT_ATTEMPTS" ]; then
   touch "$MODDIR/disable" 2>/dev/null
@@ -229,7 +237,8 @@ if [ "$BOOT_ATTEMPTS" -gt "$MAX_BOOT_ATTEMPTS" ]; then
     echo "4. Reboot"
     echo "========================================"
   } > "/data/local/tmp/adreno_auto_disabled.log" 2>/dev/null
-  echo 0 > "$BOOT_ATTEMPTS_FILE" 2>/dev/null
+  printf '0\n' > "${BOOT_ATTEMPTS_FILE}.tmp" 2>/dev/null && \
+    mv "${BOOT_ATTEMPTS_FILE}.tmp" "$BOOT_ATTEMPTS_FILE" 2>/dev/null || true
   exit 0
 fi
 
@@ -286,9 +295,11 @@ RENDER_MODE=$(printf '%s' "$RENDER_MODE" | tr '[:upper:]' '[:lower:]')
 # Users who explicitly set GAME_EXCLUSION_DAEMON=y are unaffected (already "y").
 # Users who set GAME_EXCLUSION_DAEMON=n have opted out intentionally — respected.
 if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
-  [ "$GAME_EXCLUSION_DAEMON" != "y" ] && [ "$GAME_EXCLUSION_DAEMON" != "n" ] && GAME_EXCLUSION_DAEMON="y"
-  # If user never set it (default "n" from line above), promote to "y".
-  # Re-apply: the default-to-"n" guard above fires before this block.
+  # Auto-enable GED for skiavk modes unless the user explicitly opted out.
+  # The sanitization guard above (line 268) normalises any non-"y" value to "n",
+  # so at this point GAME_EXCLUSION_DAEMON is either "y" (user opted in) or
+  # "n" (default or user opted out).  We promote "n" to "y" only here, not in
+  # the general case, so that non-skiavk modes never start the daemon.
   if [ "$GAME_EXCLUSION_DAEMON" = "n" ]; then
     GAME_EXCLUSION_DAEMON="y"
     # Log the auto-enable on the first logging pass (after log init).
@@ -344,23 +355,34 @@ IN_BOOTLOOP=false
 if [ "$VERBOSE" = "y" ]; then
   detect_bootloop() {
     local _raw; read _raw _ < /proc/uptime 2>/dev/null || _raw='0'
-    local current_time="${_raw%%.*}"
+    local current_uptime="${_raw%%.*}"
     local boot_count=0
-    local last_boot_time=0
-    local boot_uptime="$current_time"
+    local last_boot_epoch=0
+    local boot_uptime="$current_uptime"
+
+    # Wall-clock timestamp for cross-reboot comparison.
+    # Uptime resets to ~20s on every reboot, so storing uptime as LAST_BOOT
+    # always gives (current - last) ≈ 0 < 60s → every boot looks like a
+    # rapid reboot → false positive bootloop on boot 3+.
+    # date +%s gives Unix epoch which is monotonically increasing across reboots.
+    local current_epoch
+    current_epoch=$(date +%s 2>/dev/null || echo "0")
+    # If date is unavailable, use a sentinel that always passes the threshold check
+    [ "$current_epoch" = "0" ] && current_epoch=999999999
 
     if [ -f "$BOOT_STATE_FILE" ]; then
       while IFS='=' read -r _bk _bv; do
         case "$_bk" in
-          BOOT_COUNT) boot_count="${_bv:-0}" ;;
-          LAST_BOOT)  last_boot_time="${_bv:-0}" ;;
+          BOOT_COUNT)       boot_count="${_bv:-0}" ;;
+          LAST_BOOT_EPOCH)  last_boot_epoch="${_bv:-0}" ;;
         esac
       done < "$BOOT_STATE_FILE"
     fi
 
     BOOTLOOP_THRESHOLD=60
 
-    if [ $((current_time - last_boot_time)) -lt $BOOTLOOP_THRESHOLD ]; then
+    # Compare wall-clock elapsed seconds between reboots.
+    if [ $((current_epoch - last_boot_epoch)) -lt $BOOTLOOP_THRESHOLD ]; then
       boot_count=$((boot_count + 1))
     else
       boot_count=1
@@ -368,7 +390,7 @@ if [ "$VERBOSE" = "y" ]; then
 
     if cat > "$BOOT_STATE_FILE" <<STATE_EOF
 BOOT_COUNT=$boot_count
-LAST_BOOT=$current_time
+LAST_BOOT_EPOCH=$current_epoch
 UPTIME=$boot_uptime
 THRESHOLD=$BOOTLOOP_THRESHOLD
 STATE_EOF
@@ -378,7 +400,7 @@ STATE_EOF
       BOOT_STATE_FILE="/tmp/adreno_boot_state"
       cat > "$BOOT_STATE_FILE" <<STATE_EOF
 BOOT_COUNT=$boot_count
-LAST_BOOT=$current_time
+LAST_BOOT_EPOCH=$current_epoch
 UPTIME=$boot_uptime
 THRESHOLD=$BOOTLOOP_THRESHOLD
 STATE_EOF
@@ -1242,7 +1264,7 @@ log_boot "Selected render mode: $RENDER_MODE"
 SYSTEM_PROP_FILE="$MODDIR/system.prop"
 
 # Always strip old render + SF + stability props first, then write the correct set
-_RENDER_PROPS='debug\.hwui\.renderer=|debug\.renderengine\.backend=|debug\.sf\.latch_unsignaled=|debug\.sf\.auto_latch_unsignaled=|debug\.sf\.disable_backpressure=|debug\.sf\.enable_hwc_vds=|debug\.sf\.enable_transaction_tracing=|debug\.sf\.client_composition_cache_size=|ro\.sf\.disable_triple_buffer=|ro\.surface_flinger\.use_context_priority=|ro\.surface_flinger\.max_frame_buffer_acquired_buffers=|ro\.surface_flinger\.force_hwc_copy_for_virtual_displays=|debug\.hwui\.use_buffer_age=|debug\.hwui\.use_partial_updates=|debug\.hwui\.use_gpu_pixel_buffers=|renderthread\.skia\.reduceopstasksplitting=|debug\.hwui\.skip_empty_damage=|debug\.hwui\.webview_overlays_enabled=|debug\.hwui\.skia_tracing_enabled=|debug\.hwui\.skia_use_perfetto_track_events=|debug\.hwui\.capture_skp_enabled=|debug\.hwui\.skia_atrace_enabled=|debug\.hwui\.use_hint_manager=|debug\.hwui\.target_cpu_time_percent=|com\.qc\.hardware=|persist\.sys\.force_sw_gles=|debug\.vulkan\.layers=|ro\.hwui\.use_vulkan=|debug\.hwui\.recycled_buffer_cache_size=|debug\.hwui\.overdraw=|debug\.hwui\.profile=|debug\.hwui\.show_dirty_regions=|graphics\.gpu\.profiler\.support=|ro\.egl\.blobcache\.multifile=|ro\.egl\.blobcache\.multifile_limit=|debug\.hwui\.fps_divisor=|debug\.hwui\.render_thread=|debug\.hwui\.render_dirty_regions=|debug\.hwui\.show_layers_updates=|debug\.hwui\.filter_test_overhead=|debug\.hwui\.nv_profiling=|debug\.hwui\.clip_surfaceviews=|debug\.hwui\.8bit_hdr_headroom=|debug\.hwui\.skip_eglmanager_telemetry=|debug\.hwui\.initialize_gl_always=|debug\.hwui\.level=|debug\.hwui\.disable_vsync=|hwui\.disable_vsync=|debug\.vulkan\.layers\.enable=|persist\.device_config\.runtime_native\.usap_pool_enabled=|debug\.gralloc\.enable_fb_ubwc=|vendor\.gralloc\.enable_fb_ubwc=|persist\.sys\.perf\.topAppRenderThreadBoost\.enable=|persist\.sys\.gpu\.working_thread_priority=|debug\.sf\.early_phase_offset_ns=|debug\.sf\.early_app_phase_offset_ns=|debug\.sf\.early_gl_phase_offset_ns=|debug\.sf\.early_gl_app_phase_offset_ns=|debug\.hwui\.use_skia_graphite=|ro\.surface_flinger\.supports_background_blur=|persist\.sys\.sf\.disable_blurs=|ro\.sf\.blurs_are_expensive=|ro\.config\.vulkan\.enabled=|persist\.vendor\.vulkan\.enable=|persist\.graphics\.vulkan\.disable_pre_rotation=|debug\.sf\.use_phase_offsets_as_durations=|debug\.hwui\.texture_cache_size=|debug\.hwui\.layer_cache_size=|debug\.hwui\.path_cache_size=|debug\.hwui\.force_dark=|ro\.hwui\.text_small_cache_width=|ro\.hwui\.text_small_cache_height=|ro\.hwui\.text_large_cache_width=|ro\.hwui\.text_large_cache_height=|ro\.hwui\.drop_shadow_cache_size=|ro\.hwui\.gradient_cache_size=|persist\.sys\.sf\.native_mode=|debug\.sf\.treat_170m_as_sRGB=|debug\.egl\.debug_proc='
+_RENDER_PROPS='debug\.hwui\.renderer=|debug\.renderengine\.backend=|debug\.sf\.latch_unsignaled=|debug\.sf\.auto_latch_unsignaled=|debug\.sf\.disable_backpressure=|debug\.sf\.enable_hwc_vds=|debug\.sf\.enable_transaction_tracing=|debug\.sf\.client_composition_cache_size=|ro\.sf\.disable_triple_buffer=|ro\.surface_flinger\.use_context_priority=|ro\.surface_flinger\.max_frame_buffer_acquired_buffers=|ro\.surface_flinger\.force_hwc_copy_for_virtual_displays=|debug\.hwui\.use_buffer_age=|debug\.hwui\.use_partial_updates=|debug\.hwui\.use_gpu_pixel_buffers=|renderthread\.skia\.reduceopstasksplitting=|debug\.hwui\.skip_empty_damage=|debug\.hwui\.webview_overlays_enabled=|debug\.hwui\.skia_tracing_enabled=|debug\.hwui\.skia_use_perfetto_track_events=|debug\.hwui\.capture_skp_enabled=|debug\.hwui\.skia_atrace_enabled=|debug\.hwui\.use_hint_manager=|debug\.hwui\.target_cpu_time_percent=|com\.qc\.hardware=|persist\.sys\.force_sw_gles=|debug\.vulkan\.layers=|debug\.vulkan\.dev\.layers=|ro\.hwui\.use_vulkan=|debug\.hwui\.recycled_buffer_cache_size=|debug\.hwui\.overdraw=|debug\.hwui\.profile=|debug\.hwui\.show_dirty_regions=|graphics\.gpu\.profiler\.support=|ro\.egl\.blobcache\.multifile=|ro\.egl\.blobcache\.multifile_limit=|debug\.hwui\.fps_divisor=|debug\.hwui\.render_thread=|debug\.hwui\.render_dirty_regions=|debug\.hwui\.show_layers_updates=|debug\.hwui\.filter_test_overhead=|debug\.hwui\.nv_profiling=|debug\.hwui\.clip_surfaceviews=|debug\.hwui\.8bit_hdr_headroom=|debug\.hwui\.skip_eglmanager_telemetry=|debug\.hwui\.initialize_gl_always=|debug\.hwui\.level=|debug\.hwui\.disable_vsync=|hwui\.disable_vsync=|debug\.vulkan\.layers\.enable=|persist\.device_config\.runtime_native\.usap_pool_enabled=|debug\.gralloc\.enable_fb_ubwc=|vendor\.gralloc\.enable_fb_ubwc=|persist\.sys\.perf\.topAppRenderThreadBoost\.enable=|persist\.sys\.gpu\.working_thread_priority=|debug\.sf\.early_phase_offset_ns=|debug\.sf\.early_app_phase_offset_ns=|debug\.sf\.early_gl_phase_offset_ns=|debug\.sf\.early_gl_app_phase_offset_ns=|debug\.hwui\.use_skia_graphite=|ro\.surface_flinger\.supports_background_blur=|persist\.sys\.sf\.disable_blurs=|ro\.sf\.blurs_are_expensive=|ro\.config\.vulkan\.enabled=|persist\.vendor\.vulkan\.enable=|persist\.graphics\.vulkan\.disable_pre_rotation=|debug\.sf\.use_phase_offsets_as_durations=|debug\.hwui\.texture_cache_size=|debug\.hwui\.layer_cache_size=|debug\.hwui\.path_cache_size=|debug\.hwui\.force_dark=|ro\.hwui\.text_small_cache_width=|ro\.hwui\.text_small_cache_height=|ro\.hwui\.text_large_cache_width=|ro\.hwui\.text_large_cache_height=|ro\.hwui\.drop_shadow_cache_size=|ro\.hwui\.gradient_cache_size=|persist\.sys\.sf\.native_mode=|debug\.sf\.treat_170m_as_sRGB=|debug\.egl\.debug_proc=|debug\.sf\.hw=|persist\.sys\.ui\.hw=|debug\.egl\.hw=|debug\.egl\.profiler=|debug\.egl\.trace=|persist\.graphics\.vulkan\.validation_enable=|debug\.hwui\.drawing_enabled='
 if [ -f "$SYSTEM_PROP_FILE" ]; then
   awk -v pat="$_RENDER_PROPS" '{ if ($0 ~ pat) next; print }' \
     "$SYSTEM_PROP_FILE" > "${SYSTEM_PROP_FILE}.tmp" 2>/dev/null && \
@@ -1274,8 +1296,15 @@ log_boot "[OK] First-boot deferral disabled — renderer applied immediately"
 # Deleting unconditionally here limits worst-case to exactly 1 freeze per
 # regression (this boot falls back to skiaglthreaded, boot completes, marker
 # is re-written, next boot promotes to skiavkthreaded again).
+# Check if previous boot completed successfully (service.sh wrote this marker).
+# This gates the skiavkthreaded backend: on first install (no marker) or after
+# an SF freeze (service.sh never ran → no marker), fall back to skiaglthreaded.
+# Deleting it here forces service.sh to re-earn it this boot.
+# Worst-case: 1 skiaglthreaded boot after any regression; next boot re-promotes.
+_PREV_BOOT_SUCCESS=false
+[ -f "$MODDIR/.boot_success" ] && _PREV_BOOT_SUCCESS=true
 rm -f "$MODDIR/.boot_success" 2>/dev/null || true
-log_boot "[OK] Previous .boot_success cleared — must re-confirm this boot"
+log_boot "[OK] Previous .boot_success cleared — must re-confirm this boot (prev_success=$_PREV_BOOT_SUCCESS)"
 
 # ========================================
 # EARLY SKIA PIPELINE CACHE CLEARING
@@ -1370,7 +1399,7 @@ if [ -n "$_EARLY_CLEAR_REASON" ]; then
   # (uid 10, 11, ...) live at /data/user_de/10/, /data/user_de/11/, etc. and their
   # stale pipeline caches caused mode-mismatch crashes on managed/work-profile devices.
   # Use /data/user_de (all users) with -maxdepth 4 to account for the extra uid level.
-  # service.sh late clear already uses /data/user_de correctly — this now matches it.
+  # service.sh secondary and tertiary clears are patched to match this path.
   find /data/user_de -maxdepth 4 -type d -name "app_skia_pipeline_cache" \
       -exec rm -rf {} + 2>/dev/null || true
   # Fallback: legacy /data/data path (pre-Android-7 / direct-boot disabled devices)
@@ -1433,6 +1462,10 @@ if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
     printf 'DRIVER=%s\n'   "$VK_DRIVER_FOUND"
     printf 'REASONS=%s\n'  "$VK_COMPAT_REASONS"
   } > "$_VK_SCORE_FILE" 2>/dev/null && _VK_SCORE_WRITTEN=true
+  # Write full per-subsystem detail to adreno_vk_compat_full for tools that need
+  # more than the summary score (e.g. advanced diagnostic scripts).
+  # write_compat_state() is defined in common.sh — sourced above.
+  write_compat_state
 
   _FORCE_OVERRIDE_MARKER="/data/local/tmp/adreno_skiavk_force_override"
   _DEGRADE_REASON=""
@@ -1928,18 +1961,37 @@ case "$RENDER_MODE" in
       #
       # Decision logic:
       #   FORCE_SKIAVKTHREADED_BACKEND=y  -> always skiavkthreaded regardless of API.
-      #   FORCE_SKIAVKTHREADED_BACKEND=n  -> skiavkthreaded if SDK >= 34, skiaglthreaded otherwise.
+      #   _PREV_BOOT_SUCCESS=false        -> skiaglthreaded (first boot after install
+      #                                      or after an SF freeze; safe landing).
+      #   _PREV_BOOT_SUCCESS=true
+      #     + SDK >= 34                   -> skiavkthreaded (promoted after confirmed good boot)
+      #     + SDK < 34                    -> skiaglthreaded (API too old for SkiaVkRenderEngine)
+      #
+      # WHY _PREV_BOOT_SUCCESS gate:
+      #   skiavkthreaded causes SF to freeze on some ROMs on the FIRST boot after
+      #   install (Vulkan ICD not yet warmed up, shader cache empty → SF watchdog fires
+      #   → watchdog reboot before service.sh can reset BOOT_ATTEMPTS → counter climbs
+      #   → module auto-disabled → black screen). Using skiaglthreaded on first boot
+      #   avoids the freeze; service.sh writes .boot_success → next boot promotes to
+      #   skiavkthreaded cleanly. Worst-case regression cost: 1 extra skiaglthreaded boot.
       _re_sdk=$(getprop ro.build.version.sdk 2>/dev/null || echo "0")
-      if [ "$FORCE_SKIAVKTHREADED_BACKEND" = "y" ] || [ "$_re_sdk" -ge 34 ] 2>/dev/null; then
+      if [ "$FORCE_SKIAVKTHREADED_BACKEND" = "y" ]; then
         resetprop debug.renderengine.backend skiavkthreaded
-        if [ "$FORCE_SKIAVKTHREADED_BACKEND" = "y" ] && [ "$_re_sdk" -lt 34 ] 2>/dev/null; then
+        if [ "$_re_sdk" -lt 34 ] 2>/dev/null; then
           log_boot "[OK] renderengine.backend=skiavkthreaded (FORCE_SKIAVKTHREADED_BACKEND=y, SDK=${_re_sdk} < 34 — forced)"
         else
-          log_boot "[OK] renderengine.backend=skiavkthreaded (SDK=${_re_sdk})"
+          log_boot "[OK] renderengine.backend=skiavkthreaded (FORCE_SKIAVKTHREADED_BACKEND=y, SDK=${_re_sdk})"
         fi
+      elif [ "$_PREV_BOOT_SUCCESS" = "true" ] && [ "$_re_sdk" -ge 34 ] 2>/dev/null; then
+        resetprop debug.renderengine.backend skiavkthreaded
+        log_boot "[OK] renderengine.backend=skiavkthreaded (prev boot confirmed, SDK=${_re_sdk})"
       else
         resetprop debug.renderengine.backend skiaglthreaded
-        log_boot "[OK] renderengine.backend=skiaglthreaded (SDK=${_re_sdk} < 34, set FORCE_SKIAVKTHREADED_BACKEND=y to override)"
+        if [ "$_PREV_BOOT_SUCCESS" = "false" ]; then
+          log_boot "[OK] renderengine.backend=skiaglthreaded (first boot or prev boot failed — promoting to skiavkthreaded next boot after success)"
+        else
+          log_boot "[OK] renderengine.backend=skiaglthreaded (SDK=${_re_sdk} < 34; set FORCE_SKIAVKTHREADED_BACKEND=y to override)"
+        fi
       fi
       unset _re_sdk
       # ── Dangerous SF props INTENTIONALLY NOT SET via resetprop ──────────────
@@ -2148,7 +2200,7 @@ case "$RENDER_MODE" in
         log_boot "[OK] Old-vendor prop watchdog launched (PID=$!) — re-enforces skiavk if vendor_init overrides it"
 
       else
-        log_boot "Old vendor check: CLEAN (SDK_DELTA=${SDK_DELTA}, vendor/build.prop hwui='${VENDOR_HWUI_PROP:-<none>}')"
+        log_boot "Old vendor check: CLEAN (vendor/build.prop hwui='${VENDOR_HWUI_PROP:-<none>}')"
         # Write clean state — service.sh reads this to skip old-vendor extra work
         printf 'clean\n' > "$_OLD_VENDOR_FILE" 2>/dev/null || true
       fi

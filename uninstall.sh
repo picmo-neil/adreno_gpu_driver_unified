@@ -138,7 +138,7 @@ rm -f  /data/local/tmp/adreno_old_vendor        2>/dev/null || true
 rm -f  /data/local/tmp/adreno_game_exclusion_list.sh 2>/dev/null || true
 # Additional state files not previously removed on uninstall:
 rm -f  /data/local/tmp/adreno_last_render_mode      2>/dev/null || true  # stale mode → reinstall skips cache clear
-rm -f  /data/local/tmp/adreno_skiavk_force_override 2>/dev/null || true  # user-created force-override persists across reinstall
+rm -f  /data/local/tmp/adreno_skiavk_force_override 2>/dev/null || true  # user-created force-override; previously not removed on uninstall
 rm -f  /data/local/tmp/adreno_vk_compat             2>/dev/null || true  # prop_only/incompatible flag → disables skiavk_all force-stop
 rm -f  /data/local/tmp/adreno_config.txt            2>/dev/null || true  # SD mirror read by next post-fs-data boot
 rm -f  /data/local/tmp/adreno_ged_w_*              2>/dev/null || true  # orphaned game-watch marker files

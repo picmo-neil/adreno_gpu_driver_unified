@@ -19,11 +19,15 @@
 load_config() {
   local cfg="$1" _k _v
   [ -f "$cfg" ] || return 1
+  # Pre-compute CR once — avoids spawning a subshell on every config line.
+  # $'\r' is a bash/ksh extension; printf is portable across mksh/ash/toybox sh.
+  local _CR
+  _CR=$(printf '\r')
   while IFS='= ' read -r _k _v; do
     # Skip blank lines and comments
     case "$_k" in '#'*|'') continue ;; esac
     # Strip carriage return from value (Windows line endings)
-    _v="${_v%"$(printf '\r')"}"
+    _v="${_v%"$_CR"}"
     # Normalise boolean keys
     case "$_k" in
       VERBOSE|ARM64_OPT|QGL|PLT|GAME_EXCLUSION_DAEMON|FORCE_SKIAVKTHREADED_BACKEND)
@@ -74,14 +78,18 @@ detect_metamodule() {
   METAMODULE_NAME=""
   METAMODULE_ID=""
 
+  # Pre-compute CR once — same rationale as load_config.
+  local _MCR
+  _MCR=$(printf '\r')
+
   if [ -L "/data/adb/metamodule" ]; then
     META_LINK=$(readlink -f "/data/adb/metamodule" 2>/dev/null)
     if [ -n "$META_LINK" ] && [ -f "$META_LINK/module.prop" ] && \
        [ ! -f "$META_LINK/disable" ] && [ ! -f "$META_LINK/remove" ]; then
       while IFS='=' read -r _mk _mv; do
         case "$_mk" in
-          id)   METAMODULE_ID="${_mv%"$(printf '\r')"}" ;;
-          name) METAMODULE_NAME="${_mv%"$(printf '\r')"}" ;;
+          id)   METAMODULE_ID="${_mv%"$_MCR"}" ;;
+          name) METAMODULE_NAME="${_mv%"$_MCR"}" ;;
         esac
       done < "$META_LINK/module.prop" 2>/dev/null
       METAMODULE_ACTIVE=true
@@ -97,7 +105,7 @@ detect_metamodule() {
         METAMODULE_ID="$meta_id"
         METAMODULE_NAME="$meta_id"
         while IFS='=' read -r _mk _mv; do
-          case "$_mk" in name) METAMODULE_NAME="${_mv%"$(printf '\r')"}"; break ;; esac
+          case "$_mk" in name) METAMODULE_NAME="${_mv%"$_MCR"}"; break ;; esac
         done < "$mod_dir/module.prop" 2>/dev/null
         METAMODULE_ACTIVE=true
         return 0
@@ -539,6 +547,9 @@ detect_kgsl_version() {
 # ============================================================
 # Writes VK compatibility probe results to a persistent state file
 # so other scripts and the WebUI can read them without re-probing.
+# Must be called immediately after probe_vulkan_compat_extended(),
+# which is responsible for setting all VK_*_OK and VK_COMPAT_ISSUES
+# variables that this function writes.
 #
 # File: /data/local/tmp/adreno_vk_compat_full
 # Format: KEY=VALUE (one per line, sourced by shell)
@@ -560,8 +571,10 @@ write_compat_state() {
     echo "KERNEL_VERSION_RAW=${KERNEL_VERSION_RAW:-unknown}"
     echo "KGSL_VERSION_RAW=${KGSL_VERSION_RAW:-unknown}"
     echo "FORCE_SKIAVKTHREADED_BACKEND=${FORCE_SKIAVKTHREADED_BACKEND:-n}"
-    # Issues: replace semicolons with |||  for safe single-line storage
-    printf 'VK_COMPAT_ISSUES=%s\n' "${VK_COMPAT_ISSUES//;/|||}"
+    # Issues: replace semicolons with ||| for safe single-line storage.
+    # NOTE: ${var//pat/rep} is bash-only; use sed for POSIX sh (mksh/sh on Android).
+    printf 'VK_COMPAT_ISSUES=%s\n' \
+      "$(printf '%s' "${VK_COMPAT_ISSUES:-}" | sed 's/;/|||/g' 2>/dev/null)"
   } > "$_state_file" 2>/dev/null || true
   chmod 644 "$_state_file" 2>/dev/null || true
 }
@@ -580,18 +593,27 @@ read_compat_state() {
   # shellcheck disable=SC1090
   . "$_state_file" 2>/dev/null || return 1
   # Restore issues semicolon separator
-  VK_COMPAT_ISSUES="${VK_COMPAT_ISSUES//|||/;}"
+  # NOTE: ${var//pat/rep} is bash-only; use sed for POSIX sh (mksh/sh on Android).
+  VK_COMPAT_ISSUES="$(printf '%s' "${VK_COMPAT_ISSUES:-}" | sed 's/|||/;/g' 2>/dev/null)"
   return 0
 }
 probe_vulkan_compat_extended() {
   VK_COMPAT_SCORE=100
   VK_COMPAT_LEVEL="safe"
   VK_COMPAT_REASONS=""
+  VK_COMPAT_ISSUES=""
   VK_GRALLOC_VERSION="unknown"
   VK_HWVULKAN_PROP=""
   VK_BUILD_DATE_GAP_DAYS=0
   VK_VENDOR_API_LEVEL=0
   VK_DRIVER_FOUND=false
+  # Per-subsystem pass/fail flags populated during checks below;
+  # written to the compat state file by write_compat_state().
+  VK_DRIVER_OK=false
+  VK_GRALLOC_OK=false
+  VK_KGSL_OK=true       # assume OK until RC2 fires
+  VK_EGL_FENCE_OK=true  # assume OK until RC8 fires
+  VK_UBWC_OK=true       # not directly testable from shell; assumed OK
 
   # ── Helper: subtract points and record reason ──────────────────────────────
   _pvk_deduct() {
@@ -637,6 +659,8 @@ probe_vulkan_compat_extended() {
 
   if [ "$VK_DRIVER_FOUND" = "false" ]; then
     _pvk_deduct 50 "RC6: no vulkan.*.so or libvulkan.so found in vendor/system"
+  else
+    VK_DRIVER_OK=true
   fi
 
   # ══════════════════════════════════════════════════════════════════════════
@@ -791,6 +815,13 @@ probe_vulkan_compat_extended() {
       : # gralloc4/AIDL on any SDK or unknown — no deduction
       ;;
   esac
+  # VK_GRALLOC_OK: true when gralloc is adequate for the current system SDK.
+  # If the case above deducted points, gralloc is not compatible enough.
+  # Track this by inspecting whether any RC1 reason was recorded.
+  case "$VK_COMPAT_REASONS" in
+    *RC1:*) VK_GRALLOC_OK=false ;;
+    *)      VK_GRALLOC_OK=true  ;;
+  esac
   unset _sys_sdk
 
   # ══════════════════════════════════════════════════════════════════════════
@@ -856,12 +887,15 @@ probe_vulkan_compat_extended() {
     _kgsl_minor="${_kgsl_ver#*.}"
     _kgsl_minor="${_kgsl_minor%%.*}"
     if [ "$_kgsl_major" -lt 3 ] 2>/dev/null; then
+      VK_KGSL_OK=false
       _pvk_deduct 20 \
         "RC2: KGSL version ${_kgsl_ver} < 3.x — IOCTL table predates Android 9; custom driver IOCTLs return ENOTTY"
     elif [ "$_kgsl_major" -eq 3 ] && [ "$_kgsl_minor" -le 14 ] 2>/dev/null; then
+      VK_KGSL_OK=false
       _pvk_deduct 15 \
         "RC2: KGSL version ${_kgsl_ver} ≤ 3.14 — timeline fence sync absent; Vulkan swapchain deadlock risk"
     elif [ "$_kgsl_major" -eq 3 ] && [ "$_kgsl_minor" -le 18 ] 2>/dev/null; then
+      VK_KGSL_OK=false
       _pvk_deduct 8 \
         "RC2: KGSL version ${_kgsl_ver} ≤ 3.18 — GPU_COMMAND_V3 absent; minor compat risk with custom driver"
     fi
@@ -905,9 +939,11 @@ probe_vulkan_compat_extended() {
   fi
   if [ "$_inf_vapi" -gt 0 ] 2>/dev/null; then
     if [ "$_inf_vapi" -lt 28 ] 2>/dev/null; then
+      VK_EGL_FENCE_OK=false
       _pvk_deduct 15 \
         "RC8: vendor API ${_inf_vapi} < 28 — EGL_ANDROID_native_fence_sync likely absent; skiavkthreaded fence export fails"
     elif [ "$_inf_vapi" -lt 30 ] 2>/dev/null; then
+      VK_EGL_FENCE_OK=false
       _pvk_deduct 7 \
         "RC8: vendor API ${_inf_vapi} < 30 — EGL_ANDROID_native_fence_sync marginal; timeline fence interop may deadlock"
     fi
@@ -947,6 +983,11 @@ probe_vulkan_compat_extended() {
   # Floor and classify
   # ══════════════════════════════════════════════════════════════════════════
   [ "$VK_COMPAT_SCORE" -lt 0 ] && VK_COMPAT_SCORE=0
+
+  # Expose the accumulated deduction reasons under the name that write_compat_state
+  # writes to the state file and the WebUI reads.  VK_COMPAT_REASONS is the
+  # internal accumulator; VK_COMPAT_ISSUES is the public output variable.
+  VK_COMPAT_ISSUES="$VK_COMPAT_REASONS"
 
   if   [ "$VK_COMPAT_SCORE" -ge 70 ] 2>/dev/null; then
     VK_COMPAT_LEVEL="safe"
