@@ -4654,8 +4654,12 @@ async function openDocs() {
 
     try {
         // Show/hide translate button based on language
+        // Chinese (zh-CN / zh-TW) have native built-in docs — no translation needed
+        // English has no other language to translate to
+        // Only 'custom' language shows the translate button
         if (btnTrans) {
-            if (currentLangCode === 'en') {
+            const isBuiltinLang = (currentLangCode === 'en' || currentLangCode === 'zh-CN' || currentLangCode === 'zh-TW');
+            if (isBuiltinLang) {
                 btnTrans.style.display = 'none';
             } else {
                 btnTrans.style.display = 'block';
@@ -4667,8 +4671,13 @@ async function openDocs() {
         let res;
         let fileToLoad = "README.md";
         
-        // If not English, try to load custom_README.md first
-        if (currentLangCode !== 'en') {
+        // Native Chinese docs — load the built-in translated README directly
+        if (currentLangCode === 'zh-CN') {
+            fileToLoad = "README.zh-CN.md";
+        } else if (currentLangCode === 'zh-TW') {
+            fileToLoad = "README.zh-TW.md";
+        } else if (currentLangCode !== 'en') {
+            // For custom/system languages, try custom_README.md
             const customCheck = await exec(`[ -f "${MOD_DOCS}/custom_README.md" ] && echo "exists"`);
             if (customCheck.stdout && customCheck.stdout.includes('exists')) {
                 fileToLoad = "custom_README.md";
@@ -4678,8 +4687,21 @@ async function openDocs() {
         // Try SD location first, then module location
         res = await exec(`cat "${SD_DOCS}/${fileToLoad}" 2>/dev/null || cat "${MOD_DOCS}/${fileToLoad}" 2>/dev/null`);
         
+        // If native Chinese doc not found in custom SD path, fall back to module webroot bundled copy
+        if ((!res || res.errno !== 0 || !res.stdout || !res.stdout.trim()) &&
+            (fileToLoad === "README.zh-CN.md" || fileToLoad === "README.zh-TW.md")) {
+            // Try the webroot directory where the zh docs are bundled
+            res = await exec(`cat "${MOD_PATH}/webroot/${fileToLoad}" 2>/dev/null`);
+        }
+        
         // If custom not found, fallback to English
         if ((!res || res.errno !== 0 || !res.stdout || !res.stdout.trim()) && fileToLoad === "custom_README.md") {
+            res = await exec(`cat "${SD_DOCS}/README.md" 2>/dev/null || cat "${MOD_DOCS}/README.md" 2>/dev/null`);
+            fileToLoad = "README.md";
+        }
+        
+        // Final fallback to English README
+        if (!res || res.errno !== 0 || !res.stdout || !res.stdout.trim()) {
             res = await exec(`cat "${SD_DOCS}/README.md" 2>/dev/null || cat "${MOD_DOCS}/README.md" 2>/dev/null`);
             fileToLoad = "README.md";
         }

@@ -1078,7 +1078,9 @@ fastboot boot /path/to/your/stock_boot.img
 
 ### What Gets Removed
 
-`libCB.so`, `libgpudataproducer.so`, `libkcl.so`, `libkernelmanager.so`, `libllvm-qcom.so`, `libOpenCL.so`, `libOpenCL_adreno.so`
+`libCB.so`, `libgpudataproducer.so`, `libkcl.so`, `libkernelmanager.so`, `libllvm-qcom.so`, `libOpenCL.so`, `libOpenCL_adreno.so`, `libVkLayer_ADRENO_qprofiler.so`
+
+> **Note:** `libVkLayer_ADRENO_qprofiler.so` is the Adreno Vulkan profiler layer. On some OEM ROMs it is loaded by the camera HAL and causes camera failure with a custom driver active.
 
 To restore these libraries, reflash the module ZIP.
 
@@ -1090,11 +1092,57 @@ MODLIB=/data/adb/modules/adreno_gpu_driver_unified/system/vendor/lib64
 rm -f \$MODLIB/libOpenCL.so \$MODLIB/libOpenCL_adreno.so \$MODLIB/libCB.so
 rm -f \$MODLIB/libkcl.so \$MODLIB/libkernelmanager.so
 rm -f \$MODLIB/libgpudataproducer.so \$MODLIB/libllvm-qcom.so
+rm -f \$MODLIB/libVkLayer_ADRENO_qprofiler.so
 "
 # Reboot
 ```
 
 **Note:** If the camera was broken before installing the module, this fix will not help — it only addresses breakage caused by the module's own libraries.
+
+### Android 16 QPR2 and Above — Storage Corruption Notice
+
+On Android 16 QPR2 and above, some users have reported that removing OpenCL libraries can also resolve storage corruption issues. There are two ways to do this:
+
+**Option A — Manual OpenCL removal** (removes only the OpenCL-specific compute libs):
+
+Delete these files from the module overlay at `/data/adb/modules/adreno_gpu_driver_unified/system/vendor/lib64/`:
+
+```
+libOpenCL.so
+libOpenCL_adreno.so
+libCB.so
+libkcl.so
+libkernelmanager.so
+libllvm-qcom.so
+libgpudataproducer.so
+```
+
+**Option B — Quick Fix Camera** (WebUI → Utils → Fix Camera):
+
+Removes a broader set of OpenCL and compute libraries:
+
+```
+libCB.so
+libgpudataproducer.so
+libkcl.so
+libkernelmanager.so
+libllvm-qcom.so
+libOpenCL.so
+libOpenCL_adreno.so
+libVkLayer_ADRENO_qprofiler.so
+```
+
+> **Note on `libVkLayer_ADRENO_qprofiler.so`:** This is the Adreno Vulkan profiler layer. On some OEM ROMs (particularly MIUI/HyperOS, ColorOS, and similar) this library is loaded by the camera HAL and causes camera failure when a custom driver is active. Quick Fix Camera removes it to resolve those cases.
+
+Both options can resolve storage corruption on affected devices. Option A is more conservative. Option B removes more and is the recommended one-tap solution. Reboot after either.
+
+> ⚠️ **Disclaimer:** This applies only to a **small number of specific devices** on Android 16 QPR2 and above. It is **not a universal fix**. Do not remove these libraries expecting storage corruption to be resolved unless you have confirmed this issue on your specific device.
+
+### Vendor GPU Files — Storage Corruption Prevention
+
+Some devices may need to copy `vendor/gpu/` files from their own stock vendor partition into the driver flashing folder before flashing a custom driver. Skipping this step can cause storage corruption on affected devices.
+
+> ⚠️ **Device-specific:** This is not required for all devices. Only do this if you encounter storage corruption after flashing, or if your device is known to require it. Pull the `vendor/gpu/` directory from your device's stock vendor image and place it in the driver flashing folder before flashing.
 
 <a name="fix-screen-recorder"></a>
 ## 28. Screen Recorder Broken
@@ -1318,7 +1366,9 @@ Restores the factory `libgsl.so` from the backup created by the spoofer. Only av
 
 ### Camera Fix
 
-Removes specific OpenCL and compute libraries from the module overlay that are known to break camera on some devices/ROMs: `libCB.so`, `libgpudataproducer.so`, `libkcl.so`, `libkernelmanager.so`, `libllvm-qcom.so`, `libOpenCL.so`, `libOpenCL_adreno.so`.
+Removes specific OpenCL and compute libraries from the module overlay that are known to break camera on some devices/ROMs: `libCB.so`, `libgpudataproducer.so`, `libkcl.so`, `libkernelmanager.so`, `libllvm-qcom.so`, `libOpenCL.so`, `libOpenCL_adreno.so`, `libVkLayer_ADRENO_qprofiler.so`.
+
+`libVkLayer_ADRENO_qprofiler.so` is the Adreno Vulkan profiler layer — on some OEM ROMs this library is loaded by the camera HAL and causes camera failure when a custom driver is active.
 
 Use this if your camera app crashes or fails to open after installing the module. If the camera was broken before installing the module, this won't help. Reflash the module to restore these libraries.
 
