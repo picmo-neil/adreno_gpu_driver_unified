@@ -442,13 +442,12 @@
                         <option value="normal" data-i18n="renderNormal">Normal</option>
                         <option value="skiavk">SkiaVK</option>
                         <option value="skiagl">SkiaGL</option>
-                        <option value="skiavk_all">SkiaVK All</option>
                     </select>
                     <span class="arrow">▼</span>
                 </div>
             </div>
 
-            <!-- Force skiavkthreaded backend toggle — only shown when skiavk/skiavk_all is selected -->
+            <!-- Force skiavkthreaded backend toggle — only shown when skiavk is selected -->
             <div id="forceThreadedRow" class="setting-item ripple-target hover-lift" style="display:none;">
                 <div class="text-col">
                     <div class="setting-header">
@@ -1030,6 +1029,54 @@
                     <span class="colormode-btn-desc" data-i18n="colorModeVividDesc">Full color</span>
                     <div class="colormode-btn-check">✓</div>
                 </button>
+            </div>
+        </div>
+
+        <!-- Per-mode Intensity Sliders — one shown at a time based on active mode -->
+        <div class="colormode-section" id="modeSliderSection">
+            <!-- GLASS: glassiness -->
+            <div id="sliderGlass" class="mode-slider-row" style="display:none;">
+                <div class="mode-slider-label">
+                    <span class="mode-slider-icon">🔮</span>
+                    <span class="mode-slider-name" data-i18n="sliderGlassLabel">Glassiness</span>
+                    <span class="mode-slider-val" id="glassVal">50</span>
+                </div>
+                <input type="range" class="mode-slider" id="sliderGlassInput"
+                       min="0" max="100" step="1" value="50"
+                       aria-label="Glass intensity">
+            </div>
+            <!-- BLUR: blur intensity -->
+            <div id="sliderBlur" class="mode-slider-row" style="display:none;">
+                <div class="mode-slider-label">
+                    <span class="mode-slider-icon">💧</span>
+                    <span class="mode-slider-name" data-i18n="sliderBlurLabel">Blur Intensity</span>
+                    <span class="mode-slider-val" id="blurVal">50</span>
+                </div>
+                <input type="range" class="mode-slider" id="sliderBlurInput"
+                       min="0" max="100" step="1" value="50"
+                       aria-label="Blur intensity">
+            </div>
+            <!-- CLEAR: transparency -->
+            <div id="sliderTransp" class="mode-slider-row" style="display:none;">
+                <div class="mode-slider-label">
+                    <span class="mode-slider-icon">🪟</span>
+                    <span class="mode-slider-name" data-i18n="sliderTranspLabel">Transparency</span>
+                    <span class="mode-slider-val" id="transpVal">50</span>
+                </div>
+                <input type="range" class="mode-slider" id="sliderTranspInput"
+                       min="0" max="100" step="1" value="50"
+                       aria-label="Transparency">
+            </div>
+            <!-- VIVID: vividness -->
+            <div id="sliderVivid" class="mode-slider-row" style="display:none;">
+                <div class="mode-slider-label">
+                    <span class="mode-slider-icon">✨</span>
+                    <span class="mode-slider-name" data-i18n="sliderVividLabel">Vividness</span>
+                    <span class="mode-slider-val" id="vividVal">50</span>
+                </div>
+                <input type="range" class="mode-slider" id="sliderVividInput"
+                       min="0" max="100" step="1" value="50"
+                       aria-label="Vividness">
             </div>
         </div>
 

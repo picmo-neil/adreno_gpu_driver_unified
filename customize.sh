@@ -64,11 +64,10 @@ parse_config() {
         esac ;;
       RENDER_MODE)
         case "$_v" in
-          normal|skiavk|skiagl|skiavk_all) ;;
+          normal|skiavk|skiagl) ;;
           [Nn][Oo][Rr][Mm][Aa][Ll])            _v='normal' ;;
           [Ss][Kk][Ii][Aa][Vv][Kk])            _v='skiavk' ;;
           [Ss][Kk][Ii][Aa][Gg][Ll])            _v='skiagl' ;;
-          [Ss][Kk][Ii][Aa][Vv][Kk]_[Aa][Ll][Ll]) _v='skiavk_all' ;;
           # Legacy aliases — removed as separate modes; fold into canonical names.
           # FORCE_SKIAVKTHREADED_BACKEND=y controls the renderengine.backend detail.
           [Ss][Kk][Ii][Aa][Vv][Kk][Tt][Hh][Rr][Ee][Aa][Dd][Ee][Dd]) _v='skiavk' ;;
@@ -1248,7 +1247,8 @@ fi
 
 if [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
   rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null || true
-  log_only "Stale QGL owner marker removed (will be re-created if QGL=y)"
+  rm -f "/data/vendor/gpu/.adreno_qgl_owner" 2>/dev/null || true
+  log_only "Stale QGL config and owner marker removed (will be re-created at boot if QGL=y)"
 fi
 
 # ========================================
@@ -1389,7 +1389,7 @@ else
   find "$MODPATH" -type f -exec chmod 0644 {} + 2>/dev/null || PERMS_FAILED=$((PERMS_FAILED + 1))
 fi
 
-for script in post-fs-data.sh service.sh uninstall.sh common.sh; do
+for script in post-fs-data.sh service.sh boot-completed.sh uninstall.sh common.sh; do
   if [ -f "$MODPATH/$script" ]; then
     if chmod 0755 "$MODPATH/$script" 2>/dev/null; then
       PERMS_SET=$((PERMS_SET + 1))
@@ -1625,7 +1625,7 @@ fi
 # FIRST boot after a fresh flash because:
 #   1. Vulkan driver validation on a pristine install (zero shader cache) can
 #      time out, crashing SurfaceFlinger.
-#   2. The background force-stop task fires mid-boot on the first boot.
+#   2. Vulkan driver validation takes time on first install.
 #
 # Instead, render mode is applied dynamically via resetprop in post-fs-data.sh
 # AFTER the first-boot safety check. post-fs-data.sh runs before Zygote and
@@ -1755,16 +1755,21 @@ CACHE_CLEANED=0
 
 if [ "$IN_RECOVERY" = "true" ]; then
   ui_print "Cleaning GPU shader caches..."
-  find /data/user_de -type d \( -iname '*shader*' -o -iname '*gpucache*' -o -iname '*graphitecache*' \) -exec rm -rf {} + 2>/dev/null && CACHE_CLEANED=$((CACHE_CLEANED + 1)) || true
+  find /data/user_de -type d \( -iname '*shader*' -o -iname '*gpucache*' -o -iname '*graphitecache*' -o -iname '*pipeline*' \) -exec rm -rf {} + 2>/dev/null && CACHE_CLEANED=$((CACHE_CLEANED + 1)) || true
   sleep 1
-  find /data/data -type d \( -iname '*shader*' -o -iname '*gpucache*' -o -iname '*graphitecache*' -o -iname '*program*cache*' \) -exec rm -rf {} + 2>/dev/null && CACHE_CLEANED=$((CACHE_CLEANED + 1)) || true
+  find /data/data -type d \( -iname '*shader*' -o -iname '*gpucache*' -o -iname '*graphitecache*' -o -iname '*program*cache*' -o -iname '*pipeline*' \) -exec rm -rf {} + 2>/dev/null && CACHE_CLEANED=$((CACHE_CLEANED + 1)) || true
   sleep 1
   find /data/user -type d \( -iname '*shader*' -o -iname '*gpucache*' \) -exec rm -rf {} + 2>/dev/null && CACHE_CLEANED=$((CACHE_CLEANED + 1)) || true
+  rm -rf /data/misc/hwui/ 2>/dev/null && CACHE_CLEANED=$((CACHE_CLEANED + 1)) || true
+  rm -rf /data/misc/gpu/  2>/dev/null && CACHE_CLEANED=$((CACHE_CLEANED + 1)) || true
 else
   ui_print "Conservative cleaning (live system)..."
-  log_only "Using conservative cache cleaning to prevent app crashes"
+  log_only "Using conservative cache cleaning to prevent app crashes on live system"
   find /data/user_de -type d -iname '*shader*' -empty -exec rm -rf {} + 2>/dev/null || true
   find /data/data -type d -iname '*shader*' -empty -exec rm -rf {} + 2>/dev/null || true
+  find /data/user_de -type d -iname '*pipeline*' -empty -exec rm -rf {} + 2>/dev/null || true
+  rm -rf /data/misc/hwui/ 2>/dev/null || true
+  rm -rf /data/misc/gpu/  2>/dev/null || true
   CACHE_CLEANED=$((CACHE_CLEANED + 1))
 fi
 

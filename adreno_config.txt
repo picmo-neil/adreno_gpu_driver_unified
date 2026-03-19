@@ -42,13 +42,11 @@ VERBOSE=n
 #   normal      - Default Android rendering (balanced, most compatible)
 #   skiavk      - Skia with Vulkan backend (better performance on modern GPUs)
 #   skiagl      - Skia with OpenGL backend (better compatibility with older apps/games)
-#   skiavk_all  - Aggressive SkiaVK mode with forced app restarts (maximum performance, may cause issues)
 #
 # Details:
 #   normal      - Standard Android renderer, no modifications
 #   skiavk      - Sets debug.hwui.renderer=skiavk for improved GPU performance
 #   skiagl      - Sets debug.hwui.renderer=skiagl for OpenGL compatibility
-#   skiavk_all  - Forces SkiaVK + threaded backend + force-stops all apps on boot
 #
 # Recommended: normal (change only if you experience rendering issues or want better performance)
 # Advanced users: Try skiavk for performance, skiagl for compatibility
@@ -60,11 +58,11 @@ RENDER_MODE=normal
 # Automatically switches debug.hwui.renderer between skiavk and skiagl
 # depending on whether a game from the exclusion list is currently running.
 #
-# ONLY effective when RENDER_MODE=skiavk or RENDER_MODE=skiavk_all.
+# ONLY effective when RENDER_MODE=skiavk.
 # Has no effect in normal or skiagl modes (ignored silently).
 #
 # WHY THIS EXISTS:
-#   Native-Vulkan games (PUBG, Genshin Impact, CoD Mobile, etc.) create their
+#   games create their
 #   own VkDevice from a native thread. If HWUI also holds a VkDevice (skiavk),
 #   the custom Adreno driver cannot handle two concurrent vkCreateDevice calls
 #   in the same process → SIGSEGV / GPU fault (dual-VkDevice crash).
@@ -87,7 +85,7 @@ RENDER_MODE=normal
 # Packages monitored: defined in game_exclusion_list.sh (Groups 1 and 2).
 # Edit the list via Adreno Manager WebUI → Config → Game Exclusion List.
 #
-# Recommended: y when RENDER_MODE=skiavk or skiavk_all
+# Recommended: y when RENDER_MODE=skiavk
 GAME_EXCLUSION_DAEMON=n
 
 # ========================================
@@ -96,7 +94,7 @@ GAME_EXCLUSION_DAEMON=n
 
 # Force Skiavkthreaded Backend
 # Forces debug.renderengine.backend=skiavkthreaded even on Android < 14 (API 34).
-# On Android 14+, this is set automatically when RENDER_MODE=skiavk or skiavk_all.
+# On Android 14+, this is set automatically when RENDER_MODE=skiavk.
 # On Android < 14: SurfaceFlinger does not implement SkiaVkRenderEngine — strict OEM
 # ROMs (MIUI/HyperOS, OneUI) will BOOTLOOP if an unknown backend string is passed.
 # Only enable if you know your device's SurfaceFlinger supports skiavkthreaded.

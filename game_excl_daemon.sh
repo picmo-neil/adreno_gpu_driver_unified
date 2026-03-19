@@ -621,7 +621,59 @@ logcat -b events -v brief -T 1 2>/dev/null | while IFS= read -r _line; do
   # Only called once per process-start event, not on every poll iteration.
   _game_pkg_excluded "$_pkg" || continue
 
-  # ── Game launch confirmed ─────────────────────────────────────────────────
+  # ── Meta background service type-field filter ─────────────────────────────
+  # ROOT CAUSE OF "renderer stranded on skiagl forever after boot":
+  #   Meta apps (Facebook/Instagram/WhatsApp/etc.) are on the exclusion list
+  #   because their HWUI surfaces exhibit UBWC green line artifacts on skiavk.
+  #   However, Meta's background service/provider/receiver processes run
+  #   PERMANENTLY in /proc — the OS restarts them automatically when they die.
+  #   When the OS restarts such a process, am_proc_start fires with type=service
+  #   (or provider/receiver), NOT type=activity.
+  #
+  #   Without this filter:
+  #     1. OS restarts com.facebook.services (type=service) → am_proc_start fires
+  #     2. _game_pkg_excluded() → true (it's a Meta package)
+  #     3. _game_open() → switches renderer to skiagl
+  #     4. _wait_game_death() waits for PID to exit
+  #     5. OS restarts the process again → new PID → new am_proc_start fires
+  #     6. Steps 1-5 repeat indefinitely → skiagl stranded FOREVER
+  #     7. Additionally: multiple overlapping _wait_game_death sub-daemons
+  #        on different PIDs → active count never reaches 0 → _game_closed()
+  #        never calls _set_renderer back to skiavk
+  #
+  #   FIX: Parse field 5 (type) from the am_proc_start payload.
+  #   At this point in parsing:
+  #     _payload = "user,pid,uid,pkg,type,component"
+  #     _rest    = "pkg,type,component"  (after skipping user, extracting pid, skipping uid)
+  #   Field 5 (type) is the second comma-delimited token in _rest.
+  #   Only proceed if type=activity (user launched the app). Skip all other
+  #   types (service/provider/receiver = OS-internal, not user-visible).
+  #
+  #   NOTE: The startup scan (_startup_scan) already has this Meta filter
+  #   using a simple package-name check (background services have been running
+  #   since before the scan, so they appear but are never user-opened). The
+  #   logcat loop needed the same guard but with the type field for accuracy.
+  case "$_pkg" in
+    com.facebook.*|com.instagram.*|com.whatsapp|com.whatsapp.w4b)
+      # Extract type field from _rest = "pkg,type,component"
+      _meta_type="${_rest#*,}"       # strip "pkg," → "type,component"
+      _meta_type="${_meta_type%%,*}" # get type token → e.g. "activity"
+      _meta_type="${_meta_type## }"; _meta_type="${_meta_type%% }"
+      case "$_meta_type" in
+        activity)
+          # User explicitly opened the Meta app — process this event normally.
+          ;;
+        *)
+          # service / provider / receiver / anything else:
+          # This is an OS-internal restart. Do NOT switch renderer.
+          unset _meta_type
+          continue
+          ;;
+      esac
+      unset _meta_type
+      ;;
+  esac
+  # ── END Meta background service filter ───────────────────────────────────
   echo "[ADRENO-GED] DETECTED: ${_pkg} (PID=${_pid})" \
     > /dev/kmsg 2>/dev/null || true
 

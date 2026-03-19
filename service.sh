@@ -21,7 +21,7 @@ MODDIR="${0%/*}"
 . "$MODDIR/common.sh"
 
 # ── SHARED GAME EXCLUSION LIST ────────────────────────────────────────────────
-# Defines GAME_EXCLUSION_PKGS and _game_pkg_excluded() used in force-stop loops
+# Defines GAME_EXCLUSION_PKGS and _game_pkg_excluded() used by the game exclusion daemon
 # and the game-compatibility daemon. Edit via Adreno Manager WebUI.
 _GAME_EXCL_SD="/sdcard/Adreno_Driver/Config/game_exclusion_list.sh"
 _GAME_EXCL_DATA="/data/local/tmp/adreno_game_exclusion_list.sh"
@@ -51,7 +51,7 @@ else
   #   Fix: switch HWUI to skiagl for Meta apps → GL buffers → no UBWC mismatch.
   #
   # This list is the authoritative source for BOTH behaviors:
-  #   • These packages are NEVER force-stopped during skiavk_all
+  #   • These packages are excluded from renderer switching
   #   • These packages trigger the skiagl renderer switch when running
   GAME_EXCLUSION_PKGS="com.tencent.ig com.pubg.krmobile com.pubg.imobile com.pubg.newstate com.vng.pubgmobile com.rekoo.pubgm com.tencent.tmgp.pubgmhd com.epicgames.* com.activision.callofduty.shooter com.garena.game.codm com.tencent.tmgp.cod com.vng.codmvn com.miHoYo.GenshinImpact com.cognosphere.GenshinImpact com.miHoYo.enterprise.HSRPrism com.HoYoverse.hkrpgoversea com.levelinfinite.hotta com.proximabeta.mfh com.HoYoverse.Nap com.miHoYo.ZZZ com.facebook.katana com.facebook.orca com.facebook.lite com.facebook.mlite com.instagram.android com.instagram.lite com.instagram.barcelona com.whatsapp com.whatsapp.w4b"
   _game_pkg_excluded() { local _p="$1" _e; for _e in $GAME_EXCLUSION_PKGS; do case "$_p" in $_e) return 0;; esac; done; return 1; }
@@ -59,10 +59,9 @@ fi
 unset _GAME_EXCL_SD _GAME_EXCL_DATA _GAME_EXCL_MOD
 # Defensive guard: if none of the sourcing paths succeeded (file missing,
 # unreadable, or sourced file was truncated/corrupted and did not define the
-# function), provide a safe no-op stub so the skiavk_all force-stop subshell
-# and _is_native_vk_game_running() never abort with "command not found" (exit
-# 127 in mksh). The stub disables game-package exclusion silently rather than
-# crashing mid-sequence.
+# function), provide a safe no-op stub so _is_native_vk_game_running() never
+# aborts with "command not found" (exit 127 in mksh). The stub disables game-
+# package exclusion silently rather than crashing mid-sequence.
 if ! command -v _game_pkg_excluded >/dev/null 2>&1; then
   _game_pkg_excluded() { return 1; }
   printf '[ADRENO] service.sh: _game_pkg_excluded() undefined after sourcing — game exclusion disabled (check game_exclusion_list.sh)\n' \
@@ -253,6 +252,12 @@ fi
 
 log_service "Configuration: ARM64_OPT=$ARM64_OPT, QGL=$QGL, PLT=$PLT, RENDER_MODE=$RENDER_MODE, FORCE_SKIAVKTHREADED_BACKEND=$FORCE_SKIAVKTHREADED_BACKEND"
 
+# Unconditional kmsg checkpoint: confirms service.sh reached this point and
+# is visible in `dmesg | grep ADRENO-SVC` regardless of VERBOSE=n.
+# Diagnose silently-killed service.sh by checking for this line in dmesg.
+printf '[ADRENO-SVC] init complete (root=%s render=%s qgl=%s)\n' \
+  "$ROOT_TYPE" "$RENDER_MODE" "$QGL" > /dev/kmsg 2>/dev/null || true
+
 # ========================================
 # WAIT FOR BOOT COMPLETION
 # ========================================
@@ -262,20 +267,34 @@ log_service "Waiting for boot completion..."
 TIMEOUT=300
 ELAPSED=0
 
-if cmd_exists resetprop; then
-  log_service "Using resetprop -w for boot wait (efficient)"
+# ── KernelSU-Next resetprop -w deadlock fix ───────────────────────────────
+# service.sh runs in late_start, which Android fires AFTER sys.boot_completed
+# is already "1". On KernelSU-Next (rifsxd fork), `resetprop -w NAME VALUE`
+# waits for the NEXT CHANGE EVENT rather than returning when the current value
+# already matches the target. Since sys.boot_completed is permanently "1"
+# after boot, `resetprop -w sys.boot_completed 1` blocks indefinitely → the
+# 300s kill-$$ timeout fires → service.sh is killed → QGL CASE A, VK canary
+# write, renderer enforcement, and ALL subsequent work never execute.
+#
+# Fix: check if already booted BEFORE calling resetprop -w. If the prop is
+# already "1" (the normal case for late_start on all root managers), skip the
+# wait entirely. resetprop -w is only needed when service.sh starts before
+# boot_completed — which should not happen in late_start mode but is handled
+# for safety.
+# ─────────────────────────────────────────────────────────────────────────────
+if [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]; then
+  log_service "Boot already completed on service.sh entry (sys.boot_completed=1)"
+  printf '[ADRENO-SVC] boot_completed=1 on entry — skip wait\n' > /dev/kmsg 2>/dev/null || true
+elif cmd_exists resetprop; then
+  log_service "Waiting for boot completion via resetprop -w..."
   (
     sleep $TIMEOUT
     kill $$ 2>/dev/null
   ) &
   TIMEOUT_PID=$!
 
-  # FIX: sys.boot_completed goes ""→"1" at boot_completed, never "0".
-  # resetprop -w NAME VALUE blocks until NAME==VALUE, so we must wait for "1".
-  # The Magisk docs show "0" which appears to be a documentation error —
-  # waiting for "0" returns immediately (prop is already 0 on some ROMs at
-  # service.sh start) or never returns (AOSP ROMs that start it as ""),
-  # causing the 300s timeout to kill $$ and abort ALL of service.sh.
+  # sys.boot_completed goes ""→"1" at boot_completed, never "0".
+  # resetprop -w NAME VALUE blocks until NAME==VALUE.
   resetprop -w sys.boot_completed 1 2>/dev/null
 
   kill $TIMEOUT_PID 2>/dev/null || true
@@ -306,6 +325,244 @@ fi
 sleep 2  # was 5s — 5s window caused black screen on unlock (OEM init.d scripts reset props)
         # (OEM init.d scripts reset props during this window; 2s is sufficient)
 log_service "System services stabilization delay complete (2s; was 5s)"
+# Record boot_completed timestamp for CASE A timing guard below.
+_BOOT_COMPLETED_TS=$(cat /proc/uptime 2>/dev/null | awk '{print int($1)}' || echo "0")
+
+# ========================================
+# EARLY QGL ACTIVATION FAST-PATH
+# ========================================
+# ROOT CAUSE FIX: The full QGL CASE A section runs AFTER the 30s sdcard wait
+# (line ~1568). On a FORCED_SKIAVKTHREADED_BACKEND=y device, post-fs-data
+# writes 0000 on EVERY boot. service.sh must activate it. If the sdcard takes
+# ~30s to mount, CASE A fires at boot_completed+32s — far too late.
+# Symptom: user checks file, sees 0000, thinks fix "didn't work."
+#
+# FIX: Activate here — at boot_completed+2s — immediately after the
+# stabilization sleep, BEFORE the sdcard wait, BEFORE the VK compat report,
+# BEFORE everything else. The full CASE A/B/C verification loop still runs
+# later for repair/drift correction.
+if [ "$QGL" = "y" ]; then
+  # Runs for skiavk and skiagl modes.
+  # boot-completed.sh is PRIMARY activation (sleep 20s → cp → chmod 0644).
+  # At boot+2s (this fast-path), boot-completed.sh is still sleeping.
+  # This fast-path defers to boot-completed.sh for the actual activation.
+  # If boot-completed.sh failed entirely (non-standard ROM, no tool), this
+  # fast-path is the first and only activation attempt before CASE A/B/C.
+  _eq="/data/vendor/gpu/qgl_config.txt"
+
+  # PRE-STAT INJECTION — inject getattr BEFORE calling stat.
+  # Without getattr, stat returns "" → case "" → "File absent" branch →
+  # chmod never runs → QGL stuck at 0000. This is the stuck-at-0000 fix.
+  for _eqb_pre in "/data/adb/ksud" "/data/adb/ksu/bin/ksud"; do
+    [ -f "$_eqb_pre" ] && [ -x "$_eqb_pre" ] || continue
+    "$_eqb_pre" sepolicy patch "allow su vendor_data_file file { getattr setattr relabelfrom relabelto create write unlink open read }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" sepolicy patch "allow su vendor_data_file dir { getattr search read open write add_name remove_name }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" sepolicy patch "allow su same_process_hal_file file { getattr setattr relabelto relabelfrom create write unlink open read }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" sepolicy patch "allow su same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" sepolicy patch "allow su unlabeled file { getattr setattr relabelfrom relabelto create write unlink open read }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" sepolicy patch "allow same_process_hal_file labeledfs filesystem associate" \
+      >/dev/null 2>&1 || true
+    break
+  done
+  for _eqb_pre in "$(command -v magiskpolicy 2>/dev/null)" \
+                  "/data/adb/magisk/magiskpolicy" \
+                  "/data/adb/ksu/bin/magiskpolicy" \
+                  "/data/adb/ap/bin/magiskpolicy"; do
+    [ -z "$_eqb_pre" ] && continue
+    [ -f "$_eqb_pre" ] && [ -x "$_eqb_pre" ] || continue
+    "$_eqb_pre" --live "allow su vendor_data_file file { getattr setattr relabelfrom relabelto create write unlink open read }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" --live "allow su vendor_data_file dir { getattr search read open write add_name remove_name }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" --live "allow su same_process_hal_file file { getattr setattr relabelto relabelfrom create write unlink open read }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" --live "allow su same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" --live "allow su unlabeled file { getattr setattr relabelfrom relabelto create write unlink open read }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" --live "allow same_process_hal_file labeledfs filesystem associate" \
+      >/dev/null 2>&1 || true
+    break
+  done
+  unset _eqb_pre
+
+  _em=$(stat -c '%a' "$_eq" 2>/dev/null || echo "")
+  case "$_em" in
+    "0"|"00"|"000"|"0000")
+      printf '[ADRENO-SVC] EARLY QGL FAST-PATH: mode=0000, checking if cache clear needed\n' \
+        > /dev/kmsg 2>/dev/null || true
+
+      # ── STATE-FILE-CONDITIONAL CACHE CLEAR ────────────────────────────────
+      # ROOT CAUSE FIX: The previous implementation did a full unconditional cache
+      # wipe on EVERY boot whenever mode=0000. This destroyed all compiled shader
+      # caches on every boot. Apps would have to compile ALL shaders
+      # from scratch with QGL settings active. Custom Adreno drivers crash in
+      # vkCreateGraphicsPipelines → QGLCCompileToIRShader during cold full-
+      # recompilation under QGL settings. Hence "skiavk + QGL → all
+      # apps crash" even though "skiavk + LYB QGL works fine" (LYB never
+      # clears caches; apps reuse compiled shaders from previous session → no
+      # cold recompile → no crash).
+      #
+      # FIX: Only clear when settings actually changed (matching the state-file
+      # logic in the SECONDARY CACHE CLEAR section).
+      # On stable boots: PRESERVE existing compiled shader caches. Apps reuse
+      # them → no recompile → no crash.
+      # On changed boots (first QGL enable, config change, mode change): clear.
+      #
+      # The state file is /data/local/tmp/adreno_last_cleared_state (3 lines:
+      # RENDER_MODE / QGL / QGL_CONFIG_HASH). Written by the SECONDARY CACHE
+      # CLEAR section and at end of service.sh.
+      # ──────────────────────────────────────────────────────────────────────
+      _eq_state_file="/data/local/tmp/adreno_last_cleared_state"
+      _eq_prev_mode=""
+      _eq_prev_qgl=""
+      _eq_prev_hash=""
+      if [ -f "$_eq_state_file" ]; then
+        {
+          IFS= read -r _eq_prev_mode
+          IFS= read -r _eq_prev_qgl
+          IFS= read -r _eq_prev_hash
+        } < "$_eq_state_file" 2>/dev/null || true
+      fi
+
+      # Compute current QGL source config hash (same locations as state file writer)
+      _eq_cur_hash="none"
+      for _eq_src in \
+          "/sdcard/Adreno_Driver/Config/qgl_config.txt" \
+          "/data/local/tmp/qgl_config.txt" \
+          "$MODDIR/qgl_config.txt"; do
+        if [ -f "$_eq_src" ]; then
+          _eq_cur_hash=$(cksum "$_eq_src" 2>/dev/null | awk '{print $1}') || _eq_cur_hash="cksum_fail"
+          break
+        fi
+      done
+      unset _eq_src
+
+      _eq_need_clear=false
+      _eq_clear_reason=""
+      # Only clear on render mode change — QGL changes must NOT trigger a clear.
+      # Clearing on QGL change/enable forces cold recompile under QGL settings →
+      # QGLCCompileToIRShader SIGSEGV. See SECONDARY CACHE CLEAR comment above.
+      # first_boot (no state file → _eq_prev_mode="") is implicitly covered:
+      # any configured RENDER_MODE != "" satisfies this condition.
+      if [ "$RENDER_MODE" != "$_eq_prev_mode" ]; then
+        _eq_need_clear=true
+        _eq_clear_reason="render_mode_changed(${_eq_prev_mode:-<none>}→${RENDER_MODE})"
+      fi
+      unset _eq_state_file _eq_prev_mode _eq_prev_qgl _eq_prev_hash
+
+      if [ "$_eq_need_clear" = "true" ]; then
+        log_service "[EARLY QGL] Render mode changed (${_eq_clear_reason}) — clearing post-Zygote app caches"
+        printf '[ADRENO-SVC] EARLY QGL: cache clear triggered — %s\n' \
+          "$_eq_clear_reason" > /dev/kmsg 2>/dev/null || true
+
+        # FULL SWEEP — not marker-based (directory mtime is NOT updated when apps
+        # write new blob files inside existing dirs; -newer marker misses them).
+        # These finds complete instantly if dirs are already empty (e.g., because
+        # boot-completed.sh ran a clear for skiavk mode).
+        find /data/user_de -maxdepth 4 -type d -name "app_skia_pipeline_cache" \
+            -exec rm -rf {} + 2>/dev/null || true
+        find /data/user_de -maxdepth 4 -name "*.shader_journal" -delete 2>/dev/null || true
+        find /data/user_de -maxdepth 4 -type d \( -name "skia_shaders" -o -name "shader_cache" \) \
+            -exec rm -rf {} + 2>/dev/null || true
+        find /data/user_de -maxdepth 4 -name "com.android.opengl.shaders_cache" \
+            -delete 2>/dev/null || true
+        find /data/data -maxdepth 3 -name "com.android.opengl.shaders_cache" \
+            -delete 2>/dev/null || true
+        find /data/user_de -maxdepth 4 -name "com.android.skia.shaders_cache" \
+            -delete 2>/dev/null || true
+        find /data/data -maxdepth 3 -name "com.android.skia.shaders_cache" \
+            -delete 2>/dev/null || true
+        rm -rf /data/misc/hwui/ 2>/dev/null || true
+        rm -rf /data/misc/gpu/  2>/dev/null || true
+        rm -f /data/local/tmp/adreno_post_fs_data_done 2>/dev/null || true
+        log_service "[EARLY QGL] All app graphics caches cleared (full sweep — pipeline, EGL blob, Skia shader, GPU vendor)"
+        # Write state file so next boot recognises stable state and does not
+        # re-trigger a redundant cache clear (perpetual-clear bug fix).
+        _eq_state_write="/data/local/tmp/adreno_last_cleared_state"
+        printf '%s\n%s\n%s\n' "$RENDER_MODE" "$QGL" "$_eq_cur_hash" \
+          > "${_eq_state_write}.tmp" 2>/dev/null && \
+          mv "${_eq_state_write}.tmp" "$_eq_state_write" 2>/dev/null || true
+        unset _eq_state_write
+      else
+        log_service "[EARLY QGL] Stable boot — cache clear SKIPPED (mode=$RENDER_MODE qgl=$QGL hash=$_eq_cur_hash). Caches preserved from last session."
+        printf '[ADRENO-SVC] EARLY QGL: stable boot — cache clear skipped, caches preserved\n' \
+          > /dev/kmsg 2>/dev/null || true
+      fi
+      unset _eq_need_clear _eq_clear_reason _eq_cur_hash
+
+      # ── TIMING FIX: do NOT activate QGL here (boot+2s) ────────────────────
+      # boot-completed.sh sleeps 20s before writing. Activating at boot+2s
+      # short-circuits the 20s window → launcher sees QGL during vkCreateDevice
+      # init → black screen. Leave file at 0000, defer to boot-completed.sh.
+      # CASE A below (~boot+30s, after sdcard wait) has its own timing guard.
+      log_service "[EARLY QGL] 0000 detected: deferring activation to boot-completed.sh (+20s)"
+      printf '[ADRENO-SVC] EARLY QGL: activation deferred — boot-completed.sh handles at +20s\n' \
+        > /dev/kmsg 2>/dev/null || true
+      unset _eq _em
+      ;;
+    "644"|"0644")
+      log_service "[EARLY QGL] File already in ACTIVE MODE (${_em}) — no action needed"
+      ;;
+    "")
+      # stat returned "" — two possible causes:
+      #   1. File truly absent (most likely if injection succeeded above)
+      #   2. getattr still denied (no injection tool available, file exists)
+      # Distinguish by checking file existence directly.
+      if [ -f "$_eq" ]; then
+        # File exists but stat denied — attempt chmod anyway.
+        # Static sepolicy.rule grants setattr for su/magisk on most ROMs.
+        log_service "[EARLY QGL] stat returned '' but file exists — attempting activation (static sepolicy.rule path)"
+        chmod 0644 "$_eq" 2>/dev/null || true
+        chown 0:1000 "$_eq" 2>/dev/null || true
+        chcon u:object_r:same_process_hal_file:s0 "$_eq" 2>/dev/null || \
+          chcon u:object_r:vendor_data_file:s0 "$_eq" 2>/dev/null || true
+        chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu/ 2>/dev/null || true
+        _en=$(stat -c '%a' "$_eq" 2>/dev/null || echo "?")
+        log_service "[EARLY QGL] Result after fallback attempt: mode=${_em}→${_en}"
+        unset _en
+      else
+        log_service "[EARLY QGL] File absent at boot_completed+2s — CASE B will install it"
+      fi
+      ;;
+  esac
+  unset _eq _em
+fi
+# ── END EARLY QGL FAST-PATH ──────────────────────────────────────────────
+# CRITICAL FIX: Reset the boot_attempts counter HERE — immediately after
+# boot_completed — NOT at the end of the script (line ~2649).
+#
+# ROOT CAUSE OF AUTO-DISABLE CYCLE:
+#   - post-fs-data.sh increments boot_attempts on every boot
+#   - service.sh was only resetting it at script END (line ~2649)
+#   - If service.sh crashes/is killed anywhere BEFORE that reset
+#     (during watchdog daemon, game exclusion, QGL handling, etc.),
+#     the counter is NEVER reset
+#   - After 4 consecutive incomplete runs: boot_attempts > 3 →
+#     post-fs-data.sh creates 'disable' → module permanently broken
+#
+# FIX: Reset the counter as soon as service.sh has confirmed:
+#   (a) system booted successfully (sys.boot_completed=1)
+#   (b) stabilization delay passed (sleep 2)
+# This is the earliest safe point. Even if service.sh crashes later
+# (during QGL activation, OEM watchdog, etc.), the counter is already
+# 0 for the next boot — no false-positive auto-disable.
+_EARLY_BOOT_ATT_FILE="/data/local/tmp/adreno_boot_attempts"
+if printf '0\n' > "${_EARLY_BOOT_ATT_FILE}.tmp" 2>/dev/null && \
+   mv "${_EARLY_BOOT_ATT_FILE}.tmp" "$_EARLY_BOOT_ATT_FILE" 2>/dev/null; then
+  log_service "[OK] EARLY boot attempt counter reset (auto-disable protection)"
+  printf '[ADRENO-SVC] boot_attempts reset=0 (early, post-boot-completed)\n' > /dev/kmsg 2>/dev/null || true
+else
+  rm -f "${_EARLY_BOOT_ATT_FILE}.tmp" 2>/dev/null || true
+  log_service "[!] WARNING: Early boot attempt counter reset failed (non-fatal)"
+fi
+unset _EARLY_BOOT_ATT_FILE
+# ── END EARLY BOOT COUNTER RESET ─────────────────────────────────────────
 
 # ==========================================================================
 # BLOCK F — VK compat report to boot log
@@ -373,23 +630,48 @@ rm -f "$MODDIR/.first_boot_pending" 2>/dev/null || true
 # use the configured renderer. On next boot, system.prop delivers the correct
 # renderer to EVERY process including SystemUI from first init.
 #
-# skiavk_all: the background subshell (launched below) runs the tertiary
-#   pipeline cache clear and confirms the renderer prop is live.
+# skiavk mode: props-only enforcement. No force-stops ever.
 #   SystemUI is NOT crashed in any mode (stability fix — KGSL corruption prevention).
 # ========================================
-# Early enforcement: set debug.hwui.renderer via resetprop at boot+5s.
-# debug.renderengine.backend is NOT set here — SF is already running and OEM
-# addChangeCallback handlers would crash it.  Backend is set exclusively in
+# Early enforcement: set debug.hwui.renderer + Vulkan gate props via resetprop
+# at boot+2s — immediately after the stabilization sleep.
+#
+# WHY ro.hwui.use_vulkan IS SET HERE (user request + correctness):
+#   MIUI/HyperOS checks ro.hwui.use_vulkan as a gate BEFORE reading
+#   debug.hwui.renderer. If a vendor_init late_start service reset it between
+#   post-fs-data.sh and now, any app opened at boot+2s ignores skiavk entirely.
+#   Re-enforcing it here (and in the live resetprop block at ~boot+35s) ensures
+#   the gate is open for ALL new processes from the first user interaction onward.
+#
+# Props set here:
+#   debug.hwui.renderer     — per-process HWUI pipeline (skiavk/skiagl)
+#   ro.hwui.use_vulkan      — MIUI/HyperOS/Samsung gate for HWUI Vulkan path
+#   ro.config.vulkan.enabled — Samsung One UI explicit Vulkan enable flag
+#   persist.vendor.vulkan.enable — MIUI/HyperOS vendor Vulkan enable
+#   persist.sys.force_sw_gles — ensure HW GLES is used, not software fallback
+#
+# NOTE: debug.renderengine.backend is NOT set here — SF is already running and
+# OEM addChangeCallback handlers would crash it. Backend is set exclusively in
 # post-fs-data.sh before SF starts, via resetprop, and persists via system.prop.
 if cmd_exists resetprop; then
   case "$RENDER_MODE" in
-    skiavk|skiavk_all)
+    skiavk)
       resetprop debug.hwui.renderer skiavk 2>/dev/null || true
-      log_service "[OK] Early enforcement: skiavk hwui.renderer set (renderengine.backend pre-SF only)"
+      # Vulkan enable gates — set at boot+2s so all apps opened from home screen
+      # benefit immediately, not just at the later live resetprop run (~boot+35s).
+      resetprop ro.hwui.use_vulkan true 2>/dev/null || true
+      resetprop ro.config.vulkan.enabled true 2>/dev/null || true
+      resetprop persist.vendor.vulkan.enable 1 2>/dev/null || true
+      resetprop persist.sys.force_sw_gles 0 2>/dev/null || true
+      # Graphite must be off — custom Adreno lacks VK_KHR_dynamic_rendering
+      resetprop debug.hwui.use_skia_graphite false 2>/dev/null || true
+      log_service "[OK] Early enforcement (boot+2s): skiavk hwui.renderer + ro.hwui.use_vulkan + Vulkan gates set"
       ;;
     skiagl)
       resetprop debug.hwui.renderer skiagl 2>/dev/null || true
-      log_service "[OK] Early enforcement: skiagl hwui.renderer set (renderengine.backend pre-SF only)"
+      resetprop persist.sys.force_sw_gles 0 2>/dev/null || true
+      resetprop debug.hwui.use_skia_graphite false 2>/dev/null || true
+      log_service "[OK] Early enforcement (boot+2s): skiagl hwui.renderer set"
       ;;
   esac
 fi
@@ -450,15 +732,12 @@ fi
 #   debug.hwui.renderer=skiavk/skiagl to EVERY process including SystemUI from
 #   first init — no crash ever needed.
 #
-# FIX: Remove the crash entirely for ALL modes including skiavk_all.
-# skiavk/skiagl: post-fs-data.sh background task (fired ~boot+15s) force-stops
-#   3rd-party apps so they cold-start with the new renderer. service.sh only
-#   re-enforces props here (belt-and-suspenders against OEM override).
-# skiavk_all: background subshell below additionally force-stops system UI packages.
-# SystemUI is NOT crashed in any mode. Next reboot: all procs get the renderer from init.
+# FIX: Remove the crash entirely for ALL modes.
+# props-only enforcement for all modes. No force-stops in service.sh.
+# SystemUI is NOT crashed in any mode. Next reboot: all procs get renderer from init.
 case "$RENDER_MODE" in
-  skiavk|skiagl|skiavk_all)
-    log_service "[OK] $RENDER_MODE: renderer prop enforced via resetprop at boot+2s; SystemUI NOT actively crashed (GMS/accounts protected)"
+  skiavk|skiagl)
+    log_service "[OK] $RENDER_MODE: renderer prop enforced via resetprop at boot+2s; SystemUI NOT crashed (GMS/accounts protected)"
     ;;
 esac
 
@@ -539,7 +818,7 @@ esac
 #   "0" = no listed games running, renderer = restore target
 # ========================================
 
-if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
+if [ "$RENDER_MODE" = "skiavk" ]; then
 # ========================================
 # GAME EXCLUSION DAEMON STATUS CHECK
 # ========================================
@@ -564,36 +843,67 @@ fi
 
 
 # ========================================
-# SECONDARY SKIA PIPELINE CACHE CLEARING
+# SECONDARY GRAPHICS CACHE CLEARING
 # ========================================
-# post-fs-data.sh performs the PRIMARY cache clear before Zygote starts.
-# This is a belt-and-suspenders secondary pass that:
+# post-fs-data.sh:
+#   - Always clears /data/misc/hwui/ (stale HWUI cache → SF hang → ROM logo freeze)
+#   - Clears /data/misc/gpu/ and per-app caches only on mode change
+# This is a belt-and-suspenders secondary pass for /data/misc/gpu/ + per-app:
 #   1. Catches any caches created/modified between post-fs-data and here
 #   2. Covers the skip_mount code path (post-fs-data exits early, no clear)
 #   3. Runs before the sdcard wait so it still fires early in service.sh
-#
-# Uses the same mode-change detection: compare config RENDER_MODE against
-# the last mode recorded in _LAST_MODE_FILE by the previous service.sh run.
-# If post-fs-data.sh already cleared (same boot), these dirs are empty and
-# the find/rm calls complete instantly — no overhead.
+# /data/misc/hwui/ is intentionally NOT re-cleared here (post-fs-data handles it).
 # ========================================
 
-_SVC_EARLY_LAST_MODE_FILE="/data/local/tmp/adreno_last_render_mode"
-_SVC_EARLY_LAST_MODE=""
-if [ -f "$_SVC_EARLY_LAST_MODE_FILE" ]; then
-  { IFS= read -r _SVC_EARLY_LAST_MODE; } < "$_SVC_EARLY_LAST_MODE_FILE" 2>/dev/null || _SVC_EARLY_LAST_MODE=""
+_SVC_STATE_FILE="/data/local/tmp/adreno_last_cleared_state"
+_SVC_PREV_MODE=""
+_SVC_PREV_QGL=""
+_SVC_PREV_HASH=""
+if [ -f "$_SVC_STATE_FILE" ]; then
+  {
+    IFS= read -r _SVC_PREV_MODE
+    IFS= read -r _SVC_PREV_QGL
+    IFS= read -r _SVC_PREV_HASH
+  } < "$_SVC_STATE_FILE" 2>/dev/null || true
 fi
 
-if [ "$RENDER_MODE" != "$_SVC_EARLY_LAST_MODE" ]; then
+# Compute current QGL config hash (same method as post-fs-data.sh)
+_SVC_CUR_HASH="none"
+if [ "$QGL" = "y" ]; then
+  for _svc_qsrc in \
+      "/sdcard/Adreno_Driver/Config/qgl_config.txt" \
+      "/data/local/tmp/qgl_config.txt" \
+      "$MODDIR/qgl_config.txt"; do
+    if [ -f "$_svc_qsrc" ]; then
+      _SVC_CUR_HASH=$(cksum "$_svc_qsrc" 2>/dev/null | awk '{print $1}') || _SVC_CUR_HASH="cksum_fail"
+      break
+    fi
+  done
+  unset _svc_qsrc
+fi
+
+_SVC_EARLY_CLEAR_REASON=""
+# Only clear on render mode change — QGL changes must NOT trigger a clear.
+# Clearing on QGL change forces cold shader recompile under QGL settings →
+# QGLCCompileToIRShader SIGSEGV (confirmed bug in custom Adreno drivers).
+# LYB never clears on QGL change and works fine: apps reuse existing cached
+# pipeline blobs which remain format-valid regardless of QGL state.
+# first_boot (no state file → _SVC_PREV_MODE="") is implicitly covered:
+# any configured RENDER_MODE != "" satisfies this condition.
+if [ "$RENDER_MODE" != "$_SVC_PREV_MODE" ]; then
+  _SVC_EARLY_CLEAR_REASON="mode_change(${_SVC_PREV_MODE:-<none>}→${RENDER_MODE})"
+fi
+
+if [ -n "$_SVC_EARLY_CLEAR_REASON" ]; then
   log_service "========================================"
   log_service "SECONDARY CACHE CLEAR (service.sh early pass):"
-  log_service "  '${_SVC_EARLY_LAST_MODE:-<none>}' → '$RENDER_MODE'"
+  log_service "  Reason : $_SVC_EARLY_CLEAR_REASON"
+  log_service "  Prev state: mode=${_SVC_PREV_MODE:-<none>} qgl=${_SVC_PREV_QGL:-<none>} hash=${_SVC_PREV_HASH:-<none>}"
+  log_service "  Curr state: mode=${RENDER_MODE} qgl=${QGL} hash=${_SVC_CUR_HASH}"
   log_service "  Removing any caches not caught by post-fs-data.sh early clear."
   log_service "========================================"
   rm -rf /data/misc/hwui/ 2>/dev/null || true
-  # DEPTH NOTE: /data/user_de/<uid>/<pkg>/code_cache/app_skia_pipeline_cache/ is 4 levels
-  # deep from /data/user_de. Using /data/user_de/0 with -maxdepth 3 only covers the primary
-  # user; work-profile UIDs (10, 11, ...) at /data/user_de/10/ etc. were silently skipped.
+  rm -rf /data/misc/gpu/ 2>/dev/null || true
   find /data/user_de -maxdepth 4 -type d -name "app_skia_pipeline_cache" \
       -exec rm -rf {} + 2>/dev/null || true
   find /data/data -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
@@ -601,912 +911,24 @@ if [ "$RENDER_MODE" != "$_SVC_EARLY_LAST_MODE" ]; then
   find /data/user_de -maxdepth 4 -name "*.shader_journal" -delete 2>/dev/null || true
   find /data/user_de -maxdepth 4 -type d \( -name "skia_shaders" -o -name "shader_cache" \) \
       -exec rm -rf {} + 2>/dev/null || true
-  log_service "[OK] Secondary Skia cache clear complete (mode changed)"
+  find /data/user_de -maxdepth 4 -name "com.android.opengl.shaders_cache" \
+      -delete 2>/dev/null || true
+  find /data/data -maxdepth 3 -name "com.android.opengl.shaders_cache" \
+      -delete 2>/dev/null || true
+  find /data/user_de -maxdepth 4 -name "com.android.skia.shaders_cache" \
+      -delete 2>/dev/null || true
+  find /data/data -maxdepth 3 -name "com.android.skia.shaders_cache" \
+      -delete 2>/dev/null || true
+  log_service "[OK] Secondary full graphics cache clear complete."
+  # Update state file to reflect this secondary clear
+  printf '%s\n%s\n%s\n' "$RENDER_MODE" "$QGL" "$_SVC_CUR_HASH" \
+    > "$_SVC_STATE_FILE" 2>/dev/null || true
 else
-  log_service "SECONDARY CACHE CLEAR: mode unchanged ('$RENDER_MODE') — caches valid, preserved."
+  log_service "SECONDARY CACHE CLEAR: state matches (mode=$RENDER_MODE qgl=$QGL) — caches valid, preserved."
+  log_service "  (Skipping prevents shader-recompile OOM on Facebook/GMS.)"
 fi
-unset _SVC_EARLY_LAST_MODE _SVC_EARLY_LAST_MODE_FILE
+unset _SVC_PREV_MODE _SVC_PREV_QGL _SVC_PREV_HASH _SVC_CUR_HASH _SVC_EARLY_CLEAR_REASON _SVC_STATE_FILE
 
-# ========================================
-# SKIAVK_ALL: RENDERER ACTIVATION + CACHE VERIFICATION
-# ========================================
-# skiavk_all ensures the Vulkan renderer is fully active:
-#   - resetprop already set debug.hwui.renderer=skiavk at boot_completed+2s
-#   - Background subshell runs at boot_completed+35s (5s stabilization + 30s settle):
-#       Step 0: Tertiary Skia/HWUI pipeline cache clear (belt-and-suspenders)
-#       Step 1: SystemUI NOT crashed — stability fix (prevents GMS account loss +
-#               Android watchdog reboot on custom ROMs)
-#       Step 2: Throttled force-stop all 3rd-party apps (150ms gap, GMS/Meta excluded)
-#               Makes background apps cold-start with skiavk on next user-open
-#       Step 3: Throttled force-stop non-critical system UI packages (150ms gap)
-#               Settings, OEM UI etc — safe to restart; telephony/BT/NFC excluded
-#       Step 4: am kill-all intentionally NOT used (concurrent KGSL teardown = corruption)
-#
-# Throttle rationale (Steps 2 & 3): each app holds /dev/kgsl-3d0 FDs. KGSL runs
-# per-FD context teardown on process death. Killing hundreds simultaneously races
-# KGSL's context allocation table on custom Adreno drivers → corrupted entries →
-# vkCreateDevice fails → ALL apps crash on open forever until reboot.
-# 150ms between kills = serial teardown = safe.
-#
-# Execution model:
-#   - Runs in a detached background subshell (does NOT block service.sh).
-#   - Launched immediately after the 5s stabilization delay, BEFORE sdcard wait.
-# ========================================
-
-if [ "$RENDER_MODE" = "skiavk_all" ]; then
-  log_service "========================================"
-  log_service "SKIAVK_ALL: Launching background renderer verification subshell"
-  log_service "========================================"
-
-  (
-    # Extra stabilization delay — let the home screen fully draw first.
-    # INCREASED from 15s to 30s:
-    #   GMS AccountManager, Play Services, and Google Services Framework take
-    #   15–25s to fully bind all their Binder interfaces on MIUI/HyperOS and
-    #   Samsung One UI (standard AOSP is faster at ~10s, but Qualcomm/OEM
-    #   SystemUI plugins delay GMS binding further). If force-stops fire while
-    #   GMS is mid-initialization, apps that call GMS APIs immediately get
-    #   RemoteException → crash on launch. 30s from boot_completed+5s (i.e.
-    #   boot_completed+35s total) guarantees GMS is fully initialized on all
-    #   tested ROMs before any app is force-stopped.
-    sleep 30
-
-    _skia_log() {
-      echo "[ADRENO-SKIAVK_ALL] $1" >> "$SERVICE_LOG" 2>/dev/null || true
-    }
-
-    _skia_log "========================================"
-    _skia_log "Force-stop sequence starting"
-    _skia_log "Time since service.sh start: approx $(( ${ELAPSED:-0} + 32 ))s"
-    _skia_log "========================================"
-
-
-    # ── OLD VENDOR PRE-CHECK: Re-apply skiavk before the safety check ────────
-    # On old-vendor ROMs, vendor_init's on-property:sys.boot_completed triggers
-    # may fire BETWEEN our service.sh resetprop (+2s) and NOW (+32s), resetting
-    # debug.hwui.renderer back to skiagl. If we don't re-apply here, the safety
-    # check below sees "skiagl" and exits, losing the entire skiavk_all session.
-    # Fix: read old-vendor flag, re-apply if needed BEFORE the check runs.
-    _ov_pre_state=""
-    if [ -f "/data/local/tmp/adreno_old_vendor" ]; then
-      { IFS= read -r _ov_pre_state; } < "/data/local/tmp/adreno_old_vendor" 2>/dev/null || _ov_pre_state=""
-    fi
-    if [ -n "$_ov_pre_state" ] && [ "$_ov_pre_state" != "clean" ]; then
-      # Old vendor detected — ensure prop is skiavk before the check
-      _pre_cur=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
-      if [ "$_pre_cur" != "skiavk" ] && command -v resetprop >/dev/null 2>&1; then
-        resetprop debug.hwui.renderer skiavk 2>/dev/null || true
-        resetprop ro.hwui.use_vulkan true 2>/dev/null || true
-        _skia_log "[OLD VENDOR] Pre-check re-apply: prop was '${_pre_cur}' (vendor_init override), force-set to skiavk"
-      fi
-      unset _pre_cur
-    fi
-    unset _ov_pre_state
-    # ── END OLD VENDOR PRE-CHECK ─────────────────────────────────────────────
-
-    # ── SAFETY CHECK: Verify skiavk props are actually active ───────────────
-    # On first boot after install, post-fs-data.sh defers skiavk (safety for
-    # pristine shader cache). If props are not set yet, running force-stops
-    # would kill apps for no reason — they would just restart with normal mode.
-    # Only proceed if debug.hwui.renderer is already set to skiavk.
-    _CURRENT_RENDERER=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
-    if [ "$_CURRENT_RENDERER" != "skiavk" ]; then
-      _skia_log "========================================"
-      _skia_log "[!] SAFETY ABORT: debug.hwui.renderer='$_CURRENT_RENDERER' (expected 'skiavk')"
-      _skia_log "skiavk props not active this boot (first boot safety or prop not set)."
-      _skia_log "Force-stop sequence SKIPPED — apps are using normal renderer."
-      _skia_log "skiavk_all will fully activate on next boot once resetprop sets the prop."
-      _skia_log "========================================"
-      exit 0
-    fi
-    unset _CURRENT_RENDERER
-    _skia_log "[OK] Confirmed: debug.hwui.renderer=skiavk — prop active this boot"
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # VULKAN FUNCTIONAL PROBE — loophole fix for "skiavk_all crashes all apps"
-    # ══════════════════════════════════════════════════════════════════════════
-    #
-    # ROOT CAUSE of "skiavk works but skiavk_all crashes every app":
-    #   Setting debug.hwui.renderer=skiavk only tells HWUI to TRY Vulkan.
-    #   On some ROMs/devices, HWUI reads the prop, attempts vkCreateInstance,
-    #   gets VK_ERROR_INITIALIZATION_FAILED or VK_ERROR_INCOMPATIBLE_DRIVER
-    #   (incomplete Vulkan stack, wrong ABI, missing vulkan.*.so, KGSL API
-    #   mismatch), and silently falls back to GL. The prop stays "skiavk" but
-    #   apps are actually running on GL.
-    #
-    #   The skiavk_all force-stop then:
-    #     1. Passes the prop check (prop IS "skiavk" — we set it)
-    #     2. Clears GL shader caches (Step 0) — caches are now GONE
-    #     3. Force-stops all apps — they restart WITHOUT their GL caches
-    #     4. Each restarting app: tries Vulkan → fails → GL fallback
-    #     5. GL shader recompile starts from scratch for EVERY app simultaneously
-    #     6. Combined OOM from mass concurrent recompile → cascade crashes
-    #     7. SYMPTOM: "every app crashes immediately when opened after boot"
-    #
-    #   With skiavk (no _all): no force-stop → no cache-clear-then-restart
-    #   → no OOM cascade → apps open fine.
-    #
-    # THE LOOPHOLE FIX:
-    #   Use dumpsys gfxinfo on the already-running SystemUI as a Vulkan
-    #   canary. SystemUI is the first HWUI process and has been running since
-    #   early boot. If it's NOT on "Skia (Vulkan)" despite the prop being set,
-    #   Vulkan init failed on this ROM/device. Abort the force-stop entirely.
-    #   Persist the result so future boots skip the probe and go straight to
-    #   prop-only mode (no force-stop, no crash).
-    #
-    # SECONDARY LOOPHOLE: ro.hwui.use_vulkan gate
-    #   Some custom ROMs set ro.hwui.use_vulkan=false explicitly in their
-    #   device tree. HWUI checks this flag BEFORE trying vkCreateInstance —
-    #   if false, it skips Vulkan entirely regardless of debug.hwui.renderer.
-    #   This is detectable and provides a fast-path abort.
-    #
-    # TERTIARY LOOPHOLE: persistent compat flag file
-    #   Once we detect incompatibility (either via the probe or a crash
-    #   pattern), we write a flag that survives reboots. On subsequent boots
-    #   the force-stop subshell reads the flag and exits immediately, avoiding
-    #   the crash even before dumpsys is available.
-    # ══════════════════════════════════════════════════════════════════════════
-
-    _VK_COMPAT_FILE="/data/local/tmp/adreno_vk_compat"
-    _VK_COMPAT=""
-    [ -f "$_VK_COMPAT_FILE" ] && { IFS= read -r _VK_COMPAT; } < "$_VK_COMPAT_FILE" 2>/dev/null
-    _VK_COMPAT="${_VK_COMPAT:-}"
-
-    # ══ BLOCK D: Structural VK compatibility probe ═══════════════════════════
-    # Supplements the existing runtime loopholes (Loophole 1-4) with structural
-    # checks that run BEFORE the 30s dumpsys canary. Allows early exit if the
-    # device is structurally incompatible, avoiding wasted force-stops.
-    # ═════════════════════════════════════════════════════════════════════════
-    run_vk_compat_full_probe() {
-      local _log_fn="${1:-_skia_log}"
-      _VK_STRUCT_PASS=true
-
-      # Check 1: score file from post-fs-data
-      local _score_level="" _score_num=100
-      if [ -f "/data/local/tmp/adreno_vk_compat_score" ]; then
-        while IFS='=' read -r _k _v; do
-          case "$_k" in
-            LEVEL) _score_level="${_v}" ;;
-            SCORE) _score_num="${_v}"   ;;
-          esac
-        done < "/data/local/tmp/adreno_vk_compat_score" 2>/dev/null
-        unset _k _v
-      fi
-      case "$_score_level" in
-        blocked)
-          "${_log_fn}" "[VK-STRUCT] score=${_score_num} BLOCKED — structural probe FAIL"
-          _VK_STRUCT_PASS=false
-          return 1
-          ;;
-        risky)
-          "${_log_fn}" "[VK-STRUCT] score=${_score_num} RISKY — deferring to runtime probe"
-          ;;
-      esac
-
-      # Check 2: auto-degrade marker written by post-fs-data compat gate
-      if [ -f "/data/local/tmp/adreno_skiavk_degraded" ]; then
-        local _fail_reason=""
-        { IFS= read -r _fail_reason; } < "/data/local/tmp/adreno_skiavk_degraded" 2>/dev/null
-        "${_log_fn}" "[VK-STRUCT] auto-degrade marker: ${_fail_reason}"
-        "${_log_fn}" "  post-fs-data degraded to skiagl this boot — force-stop ABORTED"
-        _VK_STRUCT_PASS=false
-        return 1
-      fi
-
-      # Check 3: ro.hardware.vulkan current value — try last-ditch resetprop
-      local _hwvk
-      _hwvk=$(getprop ro.hardware.vulkan 2>/dev/null || echo "")
-      case "$_hwvk" in
-        adreno|"") ;;
-        *)
-          if [ -f "/vendor/lib64/hw/vulkan.adreno.so" ] || \
-             [ -f "/vendor/lib/hw/vulkan.adreno.so" ]; then
-            resetprop ro.hardware.vulkan adreno 2>/dev/null && \
-              "${_log_fn}" "[VK-STRUCT] ro.hardware.vulkan late-patched to 'adreno'" || \
-              { _VK_STRUCT_PASS=false
-                "${_log_fn}" "[VK-STRUCT] ro.hardware.vulkan='${_hwvk}' — ICD fix failed"
-              }
-          else
-            "${_log_fn}" "[VK-STRUCT] ro.hardware.vulkan='${_hwvk}' and no vulkan.adreno.so — ICD broken"
-            _VK_STRUCT_PASS=false
-          fi
-          ;;
-      esac
-      unset _hwvk
-
-      # Check 4: KGSL device accessible
-      if [ ! -e "/dev/kgsl-3d0" ]; then
-        "${_log_fn}" "[VK-STRUCT] /dev/kgsl-3d0 absent — no GPU device; Vulkan impossible"
-        _VK_STRUCT_PASS=false
-        return 1
-      fi
-
-      # Check 5: gralloc mapper service alive (HAL crash = swapchain alloc failure)
-      local _mapper_alive=false
-      service check android.hardware.graphics.allocator.IAllocator/default \
-          >/dev/null 2>&1 && _mapper_alive=true
-      [ "$_mapper_alive" = "false" ] && \
-          service check "android.hardware.graphics.mapper@4.0::IMapper/default" \
-          >/dev/null 2>&1 && _mapper_alive=true
-      [ "$_mapper_alive" = "false" ] && \
-          service check "android.hardware.graphics.mapper@3.0::IMapper/default" \
-          >/dev/null 2>&1 && _mapper_alive=true
-      [ "$_mapper_alive" = "false" ] && \
-          service check "android.hardware.graphics.mapper@2.1::IMapper/default" \
-          >/dev/null 2>&1 && _mapper_alive=true
-      if [ "$_mapper_alive" = "false" ]; then
-        "${_log_fn}" "[VK-STRUCT] gralloc mapper NOT registered — HAL likely crashed"
-        "${_log_fn}" "  Deferring to runtime dumpsys probe for final decision"
-      fi
-      unset _mapper_alive
-
-      "${_log_fn}" "[VK-STRUCT] structural probe PASS (score=${_score_num})"
-      return 0
-    }
-    # ══ END BLOCK D FUNCTION ═════════════════════════════════════════════════
-
-    # ── BLOCK D CALL SITE: Run structural probe before Loophole 1 ────────────
-    run_vk_compat_full_probe "_skia_log"
-    if [ "$_VK_STRUCT_PASS" = "false" ]; then
-      _skia_log "========================================"
-      _skia_log "[!] STRUCTURAL VK PROBE FAILED — force-stop ABORTED"
-      _skia_log "    skiavk PROP remains active — new apps will attempt Vulkan."
-      _skia_log "    To retry: rm /data/local/tmp/adreno_vk_compat_score && reboot"
-      _skia_log "========================================"
-      printf 'prop_only\n' > "${_VK_COMPAT_FILE}.tmp" 2>/dev/null && mv "${_VK_COMPAT_FILE}.tmp" "$_VK_COMPAT_FILE" 2>/dev/null || true
-      unset _VK_STRUCT_PASS
-      exit 0
-    fi
-    unset _VK_STRUCT_PASS
-
-    # ── Loophole 1: Persisted ROM incompatibility flag from a previous boot ──
-    if [ "$_VK_COMPAT" = "prop_only" ] || [ "$_VK_COMPAT" = "incompatible" ]; then
-      _skia_log "========================================"
-      _skia_log "[!] VK COMPAT: Persisted flag='$_VK_COMPAT' from a previous boot."
-      _skia_log "    This ROM/device cannot safely run skiavk_all force-stop."
-      _skia_log "    skiavk PROP is still active — Vulkan runs for all NEW apps."
-      _skia_log "    Force-stop sequence SKIPPED (prevents mass shader-recompile OOM)."
-      _skia_log "    To retry: 'rm $_VK_COMPAT_FILE' then reboot."
-      _skia_log "========================================"
-      unset _VK_COMPAT _VK_COMPAT_FILE
-      exit 0
-    fi
-
-    # ── Loophole 2: ro.hwui.use_vulkan=false — ROM explicitly disables Vulkan ─
-    _RO_HWUI_VK=$(getprop ro.hwui.use_vulkan 2>/dev/null || echo "")
-    if [ "$_RO_HWUI_VK" = "false" ] || [ "$_RO_HWUI_VK" = "0" ]; then
-      _skia_log "========================================"
-      _skia_log "[!] VK COMPAT FAIL: ro.hwui.use_vulkan='$_RO_HWUI_VK'"
-      _skia_log "    ROM device tree explicitly disables HWUI Vulkan."
-      _skia_log "    HWUI ignores debug.hwui.renderer=skiavk when this is false."
-      _skia_log "    Force-stop ABORTED — apps would restart on GL, no VK gain."
-      _skia_log "    Persisting 'prop_only' flag — future boots skip this subshell."
-      _skia_log "========================================"
-      printf 'prop_only\n' > "${_VK_COMPAT_FILE}.tmp" 2>/dev/null && mv "${_VK_COMPAT_FILE}.tmp" "$_VK_COMPAT_FILE" 2>/dev/null || true
-      unset _RO_HWUI_VK _VK_COMPAT _VK_COMPAT_FILE
-      exit 0
-    fi
-    unset _RO_HWUI_VK
-
-    # ── Loophole 3: Vulkan driver .so existence check ────────────────────────
-    _VK_LIB_FOUND=false
-    for _vl in /vendor/lib64/hw/vulkan.*.so /vendor/lib/hw/vulkan.*.so \
-               /system/lib64/hw/vulkan.*.so /system/lib/hw/vulkan.*.so \
-               /vendor/lib64/libvulkan.so /system/lib64/libvulkan.so; do
-      [ -f "$_vl" ] && { _VK_LIB_FOUND=true; break; }
-    done
-    if [ "$_VK_LIB_FOUND" = "false" ]; then
-      _skia_log "========================================"
-      _skia_log "[!] VK COMPAT FAIL: No vulkan.*.so or libvulkan.so in vendor/system."
-      _skia_log "    This ROM has no Vulkan driver — skiavk will always fail silently."
-      _skia_log "    Force-stop ABORTED. Persisting 'incompatible' flag."
-      _skia_log "========================================"
-      printf 'incompatible\n' > "${_VK_COMPAT_FILE}.tmp" 2>/dev/null && mv "${_VK_COMPAT_FILE}.tmp" "$_VK_COMPAT_FILE" 2>/dev/null || true
-      unset _VK_LIB_FOUND _VK_COMPAT _VK_COMPAT_FILE
-      exit 0
-    fi
-    unset _VK_LIB_FOUND
-
-    # ── Loophole 4: SystemUI Vulkan canary — the definitive runtime check ────
-    # SystemUI has been running since early boot (~35s ago). dumpsys gfxinfo
-    # reports the ACTUAL pipeline, not the prop value. "Skia (Vulkan)" = VK
-    # working. Anything else = VK failed silently, HWUI fell back to GL.
-    # Count of "Skia (Vulkan)" lines = number of VK surfaces; 0 = no Vulkan.
-    _SYSUI_VK_COUNT=$(dumpsys gfxinfo com.android.systemui 2>/dev/null \
-                      | grep -c "Skia (Vulkan)" 2>/dev/null || echo "0")
-    _SYSUI_VK_COUNT="${_SYSUI_VK_COUNT:-0}"
-    if [ "$_SYSUI_VK_COUNT" -eq 0 ]; then
-      # Also try: grep Pipeline line for GL/VK info
-      _SYSUI_PIPE=$(dumpsys gfxinfo com.android.systemui 2>/dev/null \
-                    | grep -i "Pipeline" | head -1 || echo "")
-      _LIVE_PROP=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
-      _skia_log "========================================"
-      _skia_log "[!] VK COMPAT FAIL: SystemUI is NOT running on Vulkan."
-      _skia_log "    SystemUI pipeline    : '${_SYSUI_PIPE:-unknown}'"
-      _skia_log "    Live renderer prop   : '${_LIVE_PROP}'"
-      _skia_log "    Skia(Vulkan) count   : 0"
-      _skia_log "    DIAGNOSIS: HWUI read 'skiavk' prop but Vulkan init failed."
-      _skia_log "    Root causes (pick one or more for this ROM/device):"
-      _skia_log "      - Incomplete Vulkan stack (missing extensions/layers)"
-      _skia_log "      - KGSL API version mismatch (kernel vs custom driver)"
-      _skia_log "      - vendor_init overrode prop after our resetprop"
-      _skia_log "      - libhwui ABI incompatible with custom Adreno driver"
-      _skia_log "      - SELinux blocking /dev/kgsl-3d0 for Zygote processes"
-      _skia_log "    IMPACT if force-stop ran:"
-      _skia_log "      GL caches cleared → apps restart on GL without caches"
-      _skia_log "      → mass shader recompile OOM → ALL apps crash on open"
-      _skia_log "    ACTION: Force-stop ABORTED."
-      _skia_log "    Persisting 'prop_only' — future boots skip force-stop."
-      _skia_log "    skiavk PROP remains active — new apps will attempt Vulkan."
-      _skia_log "    To retry after ROM update: 'rm $_VK_COMPAT_FILE' then reboot."
-      _skia_log "========================================"
-      printf 'prop_only\n' > "${_VK_COMPAT_FILE}.tmp" 2>/dev/null && mv "${_VK_COMPAT_FILE}.tmp" "$_VK_COMPAT_FILE" 2>/dev/null || true
-      unset _SYSUI_VK_COUNT _SYSUI_PIPE _LIVE_PROP _VK_COMPAT _VK_COMPAT_FILE
-      exit 0
-    fi
-    _skia_log "[OK] VK PROBE PASSED: SystemUI confirmed on Vulkan (${_SYSUI_VK_COUNT} Skia(Vulkan) surface(s))"
-    _skia_log "     ROM/device Vulkan stack is functional — safe to proceed with force-stop"
-    printf 'confirmed\n' > "${_VK_COMPAT_FILE}.tmp" 2>/dev/null && mv "${_VK_COMPAT_FILE}.tmp" "$_VK_COMPAT_FILE" 2>/dev/null || true
-    unset _SYSUI_VK_COUNT _VK_COMPAT _VK_COMPAT_FILE
-    # ══ END VULKAN FUNCTIONAL PROBE ══════════════════════════════════════════
-    # ══════════════════════════════════════════════════════════════════════════
-    # OLD VENDOR DETECTION + SERVICE-PHASE PROP WATCHDOG
-    # ══════════════════════════════════════════════════════════════════════════
-    #
-    # ROOT CAUSE: Why old vendor kills skiavk silently even after our resetprop
-    #
-    # Android property loading order in init's load_all_props():
-    #   1. /system/etc/prop.default  (or /default.prop on legacy)
-    #   2. /system/build.prop         ← our module writes system.prop here
-    #   3. /vendor/build.prop         ← LOADED AFTER SYSTEM, wins for debug.*
-    #   4. /odm/build.prop
-    #   5. /data/property/persist.*
-    #
-    # An old /vendor/build.prop may have:
-    #   debug.hwui.renderer=skiagl
-    # This overwrites our system.prop's skiavk before Zygote starts.
-    # Our post-fs-data resetprop fixes it in-session but vendor_init fires
-    # again via init.rc triggers:
-    #
-    #   # /vendor/etc/init/hw/init.<device>.rc  (old MIUI/OEM vendor)
-    #   on property:sys.boot_completed=1
-    #       setprop debug.hwui.renderer skiagl
-    #
-    # This fires AFTER boot_completed, AFTER our service.sh resetprop at +2s,
-    # re-overriding the prop. Any app opened after this override is on GL.
-    #
-    # TWO-PART SERVICE.SH FIX:
-    #   Part A: Re-enforce skiavk now (covers the +2s post-boot window).
-    #   Part B: Launch persistent watchdog subshell that detects and re-applies
-    #           skiavk every 1s for the first 120s after boot_completed.
-    #           Covers ALL vendor_init late triggers, regardless of timing.
-    #
-    # CRITICAL INTEGRATION WITH VULKAN PROBE:
-    #   If the VK probe returned "prop_only" but old-vendor analysis shows the
-    #   Vulkan STACK is probably fine (only the prop was overridden), we should
-    #   NOT treat this as "skip force-stop". The prop watchdog will hold skiavk,
-    #   and the force-stop is still needed to make already-running apps pick up
-    #   skiavk on their next cold-start. We clear the "prop_only" verdict below
-    #   if old-vendor prop-override is the detected cause.
-    # ══════════════════════════════════════════════════════════════════════════
-
-    _OLD_VND_STATE_FILE="/data/local/tmp/adreno_old_vendor"
-    _OLD_VND_STATE=""
-    _OLD_VND_ACTIVE=false
-    _OLD_VND_IS_PROP_ONLY=false   # true = vendor prop override only (Vulkan stack OK)
-
-    # Read state persisted by post-fs-data.sh detect_old_vendor_extended()
-    if [ -f "$_OLD_VND_STATE_FILE" ]; then
-      { IFS= read -r _OLD_VND_STATE; } < "$_OLD_VND_STATE_FILE" 2>/dev/null || _OLD_VND_STATE=""
-      if [ -n "$_OLD_VND_STATE" ] && [ "$_OLD_VND_STATE" != "clean" ]; then
-        _OLD_VND_ACTIVE=true
-        _skia_log "========================================"
-        _skia_log "OLD VENDOR DETECTED (from post-fs-data)"
-        _skia_log "  State file  : $_OLD_VND_STATE_FILE"
-        _skia_log "  Reason      : $_OLD_VND_STATE"
-        _skia_log "========================================"
-      else
-        _skia_log "Old vendor check: CLEAN (state='${_OLD_VND_STATE:-<no file>}')"
-      fi
-    else
-      # State file absent — post-fs-data may not have run yet (KSU timing edge case)
-      # Run the detection ourselves as a fallback
-      _skia_log "Old vendor: no state file — running inline detection..."
-      detect_old_vendor_extended
-      if [ "$OLD_VENDOR" = "true" ]; then
-        _OLD_VND_ACTIVE=true
-        _OLD_VND_STATE="$OLD_VENDOR_REASON"
-        printf '%s\n' "$OLD_VENDOR_REASON" > "$_OLD_VND_STATE_FILE" 2>/dev/null || true
-        _skia_log "Old vendor DETECTED (inline): $_OLD_VND_STATE"
-      else
-        printf 'clean\n' > "$_OLD_VND_STATE_FILE" 2>/dev/null || true
-        _skia_log "Old vendor: CLEAN (inline check)"
-      fi
-    fi
-
-    if [ "$_OLD_VND_ACTIVE" = "true" ]; then
-
-      # ── Part A: Immediate re-enforcement ──────────────────────────────────
-      # Re-apply skiavk right now. vendor_init's on-boot triggers may have
-      # fired between post-fs-data's watchdog ending and this point.
-      _cur_renderer=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
-      if [ "$_cur_renderer" != "skiavk" ]; then
-        resetprop debug.hwui.renderer skiavk 2>/dev/null || true
-        resetprop ro.hwui.use_vulkan true 2>/dev/null || true
-        _skia_log "[!!] OLD VENDOR: prop was overridden to '${_cur_renderer}' — re-applied skiavk NOW"
-      else
-        _skia_log "[OK] OLD VENDOR: prop is currently skiavk — no immediate re-apply needed"
-      fi
-      unset _cur_renderer
-
-      # ── Determine if this is a "prop-only" issue (Vulkan stack OK) ────────
-      # Heuristic: if the Vulkan probe PASSED (confirmed) earlier this boot,
-      # or if the old-vendor reason mentions only prop/RC override (not VNDK
-      # or SDK mismatch that would affect the Vulkan ICD), treat as prop-only.
-      # This prevents the prop override from being misdiagnosed as a Vulkan
-      # stack incompatibility and wrongly disabling skiavk_all.
-      _vk_compat_now=""
-      [ -f "/data/local/tmp/adreno_vk_compat" ] && \
-        { IFS= read -r _vk_compat_now; } < "/data/local/tmp/adreno_vk_compat" 2>/dev/null
-      case "$_OLD_VND_STATE" in
-        *vendor_rc=*|*vendor.prop*|*debug.hwui.renderer=*|*/vendor/build.prop*)
-          # Pure prop override — Vulkan ICD itself should be fine
-          _OLD_VND_IS_PROP_ONLY=true
-          _skia_log "Old vendor type: PROP-ONLY override (vendor .rc or build.prop sets renderer)"
-          _skia_log "  Vulkan ICD not implicated — force-stop proceeds after prop watchdog start"
-          # If VK probe wrote "prop_only" for this same reason, clear it so
-          # force-stop is not skipped (the watchdog now handles the prop).
-          if [ "$_vk_compat_now" = "prop_only" ]; then
-            printf 'confirmed\n' > "/data/local/tmp/adreno_vk_compat.tmp" 2>/dev/null && \
-              mv "/data/local/tmp/adreno_vk_compat.tmp" "/data/local/tmp/adreno_vk_compat" 2>/dev/null || true
-            _skia_log "[OVERRIDE] VK compat flag cleared from 'prop_only' → 'confirmed' (old vendor prop override, not stack issue)"
-          fi
-          ;;
-        *SDK_DELTA=*|*VNDK_DELTA=*|*vendor_api_level*|*build date gap*)
-          # SDK/VNDK gap — may affect the Vulkan ICD too. Don't override VK probe result.
-          _OLD_VND_IS_PROP_ONLY=false
-          _skia_log "Old vendor type: SDK/VNDK mismatch — Vulkan ICD may also be affected"
-          _skia_log "  VK probe result preserved: '${_vk_compat_now:-<not set>}'"
-          ;;
-        *)
-          _OLD_VND_IS_PROP_ONLY=true  # Unknown reason — default to prop-only (safer)
-          _skia_log "Old vendor type: UNKNOWN reason — defaulting to prop-only mode"
-          ;;
-      esac
-      unset _vk_compat_now
-
-      # ── Part B: Persistent service-phase watchdog ────────────────────────
-      # Runs every 1s for 120s after boot_completed. This is the tightest
-      # window possible without burning CPU. Covers:
-      #   - vendor_init on property:sys.boot_completed=1 setprop triggers
-      #   - OEM "performance manager" daemons that run at boot+5/10/30s
-      #   - Late SIM/modem init services that reset GPU props as side effect
-      (
-        _svc_wd_applied=0
-        _svc_wd_elapsed=0
-        # Fast phase: every 1s for first 60s
-        while [ "$_svc_wd_elapsed" -lt 60 ]; do
-          sleep 1
-          _svc_wd_elapsed=$((_svc_wd_elapsed + 1))
-          _c=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
-          if [ "$_c" != "skiavk" ]; then
-            resetprop debug.hwui.renderer skiavk 2>/dev/null || true
-            resetprop ro.hwui.use_vulkan true 2>/dev/null || true
-            _svc_wd_applied=$((_svc_wd_applied + 1))
-            printf '[ADRENO][SVC-OLDVENDOR][+%ds] override detected: was "%s" → force-set skiavk (re-apply #%d)\n' \
-              "$_svc_wd_elapsed" "$_c" "$_svc_wd_applied" > /dev/kmsg 2>/dev/null || true
-          fi
-        done
-        # Slow phase: every 5s for next 60s (total 120s coverage)
-        while [ "$_svc_wd_elapsed" -lt 120 ]; do
-          sleep 5
-          _svc_wd_elapsed=$((_svc_wd_elapsed + 5))
-          _c=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
-          if [ "$_c" != "skiavk" ]; then
-            resetprop debug.hwui.renderer skiavk 2>/dev/null || true
-            resetprop ro.hwui.use_vulkan true 2>/dev/null || true
-            _svc_wd_applied=$((_svc_wd_applied + 1))
-            printf '[ADRENO][SVC-OLDVENDOR-SLOW][+%ds] override detected: was "%s" → force-set skiavk (re-apply #%d)\n' \
-              "$_svc_wd_elapsed" "$_c" "$_svc_wd_applied" > /dev/kmsg 2>/dev/null || true
-          fi
-        done
-        printf '[ADRENO][SVC-OLDVENDOR] Watchdog complete. Total re-applies: %d\n' \
-          "$_svc_wd_applied" > /dev/kmsg 2>/dev/null || true
-      ) &
-      _skia_log "[OK] OLD VENDOR: service-phase prop watchdog launched (PID=$!) — 120s coverage at 1s/5s intervals"
-
-    fi  # _OLD_VND_ACTIVE
-
-    unset _OLD_VND_STATE_FILE _OLD_VND_STATE _OLD_VND_ACTIVE _OLD_VND_IS_PROP_ONLY
-    # ══ END OLD VENDOR SERVICE-PHASE LOGIC ═══════════════════════════════════
-
-    # ==========================================================================
-    # BLOCK C — ro.hardware.vulkan runtime fix + gralloc compat props
-    # ==========================================================================
-    # Belt-and-suspenders: re-apply fixes that post-fs-data.sh set early.
-    # Old vendor init.rc files can reset these after boot_completed.
-    # ==========================================================================
-
-    # ── Service-phase ro.hardware.vulkan fix ─────────────────────────────────
-    if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
-      if command -v resetprop >/dev/null 2>&1; then
-        _svc_hwvk=$(getprop ro.hardware.vulkan 2>/dev/null || echo "")
-        case "$_svc_hwvk" in
-          adreno|"") ;;  # already correct
-          *)
-            # SoC codename was re-applied by vendor init.rc — fix it back
-            if [ -f "/vendor/lib64/hw/vulkan.adreno.so" ] || \
-               [ -f "/vendor/lib/hw/vulkan.adreno.so" ]; then
-              resetprop ro.hardware.vulkan adreno 2>/dev/null && \
-                _skia_log "[BLOCK C] ro.hardware.vulkan: '${_svc_hwvk}' → 'adreno' (ICD fix)" || \
-                _skia_log "[BLOCK C][!] ro.hardware.vulkan fix failed"
-            fi
-            ;;
-        esac
-        unset _svc_hwvk
-      fi
-    fi
-
-    # ── Service-phase gralloc compat props ───────────────────────────────────
-    # Load compat score persisted by post-fs-data.sh
-    _SVC_SCORE_FILE="/data/local/tmp/adreno_vk_compat_score"
-    _SVC_COMPAT_LEVEL="safe"
-    _SVC_GRALLOC_VERSION="unknown"
-
-    if [ -f "$_SVC_SCORE_FILE" ]; then
-      while IFS='=' read -r _sk _sv; do
-        case "$_sk" in
-          LEVEL)   _SVC_COMPAT_LEVEL="${_sv}"    ;;
-          GRALLOC) _SVC_GRALLOC_VERSION="${_sv}" ;;
-        esac
-      done < "$_SVC_SCORE_FILE" 2>/dev/null
-    fi
-
-    if [ "$RENDER_MODE" = "skiavk" ] || [ "$RENDER_MODE" = "skiavk_all" ]; then
-      if command -v resetprop >/dev/null 2>&1; then
-        case "$_SVC_GRALLOC_VERSION" in
-          2|3)
-            # Old gralloc: disable validation layers (ABI mismatch → vkCreateInstance failure)
-            resetprop debug.vulkan.dev.layers  ""  2>/dev/null || true
-            resetprop debug.vulkan.layers       ""  2>/dev/null || true
-            resetprop persist.graphics.vulkan.validation_enable 0 2>/dev/null || true
-            # Cap SF buffer pool — gralloc2/3 has hard pool limits; Vulkan swapchain
-            # exhausts them unless we cap acquired buffers at 2.
-            resetprop debug.sf.max_frame_buffer_acquired_buffers 2 2>/dev/null || true
-            _skia_log "[BLOCK C] gralloc${_SVC_GRALLOC_VERSION}: WSI compat props enforced (service phase)"
-            ;;
-        esac
-      fi
-    fi
-    unset _SVC_SCORE_FILE _SVC_COMPAT_LEVEL _SVC_GRALLOC_VERSION _sk _sv
-    # ══ END BLOCK C ══════════════════════════════════════════════════════════
-
-
-    # ── KGSL PROTECTION: Check for native-Vulkan game processes ─────────────
-    # Uses _game_pkg_excluded() from game_exclusion_list.sh (sourced at top)
-    # for exact-glob matching — same function the daemon uses.
-    #
-    # BUG B FIX: Old implementation used *"${_ge_base}"* (substring match after
-    # stripping glob wildcard). This caused false positives: e.g. a running
-    # "com.tencent.igplugin" process would match the "com.tencent.ig" pattern,
-    # causing the entire skiavk_all force-stop sequence to be silently skipped
-    # on every boot if that plugin was active — even with no game running.
-    # _game_pkg_excluded uses an unquoted case pattern (exact-glob) so
-    # "com.tencent.ig" only matches "com.tencent.ig", not "com.tencent.igplugin".
-    _is_native_vk_game_running() {
-      # Fast path: GED daemon maintains an active-game counter file.
-      # Reading one file is O(1) vs scanning all of /proc at boot+35s peak load.
-      local _v=0
-      { IFS= read -r _v; } < "/data/local/tmp/adreno_ged_active" 2>/dev/null || _v=0
-      _v="${_v%%[^0-9]*}"
-      if [ "${_v:-0}" != "0" ]; then return 0; fi
-      # If GED state file exists and says 0, trust it — no game running.
-      [ -f "/data/local/tmp/adreno_ged_active" ] && return 1
-      # GED not running or file absent — fall back to /proc scan.
-      local _cf _cl _pkg
-      for _cf in /proc/[0-9]*/cmdline; do
-        [ -f "$_cf" ] || continue
-        { IFS= read -r _cl; } < "$_cf" 2>/dev/null || continue
-        [ -n "$_cl" ] || continue
-        _pkg="${_cl%%:*}"
-        _game_pkg_excluded "$_pkg" && return 0
-      done
-      return 1
-    }
-    if _is_native_vk_game_running; then
-      _skia_log "========================================="
-      _skia_log "[!] KGSL PROTECTION: Native-Vulkan game is running."
-      _skia_log "    Force-stop sequence SKIPPED to prevent KGSL context table corruption."
-      _skia_log "    Game-compatibility daemon handles renderer switching independently."
-      _skia_log "    Force-stops will apply on next boot/cycle when no game is active."
-      _skia_log "========================================="
-      exit 0
-    fi
-    unset -f _is_native_vk_game_running 2>/dev/null || true
-    _skia_log "[OK] No native-Vulkan game running — safe to proceed with force-stop sequence"
-    # TERTIARY clear (here): belt-and-suspenders inside the force-stop window.
-    #   If the two earlier passes already cleared everything, these find/rm
-    #   calls complete instantly (empty dirs). If somehow a process wrote a
-    #   new stale cache between post-fs-data and here, this catches it.
-    #
-    # ROOT CAUSE of "apps crash immediately on open" (preserved for reference):
-    #   GL → Vulkan mode switch leaves GL-format pipeline cache blobs in each
-    #   app's app_skia_pipeline_cache dir. HWUI passes the old blob to
-    #   vkCreateGraphicsPipelines as pInitialData. Vulkan driver sees wrong
-    #   header magic → VK_ERROR_FORMAT_FEATURE_NOT_SUPPORTED or corruption →
-    #   GPU fault → SIGSEGV. Every app crashes before any UI draws.
-    #
-    # Mode-change check: same mode → caches built by this renderer → valid.
-    # Different mode → stale format → clear needed.
-    _S0_LAST_MODE_FILE="/data/local/tmp/adreno_last_render_mode"
-    _S0_LAST_MODE=""
-    if [ -f "$_S0_LAST_MODE_FILE" ]; then
-      { IFS= read -r _S0_LAST_MODE; } < "$_S0_LAST_MODE_FILE" 2>/dev/null || _S0_LAST_MODE=""
-    fi
-
-    if [ "$RENDER_MODE" != "$_S0_LAST_MODE" ]; then
-      _skia_log "Step 0: Mode changed ('${_S0_LAST_MODE:-<none>}' → '$RENDER_MODE') — clearing stale Skia/HWUI pipeline caches..."
-      # Global HWUI cache
-      rm -rf /data/misc/hwui/ 2>/dev/null || true
-      # Per-app Skia pipeline caches (the main crash culprit on GL→VK switch)
-      # DEPTH: /data/user_de/<uid>/<pkg>/code_cache/app_skia_pipeline_cache/ = 4 levels
-      # from /data/user_de. Using /data/user_de/0 with -maxdepth 3 only covers the primary
-      # user; work-profile UIDs at /data/user_de/10/ etc. are silently skipped.
-      find /data/user_de -maxdepth 4 -type d -name "app_skia_pipeline_cache" \
-          -exec rm -rf {} + 2>/dev/null || true
-      # Fallback: legacy /data/data path (pre-Android 7 / direct boot disabled)
-      find /data/data -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
-          -exec rm -rf {} + 2>/dev/null || true
-      # Per-app Skia shader caches
-      find /data/user_de -maxdepth 4 -name "*.shader_journal" -delete 2>/dev/null || true
-      find /data/user_de -maxdepth 4 -type d \( -name "skia_shaders" -o -name "shader_cache" \) \
-          -exec rm -rf {} + 2>/dev/null || true
-      _skia_log "[OK] Stale Skia pipeline & shader caches cleared (mode change: ${_S0_LAST_MODE:-<none>} → $RENDER_MODE)"
-    else
-      _skia_log "Step 0: Mode unchanged ('$RENDER_MODE') — pipeline caches PRESERVED."
-      _skia_log "  Skipping cache clear to prevent shader recompile OOM (Facebook/GMS protection)."
-    fi
-    unset _S0_LAST_MODE _S0_LAST_MODE_FILE
-
-    # ── STEP 1: SystemUI — NOT crashed (intentional, permanent fix) ──────────
-    #
-    # ROOT CAUSE ANALYSIS — why crashing SystemUI caused ALL user-reported issues:
-    #
-    # SYMPTOM: "screen goes black and comes back, then ROM logo, booting again"
-    # SYMPTOM: "Google accounts disappear after Meta apps crash"
-    # SYMPTOM: "Facebook/Messenger crash immediately on open"
-    # SYMPTOM: "apps auto force-stop for 5-10 minutes after boot"
-    #
-    # MECHANISM (when am crash systemui was active):
-    #   1. am crash fires at boot_completed+35s — user has ALREADY unlocked phone
-    #   2. SystemUI dies → SurfaceFlinger loses ALL layer references → BLACK SCREEN
-    #   3. During 5–15s SystemUI restart window:
-    #      - GMS AccountManager is mid-sync (OAuth token refresh at boot+35s)
-    #      - It holds a live Binder to SystemUI's AccountManagerService proxy
-    #      - SystemUI death → DeadObjectException on AccountManager sync thread
-    #      - AccountManager marks ALL OAuth tokens invalid → removes every Google
-    #        account from Settings (the "accounts disappear" symptom)
-    #   4. Meta apps (Facebook/Messenger/Instagram) hold ANativeWindow handles
-    #      obtained from SF during their first draw. When SF loses layer references
-    #      on SystemUI crash, these handles go dangling. On next draw call,
-    #      libvulkan dereferences stale pointer → SIGSEGV → app crash
-    #   5. On custom ROMs: additional services die in solidarity with SystemUI
-    #      (tight process-death dependencies). Android watchdog counts 3+ crashes
-    #      in 5 minutes → system_server watchdog kill → ROM logo → reboot
-    #
-    # FIX: Do NOT crash SystemUI in skiavk_all (or any mode) at boot time.
-    #   - resetprop already set debug.hwui.renderer=skiavk at boot_completed+5s
-    #   - All NEW user-opened apps after that point cold-start with skiavk
-    #   - SystemUI keeps its current renderer for THIS SESSION (invisible to user;
-    #     it's already rendering at 60fps and the difference is unnoticeable)
-    #   - On NEXT REBOOT: system.prop (written by service.sh below) delivers
-    #     debug.hwui.renderer=skiavk to EVERY process including SystemUI from
-    #     first init — no crash ever needed
-    #
-    #
-    # FIX: Do NOT crash SystemUI in skiavk_all (or any mode) at boot time.
-    #   - resetprop already set debug.hwui.renderer=skiavk at boot_completed+5s
-    #   - All NEW user-opened apps after that point cold-start with skiavk
-    #   - SystemUI keeps its current renderer for THIS SESSION (invisible to user)
-    #   - On NEXT REBOOT: system.prop delivers skiavk to EVERY process from init
-    _skia_log "Step 1: SystemUI NOT crashed — stability fix for custom ROMs."
-    _skia_log "  resetprop already set skiavk at boot_completed+5s."
-    _skia_log "  All user-opened apps from this point use skiavk."
-    _skia_log "  SystemUI keeps old renderer this session (invisible to user)."
-    _skia_log "  Next reboot: system.prop delivers skiavk to ALL processes from init."
-
-    # ── STEP 2: Force-stop all 3rd-party apps (THROTTLED — one at a time) ────
-    #
-    # PURPOSE: Make background apps cold-start with skiavk on next user-open.
-    # debug.hwui.renderer is cached per-process at first HWUI init. Any app
-    # that was already running before resetprop fired still has the old renderer
-    # cached as sRenderPipelineType. Force-stopping it makes it exit and re-read
-    # the prop on next launch → gets skiavk automatically.
-    #
-    # WHY THROTTLED (150ms sleep between each package):
-    #   Each running app holds open FDs on /dev/kgsl-3d0. KGSL (Qualcomm kernel
-    #   GPU driver) runs per-FD cleanup for every KGSL context handle on process
-    #   death. If hundreds of processes are SIGKILLd simultaneously (tight loop,
-    #   all completing at kernel scheduler timescale), hundreds of KGSL teardowns
-    #   run concurrently. On custom Adreno drivers this races in KGSL's internal
-    #   context allocation table → entries left half-freed/corrupted → every new
-    #   process that subsequently opens /dev/kgsl-3d0 gets a corrupted context →
-    #   vkCreateDevice fails → ALL apps crash on open forever until reboot.
-    #   150ms between kills gives KGSL time to fully complete each teardown before
-    #   the next SIGKILL arrives — no concurrent teardown, no corruption.
-    #
-    # am kill-all is NEVER used — it SIGKILLs ALL cached procs simultaneously,
-    # which is exactly the concurrent teardown problem described above.
-    #
-    # EXCLUSIONS:
-    #   GMS/GSF/Play Store — on custom ROMs these are user packages (-3). Killing
-    #     them causes every GMS-dependent app to fail on next open (RemoteException
-    #     on Play Services binding) for minutes after.
-    #   Meta apps (Facebook/Messenger/Instagram/WhatsApp) — hold live GMS
-    #     AccountManager Binder for OAuth sync. Killing mid-sync sends
-    #     DeadObjectException to AccountManager → ALL Google OAuth tokens marked
-    #     invalid → every Google account removed from Settings. They transition
-    #     to skiavk safely on next natural cold-start.
-    #   Launchers — killing the launcher causes a jarring home screen restart
-    #     visible to the user. Launcher transitions on next natural restart.
-    _skia_log "Step 2: Force-stopping 3rd-party apps (throttled, GMS/Meta excluded)..."
-    _THIRD_STOPPED=0
-    _THIRD_SKIPPED=0
-    # BUG4 FIX: Replaced `for _pkg in $(pm list packages -3 ...)` with
-    # `while IFS= read -r _pkg`. Rationale: $(pm list packages ...) expands
-    # the entire pm output before iteration begins — on slow devices this
-    # stalls for 0.5-2s and creates a large string allocation. More critically,
-    # if pm outputs any error text (not ready yet, partial output), it gets
-    # word-split and iterated as fake package names. `while read` processes
-    # line-by-line, is safe against pm errors (bad lines are skipped by the
-    # empty check below), and starts processing immediately.
-    #
-    # SUBSHELL FIX: `cmd | while read` runs the while body in a subshell on
-    # POSIX sh (mksh/dash/ash).  Counter increments inside the loop are lost
-    # after `done`.  Fix: write pm output to a temp file first, then redirect
-    # the while loop from it — this keeps the loop in the parent shell.
-    _P2_TMP="/data/local/tmp/adreno_pkgs3_$$"
-    pm list packages -3 2>/dev/null | cut -f2 -d: > "$_P2_TMP" 2>/dev/null || true
-    while IFS= read -r _pkg; do
-      [ -z "$_pkg" ] && continue
-      case "$_pkg" in
-        # BUG1 FIX: Original patterns had `|        ` (pipe + 8 spaces) as separator,
-        # making each alternative pattern start with leading whitespace. POSIX case
-        # patterns are literal — a pattern of "        com.google.android.gms" with
-        # leading spaces will NEVER match the package name "com.google.android.gms".
-        # All GMS and Meta packages were silently force-stopped every boot, causing
-        # GMS auth service crash, Google account loss, and OOM-triggered app crashes.
-        # Fix: each pattern on its own line with no leading whitespace, properly
-        # pipe-separated on continuation lines.
-        com.google.android.gms|com.google.android.gms.*|com.google.android.gsf|com.google.android.gsf.*|com.google.android.gmscore|com.android.vending|com.facebook.katana|com.facebook.orca|com.facebook.lite|com.facebook.mlite|com.facebook.appmanager|com.facebook.services|com.facebook.system|com.instagram.android|com.instagram.lite|com.instagram.barcelona|com.whatsapp|com.whatsapp.w4b)
-          # GMS/Meta: OAuth token corruption risk — always excluded.
-          # com.facebook.appmanager / .services / .system: Meta App Manager /
-          # Services / System are preinstalled system components on Samsung,
-          # Xiaomi, etc. Force-stopping them breaks Meta app update & sync
-          # infrastructure (token exchange, cross-app library sync).
-          # com.instagram.barcelona: Threads (Instagram) — same GMS-OAuth
-          # infrastructure; shares AccountManager tokens with Instagram.
-          # Games are handled by _game_pkg_excluded() from game_exclusion_list.sh.
-          _THIRD_SKIPPED=$((_THIRD_SKIPPED + 1))
-          continue ;;
-      esac
-      # Check shared game exclusion list (sourced from game_exclusion_list.sh)
-      if _game_pkg_excluded "$_pkg"; then
-        _THIRD_SKIPPED=$((_THIRD_SKIPPED + 1))
-        continue
-      fi
-      am force-stop "$_pkg" 2>/dev/null || true
-      _THIRD_STOPPED=$((_THIRD_STOPPED + 1))
-      # Throttle: give KGSL time to complete context teardown before next kill.
-      # 150ms is sufficient for KGSL cleanup on all tested Adreno generations.
-      # Without this, concurrent KGSL teardowns corrupt the context table.
-      sleep 0.15
-    done < "$_P2_TMP"
-    rm -f "$_P2_TMP" 2>/dev/null || true
-    unset _P2_TMP
-    _skia_log "[OK] 3rd-party: stopped=$_THIRD_STOPPED skipped=$_THIRD_SKIPPED (GMS/Meta/Play excluded)"
-
-    # ── STEP 3: Force-stop non-critical system UI packages (THROTTLED) ───────
-    # Settings, system app stores, OEM UI apps etc. — safe to restart on demand.
-    # Same throttle rationale as Step 2. Critical system services are excluded.
-    _skia_log "Step 3: Force-stopping non-critical system packages (throttled)..."
-    _SYS_STOPPED=0
-    # BUG4 FIX: Same rationale as Step 2 — while read instead of for $(...).
-    # SUBSHELL FIX: Same as Step 2 — temp file to keep while loop in parent shell.
-    _P3_TMP="/data/local/tmp/adreno_pkgss_$$"
-    pm list packages -s 2>/dev/null | cut -f2 -d: > "$_P3_TMP" 2>/dev/null || true
-    while IFS= read -r _pkg; do
-      [ -z "$_pkg" ] && continue
-      # BUG1 FIX: Same leading-whitespace fix as Step 2 case statement.
-      # Each critical system package pattern on its own line, no leading spaces.
-      case "$_pkg" in
-        android|android.*|com.android.phone*|com.android.bluetooth*|com.android.nfc*|com.android.server*|com.android.telephony*|com.android.providers*|com.android.se|com.android.carrierconfig*|com.android.ims*|com.android.networkstack*|com.android.wifi*|com.android.systemui|com.google.android.gms*|com.google.android.gsf*|com.google.android.gmscore|com.qualcomm.qti.telephony*|com.qualcomm.qti.server*|com.qti.phone|com.samsung.android.incallui*|com.samsung.android.telephony*|com.samsung.android.providers*|com.miui.phone|com.miui.core|com.miui.daemon|com.miui.telephony|com.miui.providers*|com.oppo.providers*|com.vivo.providers*|com.android.launcher*|com.miui.home|com.sec.android.app.launcher|com.google.android.apps.nexuslauncher|com.samsung.android.app.spage|com.coloros.launcher*|com.oppo.launcher*|com.oneplus.launcher|com.hihonor.launcher|com.asus.launcher*|com.facebook.appmanager|com.facebook.services|com.facebook.system)
-          # facebook.appmanager/.services/.system: Meta App Manager, Meta Services,
-          # Meta System — preinstalled system components on Samsung/Xiaomi that
-          # coordinate Meta app library synchronization and crash diagnostics.
-          # Force-stopping them mid-boot causes cross-app AccountManager token
-          # invalidation (same root cause as GMS exclusion above).
-          continue ;;
-      esac
-      am force-stop "$_pkg" 2>/dev/null || true
-      _SYS_STOPPED=$((_SYS_STOPPED + 1))
-      sleep 0.15
-    done < "$_P3_TMP"
-    rm -f "$_P3_TMP" 2>/dev/null || true
-    unset _P3_TMP
-    _skia_log "[OK] System UI packages force-stopped (throttled): $_SYS_STOPPED"
-
-    # ── STEP 4: am kill-all — INTENTIONALLY NOT USED ────────────────────────
-    # am kill-all sends SIGKILL to ALL remaining cached processes in one shot.
-    # This is the worst-case concurrent KGSL teardown scenario — equivalent to
-    # doing the entire Step 2 loop with zero sleep. It permanently corrupts the
-    # KGSL context table for the boot session. Removed permanently.
-    _skia_log "Step 4: am kill-all intentionally skipped (concurrent SIGKILL = KGSL corruption)."
-
-    # Brief settle — let Binder registrations clear after force-stops
-    sleep 2
-
-
-    # ── STEP 5: Log pipeline status + post-force-stop VK confirmation ────────
-    # SystemUI was NOT crashed this session (stability fix). All user-opened
-    # apps use skiavk (prop was set at boot_completed+5s). SystemUI keeps its
-    # current renderer for this session; picks up skiavk via system.prop next boot.
-    _skia_log "Step 5: Post-force-stop renderer verification..."
-    _POST_SYSUI=$(dumpsys gfxinfo com.android.systemui 2>/dev/null | grep -i "Pipeline" | head -1 | tr -d ' ')
-    _POST_LIVE=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
-    if [ -n "$_POST_SYSUI" ]; then
-      _skia_log "  SystemUI pipeline    : $_POST_SYSUI (unchanged — not crashed this session)"
-      _skia_log "  Live renderer prop   : $_POST_LIVE"
-      _skia_log "  New app opens        : will use skiavk (prop set at boot+5s)"
-      _skia_log "  Next reboot          : system.prop delivers skiavk to ALL processes"
-    else
-      _skia_log "  Could not read SystemUI pipeline (possibly restarting)"
-      _skia_log "  Live renderer prop   : $_POST_LIVE"
-    fi
-    # Verify prop wasn't overridden by a late OEM init.d script during force-stop
-    if [ "$_POST_LIVE" != "skiavk" ] && [ -n "$_POST_LIVE" ]; then
-      _skia_log "[!] LATE PROP OVERRIDE DETECTED: prop changed to '$_POST_LIVE' during force-stop"
-      _skia_log "    vendor_init or OEM init.d re-set the prop after our resetprop."
-      _skia_log "    Re-applying skiavk prop now..."
-      resetprop debug.hwui.renderer skiavk 2>/dev/null || true
-      resetprop ro.hwui.use_vulkan true 2>/dev/null || true
-      # ── OLD VENDOR DISTINCTION ─────────────────────────────────────────
-      # If old-vendor state file exists and is not "clean", the override is
-      # caused by the old vendor partition, not a Vulkan stack issue.
-      # Do NOT mark as "prop_only" in this case — the service-phase watchdog
-      # (launched above) will hold the prop. Writing "prop_only" to the VK
-      # compat file would cause next boot to skip force-stop entirely, which
-      # is wrong: the watchdog handles the prop, force-stop is still needed.
-      _step5_ov_state=""
-      [ -f "/data/local/tmp/adreno_old_vendor" ] &&         { IFS= read -r _step5_ov_state; } < "/data/local/tmp/adreno_old_vendor" 2>/dev/null
-      if [ -n "$_step5_ov_state" ] && [ "$_step5_ov_state" != "clean" ]; then
-        _skia_log "    OLD VENDOR prop override — NOT marking prop_only (watchdog handles it)."
-        _skia_log "    Old vendor state: ${_step5_ov_state}"
-      else
-        _skia_log "    Marking ROM as 'prop_only' for next boot (OEM prop watcher active)."
-        printf 'prop_only\n' > "/data/local/tmp/adreno_vk_compat.tmp" 2>/dev/null && \
-          mv "/data/local/tmp/adreno_vk_compat.tmp" "/data/local/tmp/adreno_vk_compat" 2>/dev/null || true
-      fi
-      unset _step5_ov_state
-      # ── END OLD VENDOR DISTINCTION ─────────────────────────────────────
-    fi
-    unset _POST_SYSUI _POST_LIVE
-
-    _skia_log "========================================"
-    _skia_log "skiavk_all: boot-time renderer activation complete"
-    _skia_log "  3rd-party stopped    : $_THIRD_STOPPED (skipped: $_THIRD_SKIPPED GMS/Meta/Play)"
-    _skia_log "  System UI stopped    : $_SYS_STOPPED"
-    _skia_log "  Throttle             : 150ms between each kill (KGSL teardown safety)"
-    _skia_log "  am kill-all          : intentionally skipped (concurrent KGSL corruption)"
-    _skia_log "  Renderer prop        : live via resetprop at boot_completed+2s"
-    _skia_log "  Cache clear          : ran in post-fs-data (pre-Zygote)"
-    _skia_log "  SystemUI             : keeps old renderer this session (picks up skiavk on reboot)"
-    _skia_log "Verify: dumpsys gfxinfo <pkg> | grep Pipeline"
-    _skia_log "========================================"
-  ) &
-
-  log_service "skiavk_all: Background renderer verification subshell PID=$! launched"
-fi
 
 # ========================================
 # WAIT FOR SDCARD MOUNT
@@ -1579,80 +1001,824 @@ fi
 log_service "========================================"
 
 # ========================================
-# ACTIVE RECOVERY: QGL CONFIGURATION
 # ========================================
+# QGL CONFIGURATION: ACTIVATE / REPAIR
+# ========================================
+# post-fs-data.sh (init domain) always installs qgl_config.txt.
+# This section handles three cases based on what state that install left:
+#
+#  CASE A — PROTECTED MODE (skiavkthreaded boot, file is mode=0000):
+#    post-fs-data.sh wrote qgl_config.txt as root:root mode=0000 so that
+#    SurfaceFlinger (uid=1000, no CAP_DAC_OVERRIDE) gets EACCES on open()
+#    during its renderengine skiavkthreaded vkCreateDevice call at SF init()
+#    — BEFORE boot_completed. EACCES → driver uses defaults → no Vulkan init hang.
+#    SF is now already running with its existing VkDevice context.
+#    We ACTIVATE the file: chmod 0644 + chown 0:1000 + chcon same_process_hal_file.
+#    After activation, two consumer paths benefit:
+#      (1) debug.hwui.renderer=skiavk: every app that calls vkCreateDevice after
+#          boot_completed reads the QGL tuning. HWUI apps, games, any Vulkan user.
+#      (2) debug.renderengine.backend=skiavkthreaded: SF reads qgl_config.txt on
+#          any VkDevice recreation event (display hotplug, protected content mode,
+#          etc.) after boot_completed. sepolicy.rule grants SF same_process_hal_file
+#          read statically; CASE A re-injects the rule dynamically as belt-and-suspenders.
+#    Primary path: chmod 0644 requires "setattr" on vendor_data_file.
+#    Fallback path: if setattr is blocked, rm + recreate the file fresh via cat
+#    (uses "unlink" + "create" — NOT "setattr"). Both paths are covered.
+#    After activation, all new app processes (HWUI skiavk, games, any Vulkan app)
+#    read the QGL config when they do their own vkCreateDevice / KGSL open.
+#    SF's running compositor context is unaffected (already past init).
+#    This is identical in effect to LYB Kernel Manager's post-boot install.
+#
+#  CASE B — FILE MISSING (post-fs-data.sh failed — rare /data timing issue):
+#    Emergency full write attempted here with SELinux injection as last resort.
+#
+#  CASE C — FILE HEALTHY (active mode, normal non-skiavk boot):
+#    Verify permissions and size. Correct any drift.
+
+# ── QGL: SELinux policy tool discovery ────────────────────────────────────
+# service.sh runs in late_start service context. On Magisk, magiskpolicy is
+# symlinked into the Magisk tmpfs PATH. On KernelSU and APatch, the binary
+# is in a root-manager-specific directory that is NOT in the late_start PATH.
+# ROOT_TYPE is already detected above — use it to prioritise the correct path.
+#
+# Discovery order:
+#   1. PATH lookup (covers Magisk — magiskpolicy is always in PATH via sbin/tmpfs)
+#   2. /data/adb/magisk/magiskpolicy  — Magisk persistent path
+#   3. /data/adb/ksu/bin/magiskpolicy — KernelSU
+#   4. /data/adb/ap/bin/magiskpolicy  — APatch (uses Magisk's magiskpolicy binary)
+#   5. /sbin/magiskpolicy             — legacy Magisk on older Android ≤9 devices
+#   6. system paths                   — vendor-shipped fallback (very rare)
+_SVC_SEPOLICY_TOOL=""
+# BUG FIX: magiskpolicy --help ALWAYS calls exit(1) in every Magisk/KSU/APatch
+# build (confirmed: usage() ends with exit(1) in magiskpolicy.c, all forks).
+# Using --help as a liveness test means _SVC_SEPOLICY_TOOL is always empty →
+# all injection skipped → chmod 0644 fails silently on KSU-Next (u:r:ksu:s0
+# lacks setattr on vendor_data_file without explicit injection) → mode stays 0000.
+# Correct test: file existence + executable bit. Verify function separately.
+_svc_mp_try() {
+  [ -z "$1" ] && return 1
+  [ -f "$1" ] && [ -x "$1" ] || return 1
+  _SVC_SEPOLICY_TOOL="$1"; return 0
+}
+_svc_mp_try "$(command -v magiskpolicy 2>/dev/null)" || \
+_svc_mp_try "/data/adb/magisk/magiskpolicy" || \
+_svc_mp_try "/data/adb/ksu/bin/magiskpolicy" || \
+_svc_mp_try "/data/adb/ap/bin/magiskpolicy" || \
+_svc_mp_try "/sbin/magiskpolicy" || \
+_svc_mp_try "/system/bin/magiskpolicy" || \
+_svc_mp_try "/system/xbin/magiskpolicy" || true
+unset -f _svc_mp_try 2>/dev/null || true
+
+# ── KSU-NEXT KSUD WRAPPER: Auto-create if magiskpolicy not found ──────────
+# KernelSU-Next (rifsxd) ships no magiskpolicy. Instead, ksud provides:
+#   ksud sepolicy patch "rule"  →  live injection (equivalent to magiskpolicy --live)
+# If no magiskpolicy wrapper is pre-installed, auto-create an ephemeral one
+# in /dev/tmp/ so injection code (which calls "$_SVC_SEPOLICY_TOOL" --live "rule")
+# works transparently. On Magisk/tiann-KSU/APatch, magiskpolicy was already
+# found above — this block is a no-op.
+_SVC_KSUD_BIN=""  # Direct ksud binary path — used as fallback when wrapper is unavailable.
+if [ -z "$_SVC_SEPOLICY_TOOL" ]; then
+  _ksud_bin=""
+  for _kb in "/data/adb/ksud" "/data/adb/ksu/bin/ksud" "$(command -v ksud 2>/dev/null)"; do
+    [ -z "$_kb" ] && continue
+    [ -f "$_kb" ] && [ -x "$_kb" ] && { _ksud_bin="$_kb"; break; }
+  done
+  unset _kb
+  if [ -n "$_ksud_bin" ]; then
+    # Verify ksud sepolicy patch works on this build
+    if "$_ksud_bin" sepolicy patch "allow domain domain process signal" >/dev/null 2>&1; then
+      _svc_ksud_wrapper="/dev/tmp/adreno_mp_wrap_$$"
+      mkdir -p /dev/tmp 2>/dev/null || true
+      # Write wrapper: translates --live "rule" [...] to ksud sepolicy patch "rule" [...]
+      printf '#!/system/bin/sh\n# KSU-Next magiskpolicy wrapper (auto)\nshift\n_k="%s"\nfor _r; do "$_k" sepolicy patch "$_r" 2>/dev/null; done\n' \
+        "$_ksud_bin" > "$_svc_ksud_wrapper" 2>/dev/null
+      if chmod 0755 "$_svc_ksud_wrapper" 2>/dev/null; then
+        _SVC_SEPOLICY_TOOL="$_svc_ksud_wrapper"
+        _SVC_KSUD_BIN="$_ksud_bin"  # also keep direct path
+        log_service "[OK] QGL: KSU-Next ksud wrapper created at $_svc_ksud_wrapper"
+      else
+        # Wrapper chmod failed — ksud is verified working but we cannot make the
+        # script executable. Keep the direct ksud binary path so CASE A can call
+        # ksud sepolicy patch directly without the wrapper intermediary.
+        _SVC_KSUD_BIN="$_ksud_bin"
+        log_service "[!] QGL: ksud wrapper chmod failed — will use direct ksud calls in CASE A"
+        log_service "    ksud binary: $_ksud_bin (direct sepolicy patch calls will be used)"
+        rm -f "$_svc_ksud_wrapper" 2>/dev/null || true
+        printf '[ADRENO-SVC] ksud wrapper chmod failed — direct ksud mode\n' > /dev/kmsg 2>/dev/null || true
+      fi
+      unset _svc_ksud_wrapper
+    else
+      log_service "[!] QGL: ksud at $_ksud_bin found but 'sepolicy patch' test failed"
+    fi
+  fi
+  unset _ksud_bin
+fi
+# ── END KSU-NEXT KSUD WRAPPER ─────────────────────────────────────────────
+
+if [ -n "$_SVC_SEPOLICY_TOOL" ]; then
+  # Functional verification: inject a harmless no-op rule to confirm --live works.
+  # This is separate from the discovery test (which is existence+execute only).
+  if "$_SVC_SEPOLICY_TOOL" --live "allow domain domain process signal" >/dev/null 2>&1; then
+    log_service "[OK] QGL: SELinux tool found + verified: $_SVC_SEPOLICY_TOOL"
+  else
+    log_service "[!] QGL: SELinux tool found but --live test failed: $_SVC_SEPOLICY_TOOL"
+    log_service "    Will still attempt injection (may be policy-redundant on this ROM)"
+  fi
+else
+  log_service "[!] QGL: No magiskpolicy or ksud wrapper — inline injection skipped"
+  log_service "    chmod 0644 relies on static sepolicy.rule grants (allow su vendor_data_file file { setattr })"
+  printf '[ADRENO-SVC] QGL: no sepolicy tool — static sepolicy.rule only\n' > /dev/kmsg 2>/dev/null || true
+fi
+# ── END QGL SELinux tool discovery ────────────────────────────────────────
 
 if [ "$QGL" = "y" ]; then
   log_service "========================================"
-  log_service "QGL CONFIGURATION ACTIVE RECOVERY"
+  log_service "QGL CONFIGURATION: ACTIVATE / REPAIR"
   log_service "========================================"
 
   QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
+  QGL_TEMP="/data/vendor/gpu/.qgl_config.txt.tmp.$$"
   QGL_OWNER_MARKER="/data/vendor/gpu/.adreno_qgl_owner"
-  QGL_REPAIR_NEEDED=false
 
+  # ── PRE-STAT SELINUX INJECTION (stuck-at-0000 root cause fix) ─────────────
+  #
+  # stat -c '%a' requires the SELinux 'getattr' permission on the file's type.
+  # On many custom ROMs (HyperOS, MIUI, ColorOS, OneUI) the static sepolicy.rule
+  # has not been loaded by the time service.sh runs at boot_completed+5s.
+  # If getattr is denied:
+  #   foreign-file guard stat → "?" → case "*" → _fg_skip=true → CASE A/B skipped
+  #   main dispatch stat      → ""  → CASE B instead of CASE A (wrong path)
+  # BOTH stat calls happen before the CASE A injection block — so the thorough
+  # injection inside CASE A is unreachable when it's needed most.
+  # FIX: Run a minimum getattr+setattr injection HERE, before any stat call,
+  # so every subsequent stat in this block succeeds and routes correctly.
+  # These calls are no-ops if the rules are already live (idempotent).
+  if [ -n "$_SVC_SEPOLICY_TOOL" ]; then
+    for _pre_ctx in su ksu magisk; do
+      "$_SVC_SEPOLICY_TOOL" --live \
+        "allow ${_pre_ctx} vendor_data_file file { getattr setattr relabelfrom relabelto }" \
+        >/dev/null 2>&1 || true
+      "$_SVC_SEPOLICY_TOOL" --live \
+        "allow ${_pre_ctx} same_process_hal_file file { getattr setattr relabelto relabelfrom }" \
+        >/dev/null 2>&1 || true
+      "$_SVC_SEPOLICY_TOOL" --live \
+        "allow ${_pre_ctx} unlabeled file { getattr setattr relabelfrom relabelto }" \
+        >/dev/null 2>&1 || true
+    done
+    unset _pre_ctx
+    log_service "[OK] QGL: pre-stat SELinux getattr+setattr injected (su, ksu, magisk)"
+  fi
+  # ── END PRE-STAT INJECTION ─────────────────────────────────────────────────
+
+  # ── OWNERSHIP RECLAIM + FOREIGN-FILE GUARD ───────────────────────────────
+  # Merged into one check so that mode 0000 (our exclusive PROTECTED MODE) is
+  # NEVER blocked by the foreign-file guard, even when the owner marker is missing.
+  #
+  # ROOT CAUSE FIX: Previously, when touch "$QGL_OWNER_MARKER" failed (because
+  # su/ksu/magisk lacked write+add_name on the same_process_hal_file directory),
+  # the reclaim block logged a failure and fell through — and then the foreign-file
+  # guard immediately fired: "file exists without marker → third-party → skip."
+  # CASE A never ran and the file stayed at 0000 permanently.
+  #
+  # FIX LOGIC:
+  #   • mode 0000   → ALWAYS ours (no external manager creates 0000-mode QGL config).
+  #                   Attempt marker recreation; proceed to CASE A regardless.
+  #   • mode non-0 + no marker → genuinely third-party (LYB, etc.) → skip.
+  _fg_skip=false
   if [ -f "$QGL_TARGET" ] && [ ! -f "$QGL_OWNER_MARKER" ]; then
-    log_service "[!] QGL: qgl_config.txt exists but was NOT installed by this module"
-    log_service "    Owner marker absent → another manager controls this file"
-    log_service "    Skipping recovery to avoid overwriting a third-party QGL config"
-  else
-
-  if [ -f "$QGL_TARGET" ]; then
-    log_service "[OK] QGL config file exists: $QGL_TARGET"
-    _qgl_stat=$(stat -c '%A %U:%G %s' "$QGL_TARGET" 2>/dev/null || echo "unknown unknown 0")
-    QGL_PERMS="${_qgl_stat%% *}"; _qgl_stat="${_qgl_stat#* }"
-    QGL_OWNER="${_qgl_stat%% *}"
-    QGL_SIZE="${_qgl_stat##* }"
-    unset _qgl_stat
-    log_service "  Permissions: $QGL_PERMS"
-    log_service "  Owner: $QGL_OWNER"
-    log_service "  Size: $QGL_SIZE bytes"
-
-    if [ "$QGL_SIZE" -eq 0 ]; then
-      log_service "[X] ERROR: QGL config file is empty!"
-      QGL_REPAIR_NEEDED=true
-    fi
-
-    if [ "$QGL_PERMS" != "-rw-r--r--" ] && [ "$QGL_PERMS" != "unknown" ]; then
-      log_service "[!] WARNING: QGL config has incorrect permissions"
-      chmod 0644 "$QGL_TARGET" 2>/dev/null && \
-        log_service "[OK] QGL config permissions corrected" || \
-        log_service "[X] Failed to correct permissions"
-    fi
-  else
-    log_service "[X] ERROR: QGL config file not found!"
-    log_service "  Expected: $QGL_TARGET"
-    QGL_REPAIR_NEEDED=true
-  fi
-
-  if [ "$QGL_REPAIR_NEEDED" = "true" ]; then
-    log_service "Attempting to repair QGL configuration..."
-    if [ -f "$MODDIR/qgl_config.txt" ]; then
-      mkdir -p /data/vendor/gpu 2>/dev/null
-      if cp -f "$MODDIR/qgl_config.txt" "$QGL_TARGET" 2>/dev/null; then
-        chmod 0644 "$QGL_TARGET" 2>/dev/null
-        chown 0:1000 "$QGL_TARGET" 2>/dev/null
-        chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || \
-          chcon u:object_r:vendor_data_file:s0 "$QGL_TARGET" 2>/dev/null || true
-        if [ -f "$QGL_TARGET" ] && [ -s "$QGL_TARGET" ]; then
-          NEW_SIZE=$(stat -c%s "$QGL_TARGET" 2>/dev/null || echo "0")
-          touch "$QGL_OWNER_MARKER" 2>/dev/null || true
-          log_service "[OK] QGL config repaired successfully ($NEW_SIZE bytes)"
-          log_service "[OK] QGL owner marker stamped: $QGL_OWNER_MARKER"
+    # Fallback is "0" not "?" — if getattr fails despite pre-stat injection
+    # (e.g., ksud/magiskpolicy unavailable), treat as mode 0000.
+    # Only our module ever creates a mode-000 qgl_config.txt; no third-party
+    # manager uses that mode, so treating a failed stat as 0000 is always correct.
+    _svc_fgmode=$(stat -c '%a' "$QGL_TARGET" 2>/dev/null || echo "0")
+    case "$_svc_fgmode" in
+      "0"|"00"|"000"|"0000")
+        # Mode 0000 = exclusively our PROTECTED MODE. Reclaim unconditionally.
+        # If touch fails (same_process_hal_file dir perms gap on older policy builds),
+        # we still proceed — mode 0000 cannot be a third-party file.
+        log_service "[OK] QGL: 0000-mode file without owner marker — reclaiming (PROTECTED MODE is exclusively ours)"
+        if touch "$QGL_OWNER_MARKER" 2>/dev/null && chmod 0600 "$QGL_OWNER_MARKER" 2>/dev/null; then
+          log_service "    Owner marker re-created — proceeding to CASE A"
         else
-          log_service "[X] ERROR: QGL config repair verification failed"
+          log_service "    [!] Owner marker re-create failed (dir write/add_name denied?) — forcing CASE A anyway"
+          log_service "    mode 0000 is definitive proof this is our protected-mode file"
+          printf '[ADRENO] QGL: 0000-mode without marker, marker touch failed — forcing CASE A\n' \
+            > /dev/kmsg 2>/dev/null || true
         fi
-      else
-        log_service "[X] ERROR: Failed to copy QGL config during repair"
-      fi
-    else
-      log_service "[X] ERROR: QGL config source file not found in module"
-      log_service "  Module may be corrupted - recommend reinstalling"
-    fi
+        ;;
+      *)
+        # Non-zero mode + no marker = third-party manager's file
+        _fg_skip=true
+        log_service "[!] QGL: qgl_config.txt exists without owner marker (mode=${_svc_fgmode}) — third-party controls it"
+        log_service "    Skipping to avoid overwriting (e.g. LYB Kernel Manager)"
+        ;;
+    esac
+    unset _svc_fgmode
   fi
+  # ── END ownership reclaim + guard ──────────────────────────────────────────
 
-  fi  # end of foreign-file safety check
+  if [ "$_fg_skip" = "true" ]; then
+    : # foreign-file — nothing to do
+  else
+    # Fallback is "0000" not "missing" — if stat still fails despite pre-stat
+    # injection, the file exists (we checked _fg_skip) and must be ours at mode 0000.
+    # Routing to CASE A (chmod) is correct; routing to CASE B (cp) is wrong since
+    # the file already exists and CASE B would try to overwrite it unnecessarily.
+    _qgl_mode=$(stat -c '%a' "$QGL_TARGET" 2>/dev/null || echo "0000")
+
+    case "$_qgl_mode" in
+
+      "missing"|"")
+        # ── CASE B: File absent — emergency full install ───────────────────────
+        log_service "[!] CASE B: qgl_config.txt not present — post-fs-data.sh install failed"
+        log_service "    Attempting emergency install (requires SELinux write for su/magisk domain)"
+
+        if [ -n "$_SVC_SEPOLICY_TOOL" ]; then
+          # Inject for all three root manager domains individually (NOT batched).
+          # Batch risk: Knox neverallow on associate rolls back the ENTIRE batch atomically,
+          # leaving even the critical setattr un-injected. Individual calls: each
+          # rule succeeds or fails independently; setattr lands even when associate is blocked.
+          # su    = KernelSU (tiann) + APatch service domain
+          # ksu   = KernelSU-Next (rifsxd) service domain — NOT in KSU standard
+          # magisk = Magisk service domain (already has allow magisk * * *, belt-and-suspenders)
+          for _ctx in su ksu magisk; do
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} vendor_data_file dir { create read write open search add_name remove_name setattr getattr relabelfrom }" \
+              >/dev/null 2>&1 || true
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }" \
+              >/dev/null 2>&1 || true
+            # BUG FIX: was relabelto-only. Added relabelfrom+unlink for copy-fallback rm -f
+            # and for future relabeling FROM same_process_hal_file back to vendor_data_file.
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} same_process_hal_file file { create read write open getattr setattr relabelto relabelfrom unlink rename }" \
+              >/dev/null 2>&1 || true
+            # DIRECTORY CHCON FIX: dir-level relabelto/relabelfrom for same_process_hal_file.
+            # Required to chcon /data/vendor/gpu/ to same_process_hal_file in CASE B.
+            # write+add_name+remove_name: needed for creating files in same_process_hal_file dirs.
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }" \
+              >/dev/null 2>&1 || true
+          done
+          # labeledfs = ext4/f2fs with xattr (/data partition type in Android).
+          # unlabeled = fallback for any file missing a security label.
+          # NOT using '*' — Knox neverallow covers tmpfs/proc/devpts and '*' hits all.
+          "$_SVC_SEPOLICY_TOOL" --live \
+            "allow same_process_hal_file labeledfs filesystem associate" \
+            >/dev/null 2>&1 || true
+          "$_SVC_SEPOLICY_TOOL" --live \
+            "allow same_process_hal_file unlabeled filesystem associate" \
+            >/dev/null 2>&1 || true
+          log_service "    CASE B: SELinux write+relabel injected for su, ksu, magisk"
+          unset _ctx
+        fi
+
+        if [ -f "$MODDIR/qgl_config.txt" ]; then
+          _qgl_ok=false; _qgl_r=0
+          mkdir -p /data/vendor/gpu 2>/dev/null || true
+          while [ $_qgl_r -lt 5 ] && [ "$_qgl_ok" = "false" ]; do
+            if cp -f "$MODDIR/qgl_config.txt" "$QGL_TEMP" 2>/dev/null && \
+               [ -s "$QGL_TEMP" ]; then
+              chmod 0644 "$QGL_TEMP" 2>/dev/null
+              chown 0:1000 "$QGL_TEMP" 2>/dev/null
+              if mv -f "$QGL_TEMP" "$QGL_TARGET" 2>/dev/null && [ -s "$QGL_TARGET" ]; then
+                if chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null; then
+                  # Also chcon the directory — both required by the Adreno driver.
+                  chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu/ 2>/dev/null || true
+                  _qgl_ctx_actual=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
+                else
+                  chcon u:object_r:vendor_data_file:s0 "$QGL_TARGET" 2>/dev/null || true
+                  _qgl_ctx_actual=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
+                fi
+                touch "$QGL_OWNER_MARKER" 2>/dev/null || true
+                _qgl_sz=$(stat -c%s "$QGL_TARGET" 2>/dev/null || echo "?")
+                log_service "[OK] CASE B: Emergency install succeeded (${_qgl_sz}B, ctx=${_qgl_ctx_actual})"
+                unset _qgl_ctx_actual
+                _qgl_ok=true; break
+              fi
+            fi
+            rm -f "$QGL_TEMP" 2>/dev/null
+            _qgl_r=$((_qgl_r + 1))
+            [ "$_qgl_ok" = "false" ] && sleep 1
+          done
+          if [ "$_qgl_ok" = "false" ]; then
+            log_service "[X] CASE B: Emergency install FAILED — SELinux write denied for su/magisk"
+            log_service "    QGL tuning unavailable this boot"
+            log_service "    Diagnostic: dmesg | grep -i 'avc.*vendor_data'"
+          fi
+          unset _qgl_ok _qgl_r _qgl_sz
+        else
+          log_service "[X] CASE B: $MODDIR/qgl_config.txt missing — module may be corrupt"
+        fi
+        ;;
+
+      "0"|"00"|"000"|"0000")
+        # ── CASE A: Protected mode — ACTIVATE ─────────────────────────────────
+        # ── TIMING GUARD: wait for boot-completed.sh +20s window ─────────────
+        # CASE A runs after sdcard wait (~boot+7-10s), before boot-completed.sh
+        # finishes its 20s sleep. Without this guard CASE A activates at boot+10s,
+        # short-circuiting the 20s delay that fixed the black screen.
+        # boot-completed.sh: sleep 20s → cp → chmod 0644 → done. That sequence
+        # needs ~2s of CPU time after the 20s sleep, so wait 25s to be safe.
+        # If boot-completed.sh already wrote the file (0644), we skip immediately.
+        _caseA_now=$(cat /proc/uptime 2>/dev/null | awk '{print int($1)}' || echo "999")
+        _caseA_elapsed=$(( _caseA_now - ${_BOOT_COMPLETED_TS:-0} ))
+        _caseA_skip=false
+        if [ "$_caseA_elapsed" -lt 25 ] 2>/dev/null; then
+          _caseA_wait=$(( 25 - _caseA_elapsed ))
+          log_service "[CASE A] Timing guard: ${_caseA_elapsed}s elapsed — waiting ${_caseA_wait}s (boot-completed.sh writes at +20s)"
+          sleep "$_caseA_wait"
+          # Re-check: boot-completed.sh may have already activated
+          _caseA_recheck=$(stat -c '%a' "$QGL_TARGET" 2>/dev/null || echo "0000")
+          if [ "$_caseA_recheck" = "644" ] || [ "$_caseA_recheck" = "0644" ]; then
+            log_service "[CASE A] boot-completed.sh already activated (0644) — CASE A skip"
+            _caseA_skip=true
+          fi
+          unset _caseA_recheck
+        fi
+        unset _caseA_now _caseA_elapsed _caseA_wait
+        # ── END TIMING GUARD ──────────────────────────────────────────────────
+        if [ "$_caseA_skip" = "true" ]; then
+          unset _caseA_skip
+        else
+        unset _caseA_skip
+        _qgl_ctx_pre=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
+        printf '[ADRENO] QGL CASE A: activating protected file (mode=0000→0644, ctx=%s)\n' \
+          "$_qgl_ctx_pre" > /dev/kmsg 2>/dev/null || true
+        log_service "[OK] CASE A: qgl_config.txt is in PROTECTED MODE (mode=0000)"
+        log_service "    SELinux context before activation: ${_qgl_ctx_pre}"
+        log_service "    SurfaceFlinger (uid=1000) was blocked from reading → no Vulkan init hang"
+        log_service "    Activating now: chmod 0644 — requires only 'setattr', NOT 'write'"
+        log_service "    Effect: all new Vulkan contexts after activation use QGL tuning"
+        unset _qgl_ctx_pre
+
+        # ── Pre-inject setattr + relabelfrom + relabelto + hwui consumer rules ──
+        #
+        # (1) setattr on vendor_data_file: required for chmod 0644 to succeed.
+        #     Magisk domain has 'allow magisk * * *' so it's covered. KernelSU
+        #     (u:r:su:s0) and APatch have su domain; KernelSU-Next has ksu domain —
+        #     neither has setattr on vendor_data_file without explicit injection.
+        #     Without this: chmod silently returns EACCES → mode stays 0000 forever.
+        #
+        # (2) relabelfrom vendor_data_file + relabelto same_process_hal_file: required
+        #     for chcon to relabel the file. Without these, chcon silently fails →
+        #     file retains vendor_data_file context → HAL processes (which only have
+        #     same_process_hal_file read rules) cannot open qgl_config.txt → QGL config
+        #     is silently ignored even though the file is chmod 0644.
+        #
+        # (3) Consumer rules for both rendering paths: once QGL becomes readable
+        #     (chmod 0644 + chcon same_process_hal_file):
+        #     (a) debug.hwui.renderer=skiavk: appdomain processes read qgl_config.txt
+        #         on every vkCreateDevice call. HWUI apps, games, Vulkan renderers.
+        #     (b) debug.renderengine.backend=skiavkthreaded: SurfaceFlinger reads
+        #         qgl_config.txt on VkDevice recreation events (display hotplug,
+        #         protected content mode, etc.) after boot_completed. The static
+        #         sepolicy.rule already grants SF same_process_hal_file read, but
+        #         re-injection here ensures the rule is live at the exact moment
+        #         of file activation, even on ROMs where policy reload ordering varies.
+        #     Both paths require same_process_hal_file read rules. These rules are
+        #     also in post-fs-data.sh batch, but re-injecting here is belt-and-suspenders
+        #     batch, but re-injecting here is belt-and-suspenders for cases where the
+        #     batch failed, and ensures they are present at the exact moment of activation.
+        #
+        # NOT batched: a Knox OEM neverallow on 'filesystem associate' (or any other
+        # rule) would roll back the ENTIRE batch atomically — setattr would never land.
+        # Individual calls: each succeeds or fails independently.
+        if [ -n "$_SVC_SEPOLICY_TOOL" ]; then
+          for _ctx in su ksu magisk; do
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} vendor_data_file file { getattr setattr relabelfrom relabelto }" \
+              >/dev/null 2>&1 || true
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} vendor_data_file dir { getattr search read open relabelfrom }" \
+              >/dev/null 2>&1 || true
+            # BUG FIX: added create/write/open/read so the fresh-write cp (boot-completed.sh
+            # and service.sh fallback) can create a new file inside the same_process_hal_file
+            # directory without needing relabelfrom/relabelto permissions.
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} same_process_hal_file file { getattr setattr relabelto relabelfrom create write open read unlink rename }" \
+              >/dev/null 2>&1 || true
+            # DIRECTORY CHCON FIX: dir-level rules for chconing /data/vendor/gpu/ to
+            # same_process_hal_file. Without these, the directory chcon silently fails
+            # and the Adreno driver ignores qgl_config.txt (it checks both contexts).
+            # write+add_name+remove_name: needed for creating/removing files in the dir
+            # (owner marker touch, temp file creation in copy-fallback, rm of old file).
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }" \
+              >/dev/null 2>&1 || true
+            # UNLABELED FIX: OEM ROMs (HyperOS/MIUI/ColorOS) lack type_transition
+            # init vendor_data_file:dir vendor_data_file -> files created in
+            # /data/vendor/gpu/ receive 'unlabeled' label instead of vendor_data_file.
+            # setattr: needed for chmod 0644 on unlabeled file (primary CASE A path).
+            # relabelfrom: needed for chcon FROM unlabeled to vendor_data_file/sph.
+            # unlink: needed for rm -f on unlabeled file (CASE A copy fallback).
+            # rename: needed for mv of unlabeled temp file → target.
+            # write+add_name+remove_name on dir: needed for file creation in unlabeled dirs.
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} unlabeled file { create read write open getattr setattr relabelfrom unlink rename }" \
+              >/dev/null 2>&1 || true
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} unlabeled dir { getattr setattr relabelfrom write add_name remove_name }" \
+              >/dev/null 2>&1 || true
+          done
+          "$_SVC_SEPOLICY_TOOL" --live \
+            "allow same_process_hal_file labeledfs filesystem associate" \
+            >/dev/null 2>&1 || true
+          "$_SVC_SEPOLICY_TOOL" --live \
+            "allow same_process_hal_file unlabeled filesystem associate" \
+            >/dev/null 2>&1 || true
+          # Consumer rules re-injected for BOTH rendering paths:
+          #   (a) debug.hwui.renderer=skiavk → appdomain processes call vkCreateDevice
+          #       after boot_completed and read qgl_config.txt via same_process_hal_file.
+          #   (b) debug.renderengine.backend=skiavkthreaded → SurfaceFlinger's VkDevice
+          #       recreation events (display hotplug, protected content mode transitions)
+          #       after boot_completed read qgl_config.txt. Static sepolicy.rule already
+          #       grants SF same_process_hal_file read; re-injection here is belt-and-
+          #       suspenders ensuring the rule is present at the exact moment of activation.
+          # DIR rules: required because /data/vendor/gpu/ has same_process_hal_file
+          # context — processes need dir search to traverse it to the config file.
+          for _ctx in appdomain surfaceflinger hal_graphics_composer_default hal_graphics_allocator_default hal_graphics_mapper_default system_server zygote; do
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} same_process_hal_file file { read open getattr }" \
+              >/dev/null 2>&1 || true
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} same_process_hal_file dir { search read open getattr }" \
+              >/dev/null 2>&1 || true
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} vendor_data_file file { read open getattr }" \
+              >/dev/null 2>&1 || true
+          done
+          log_service "    CASE A: SELinux setattr+relabelfrom+relabelto injected (su, ksu, magisk)"
+          log_service "    CASE A: consumer rules re-injected (HWUI skiavk appdomain + renderengine SF + HALs)"
+          unset _ctx
+        fi
+
+        # ── DIRECT KSUD INJECTION: belt-and-suspenders regardless of wrapper state ──
+        # Runs unconditionally: even when _SVC_SEPOLICY_TOOL is set (wrapper works),
+        # direct ksud calls here ensure the CRITICAL setattr+unlink+create rules land.
+        # This covers: (a) wrapper-less KSU-Next (chmod failed), (b) any wrapper
+        # failure mid-injection, (c) ROMs where sepolicy.rule was silently rejected.
+        # _SVC_KSUD_BIN is set when ksud was found and tested but wrapper couldn't
+        # be made executable. Also do a final discovery scan in case ksud appeared
+        # after the initial wrapper-creation attempt (rare but possible on some ROMs).
+        _caseA_ksud=""
+        if [ -n "$_SVC_KSUD_BIN" ]; then
+          _caseA_ksud="$_SVC_KSUD_BIN"
+        else
+          for _kb in "/data/adb/ksud" "/data/adb/ksu/bin/ksud" "$(command -v ksud 2>/dev/null)"; do
+            [ -z "$_kb" ] && continue
+            [ -f "$_kb" ] && [ -x "$_kb" ] && { _caseA_ksud="$_kb"; break; }
+          done
+          unset _kb
+        fi
+        if [ -n "$_caseA_ksud" ]; then
+          _caseA_inj=0
+          for _ctx in su ksu magisk; do
+            "$_caseA_ksud" sepolicy patch \
+              "allow ${_ctx} vendor_data_file file { getattr setattr unlink create write open rename relabelfrom relabelto }" \
+              >/dev/null 2>&1 && _caseA_inj=$((_caseA_inj+1)) || true
+            "$_caseA_ksud" sepolicy patch \
+              "allow ${_ctx} vendor_data_file dir { getattr search read open relabelfrom }" \
+              >/dev/null 2>&1 || true
+            "$_caseA_ksud" sepolicy patch \
+              "allow ${_ctx} same_process_hal_file file { getattr setattr relabelto relabelfrom create write open read unlink rename }" \
+              >/dev/null 2>&1 || true
+            "$_caseA_ksud" sepolicy patch \
+              "allow ${_ctx} same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }" \
+              >/dev/null 2>&1 || true
+            "$_caseA_ksud" sepolicy patch \
+              "allow ${_ctx} unlabeled file { getattr setattr relabelfrom unlink rename create write open }" \
+              >/dev/null 2>&1 || true
+            "$_caseA_ksud" sepolicy patch \
+              "allow ${_ctx} unlabeled dir { getattr setattr relabelfrom write add_name remove_name }" \
+              >/dev/null 2>&1 || true
+          done
+          "$_caseA_ksud" sepolicy patch "allow same_process_hal_file labeledfs filesystem associate" >/dev/null 2>&1 || true
+          "$_caseA_ksud" sepolicy patch "allow same_process_hal_file unlabeled filesystem associate" >/dev/null 2>&1 || true
+          log_service "    CASE A: direct ksud belt-and-suspenders injection done (${_caseA_inj}/3 su/ksu/magisk setattr rules)"
+          unset _caseA_inj _ctx
+        fi
+        unset _caseA_ksud
+        # ── END DIRECT KSUD INJECTION ─────────────────────────────────────────
+        # ── END pre-injection ─────────────────────────────────────────────────
+
+        # UNLABELED FIX: On OEM ROMs without type_transition, qgl_config.txt may
+        # be labeled 'unlabeled' instead of 'vendor_data_file'. chmod needs setattr
+        # on the file's actual type. If the file is unlabeled, try to relabel it to
+        # vendor_data_file first (using the rules injected above), so that the existing
+        # setattr grant on vendor_data_file then applies to the chmod call.
+        # This is a no-op on correctly-labeled files (already vendor_data_file).
+        _qgl_pre_label=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "")
+        case "$_qgl_pre_label" in
+          *unlabeled*)
+            log_service "    CASE A: file labeled 'unlabeled' (OEM ROM missing type_transition)"
+            log_service "    CASE A: pre-relabeling unlabeled → vendor_data_file before chmod"
+            chcon u:object_r:vendor_data_file:s0 "$QGL_TARGET" 2>/dev/null && \
+              log_service "    CASE A: pre-relabel OK (file now vendor_data_file — chmod will use setattr rule)" || \
+              log_service "    [!] CASE A: pre-relabel failed (unlabeled relabelfrom may not be in policy yet)"
+            printf '[ADRENO] QGL CASE A: unlabeled→vendor_data_file pre-relabel attempted\n' > /dev/kmsg 2>/dev/null || true
+            ;;
+        esac
+        unset _qgl_pre_label
+
+        if chmod 0644 "$QGL_TARGET" 2>/dev/null; then
+          printf '[ADRENO] QGL CASE A: chmod 0644 succeeded\n' > /dev/kmsg 2>/dev/null || true
+          chown 0:1000 "$QGL_TARGET" 2>/dev/null || chown 0:0 "$QGL_TARGET" 2>/dev/null || true
+          # relabelfrom vendor_data_file + relabelto same_process_hal_file + associate now injected above.
+          # CRITICAL: chcon BOTH the file AND the directory to same_process_hal_file.
+          # The Adreno driver validates both contexts before reading qgl_config.txt.
+          # If the directory does not have same_process_hal_file, the driver silently
+          # ignores the file even if the file itself has the correct context.
+          if chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null; then
+            _qgl_ctx_actual=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
+            log_service "    chcon file → same_process_hal_file OK (ctx=${_qgl_ctx_actual})"
+            # Now chcon the directory — MANDATORY for driver to read the file.
+            if chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu/ 2>/dev/null; then
+              _qgl_dir_ctx=$(ls -dZ /data/vendor/gpu/ 2>/dev/null | awk '{print $1}' || echo "unknown")
+              log_service "    chcon dir → same_process_hal_file OK (ctx=${_qgl_dir_ctx})"
+            else
+              log_service "    [!] chcon dir same_process_hal_file denied — driver may ignore config"
+              printf '[ADRENO] QGL CASE A: dir chcon denied — driver may ignore config\n' > /dev/kmsg 2>/dev/null || true
+            fi
+            unset _qgl_dir_ctx
+          else
+            chcon u:object_r:vendor_data_file:s0 "$QGL_TARGET" 2>/dev/null || true
+            _qgl_ctx_actual=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
+            log_service "    [!] chcon same_process_hal_file denied — filesystem associate OEM-blocked"
+            log_service "    Fallback: ctx=${_qgl_ctx_actual} — HAL fallback via domain→vendor_data_file rule"
+          fi
+          unset _qgl_ctx_actual
+
+          _qgl_new_mode=$(stat -c '%a' "$QGL_TARGET" 2>/dev/null || echo "?")
+          _qgl_sz=$(stat -c%s "$QGL_TARGET" 2>/dev/null || echo "?")
+          if [ "$_qgl_new_mode" = "644" ] || [ "$_qgl_new_mode" = "0644" ]; then
+            printf '[ADRENO] QGL CASE A: ACTIVATED OK (mode=0644, %sB)\n' "$_qgl_sz" > /dev/kmsg 2>/dev/null || true
+            log_service "[OK] CASE A: QGL ACTIVATED (mode=${_qgl_new_mode}, ${_qgl_sz}B)"
+            log_service "    QGL tuning now active for all new KGSL/Vulkan contexts (HWUI skiavk apps + SF renderengine skiavkthreaded recreation events)"
+          else
+            printf '[ADRENO] QGL CASE A: chmod ran but mode=%s — check dmesg for avc\n' "$_qgl_new_mode" > /dev/kmsg 2>/dev/null || true
+            log_service "[!] CASE A: chmod ran but mode=${_qgl_new_mode} — checking readability"
+            if cat "$QGL_TARGET" >/dev/null 2>&1; then
+              log_service "[OK] File readable — treating as activated"
+            else
+              log_service "[X] File still unreadable — activation may have failed"
+            fi
+          fi
+          unset _qgl_new_mode _qgl_sz
+        else
+          # chmod denied even after pre-injection — Knox ultra-strict SELinux edge case.
+          # chmod 0644 failed even after SELinux injection. This means 'setattr' on
+          # vendor_data_file is blocked (e.g. file labeled 'unlabeled' instead of
+          # vendor_data_file, or OEM neverallow blocks setattr on that type).
+          # Copy-based fallback: remove the 0000-mode file and recreate it fresh.
+          # A newly created file's mode is set at open(O_CREAT) time, which uses
+          # 'create' in SELinux policy — NOT 'setattr'. This sidesteps the block.
+          # 'unlink' + 'create' on vendor_data_file are granted in sepolicy.rule and
+          # in the individual injection loop above — available even when setattr fails.
+          printf '[ADRENO] QGL CASE A: chmod 0644 DENIED — trying copy-based fallback\n' > /dev/kmsg 2>/dev/null || true
+          log_service "[X] CASE A: chmod 0644 denied after setattr injection — attempting copy-based fallback"
+          log_service "    Strategy: rm the 0000-mode file + recreate fresh (uses 'create', not 'setattr')"
+          if [ -f "$MODDIR/qgl_config.txt" ]; then
+            if rm -f "$QGL_TARGET" 2>/dev/null; then
+              if cat "$MODDIR/qgl_config.txt" > "$QGL_TARGET" 2>/dev/null && [ -s "$QGL_TARGET" ]; then
+                _qgl_new_mode=$(stat -c '%a' "$QGL_TARGET" 2>/dev/null || echo "?")
+                _qgl_sz=$(stat -c%s "$QGL_TARGET" 2>/dev/null || echo "?")
+                log_service "    Copy fallback: file recreated (mode=${_qgl_new_mode}, ${_qgl_sz}B)"
+                if chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null; then
+                  # Also chcon the directory — both are required by the Adreno driver.
+                  chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu/ 2>/dev/null || true
+                  _qgl_ctx_actual=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
+                  log_service "[OK] CASE A (copy-fallback): ACTIVATED (mode=${_qgl_new_mode}, ctx=${_qgl_ctx_actual})"
+                  printf '[ADRENO] QGL CASE A: ACTIVATED via copy-fallback (mode=%s)\n' \
+                    "$_qgl_new_mode" > /dev/kmsg 2>/dev/null || true
+                else
+                  chcon u:object_r:vendor_data_file:s0 "$QGL_TARGET" 2>/dev/null || true
+                  _qgl_ctx_actual=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
+                  log_service "[~] CASE A (copy-fallback): file recreated as ${_qgl_new_mode}, chcon OEM-blocked"
+                  log_service "    ctx=${_qgl_ctx_actual} — QGL accessible via vendor_data_file consumer rules"
+                  printf '[ADRENO] QGL CASE A: copy-fallback partial (mode=%s, chcon blocked)\n' \
+                    "$_qgl_new_mode" > /dev/kmsg 2>/dev/null || true
+                fi
+              else
+                log_service "[X] CASE A (copy-fallback): cat/create blocked — both setattr and create denied"
+                log_service "    Attempting direct ksud injection as last-resort fallback..."
+                # LAST-RESORT: directly call ksud sepolicy patch without the wrapper.
+                # This covers the edge case where the wrapper creation failed or was
+                # not available at discovery time but ksud itself is accessible.
+                _la_ksud_bin=""
+                for _kb2 in "/data/adb/ksud" "/data/adb/ksu/bin/ksud" "$(command -v ksud 2>/dev/null)"; do
+                  [ -z "$_kb2" ] && continue
+                  [ -f "$_kb2" ] && [ -x "$_kb2" ] && { _la_ksud_bin="$_kb2"; break; }
+                done
+                unset _kb2
+                if [ -n "$_la_ksud_bin" ]; then
+                  for _la_ctx in su ksu magisk; do
+                    "$_la_ksud_bin" sepolicy patch "allow ${_la_ctx} vendor_data_file file { create write open unlink rename }" 2>/dev/null || true
+                    "$_la_ksud_bin" sepolicy patch "allow ${_la_ctx} unlabeled file { create write open setattr relabelfrom unlink rename }" 2>/dev/null || true
+                  done
+                  unset _la_ctx
+                  log_service "    Direct ksud injection done — retrying cat/create once more"
+                  if cat "$MODDIR/qgl_config.txt" > "$QGL_TARGET" 2>/dev/null && [ -s "$QGL_TARGET" ]; then
+                    log_service "[OK] CASE A (ksud last-resort): file created after direct injection"
+                    chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || \
+                      chcon u:object_r:vendor_data_file:s0 "$QGL_TARGET" 2>/dev/null || true
+                    printf '[ADRENO] QGL CASE A: ACTIVATED via ksud last-resort\n' > /dev/kmsg 2>/dev/null || true
+                  else
+                    log_service "[X] CASE A: ksud last-resort also failed — all paths exhausted"
+                    log_service "    Will self-heal next boot. Check: dmesg | grep 'avc.*vendor_data'"
+                    printf '[ADRENO] QGL CASE A: ALL paths DENIED — check dmesg avc\n' > /dev/kmsg 2>/dev/null || true
+                  fi
+                else
+                  log_service "    ksud not found — no last-resort available"
+                  log_service "    Will self-heal next boot. Check: dmesg | grep 'avc.*vendor_data'"
+                  printf '[ADRENO] QGL CASE A: BOTH chmod and copy-fallback DENIED\n' > /dev/kmsg 2>/dev/null || true
+                fi
+                unset _la_ksud_bin
+              fi
+            else
+              # rm -f failed — unlink is denied. This is unusual since we injected
+              # 'unlink' above. Try direct ksud injection specifically for unlink,
+              # retry rm once, and if still blocked, overwrite the existing 0000-mode
+              # file in-place (requires 'write' on vendor_data_file, NOT 'unlink').
+              # After overwrite, attempt chmod 0644 again with refreshed rules.
+              log_service "[X] CASE A (copy-fallback): rm -f blocked — attempting ksud direct unlink injection + retry"
+              printf '[ADRENO] QGL CASE A: unlink DENIED — injecting direct ksud rules\n' > /dev/kmsg 2>/dev/null || true
+              _rmretry_ksud=""
+              for _kb in "/data/adb/ksud" "/data/adb/ksu/bin/ksud" "$(command -v ksud 2>/dev/null)"; do
+                [ -z "$_kb" ] && continue
+                [ -f "$_kb" ] && [ -x "$_kb" ] && { _rmretry_ksud="$_kb"; break; }
+              done
+              unset _kb
+              if [ -n "$_rmretry_ksud" ]; then
+                for _rmctx in su ksu magisk; do
+                  "$_rmretry_ksud" sepolicy patch "allow ${_rmctx} vendor_data_file file { unlink create write open setattr getattr }" 2>/dev/null || true
+                  "$_rmretry_ksud" sepolicy patch "allow ${_rmctx} unlabeled file { unlink create write open setattr getattr relabelfrom }" 2>/dev/null || true
+                done
+                unset _rmctx
+                log_service "    Retrying rm -f after direct ksud unlink injection..."
+                if rm -f "$QGL_TARGET" 2>/dev/null; then
+                  # rm succeeded after injection — create fresh file (mode 0644 from umask)
+                  if cat "$MODDIR/qgl_config.txt" > "$QGL_TARGET" 2>/dev/null && [ -s "$QGL_TARGET" ]; then
+                    chmod 0644 "$QGL_TARGET" 2>/dev/null || true
+                    if chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null; then
+                      chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu/ 2>/dev/null || true
+                      _qgl_ctx_actual=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
+                      log_service "[OK] CASE A (rm-retry): ACTIVATED after ksud injection (ctx=${_qgl_ctx_actual})"
+                      printf '[ADRENO] QGL CASE A: ACTIVATED via rm-retry path\n' > /dev/kmsg 2>/dev/null || true
+                    else
+                      chcon u:object_r:vendor_data_file:s0 "$QGL_TARGET" 2>/dev/null || true
+                      log_service "[~] CASE A (rm-retry): file recreated, chcon OEM-blocked"
+                    fi
+                    unset _qgl_ctx_actual
+                  else
+                    log_service "[X] CASE A (rm-retry): create still denied after direct injection"
+                    printf '[ADRENO] QGL CASE A: create DENIED even after ksud injection\n' > /dev/kmsg 2>/dev/null || true
+                  fi
+                else
+                  # rm still fails — overwrite in-place (avoids unlink, uses write instead)
+                  log_service "    rm still denied — trying in-place overwrite (write without unlink)"
+                  if cat "$MODDIR/qgl_config.txt" > "$QGL_TARGET" 2>/dev/null && [ -s "$QGL_TARGET" ]; then
+                    # File exists with 0000 mode but new content — attempt chmod now
+                    if chmod 0644 "$QGL_TARGET" 2>/dev/null; then
+                      if chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null; then
+                        chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu/ 2>/dev/null || true
+                        _qgl_ctx_actual=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
+                        log_service "[OK] CASE A (in-place): ACTIVATED (overwrite+chmod, ctx=${_qgl_ctx_actual})"
+                        printf '[ADRENO] QGL CASE A: ACTIVATED via in-place overwrite\n' > /dev/kmsg 2>/dev/null || true
+                        unset _qgl_ctx_actual
+                      else
+                        log_service "[~] CASE A (in-place): chmod OK but chcon blocked — mode 0644, vendor_data_file ctx"
+                      fi
+                    else
+                      log_service "[X] CASE A (in-place): content written but chmod still denied (mode stays 0000)"
+                      log_service "    Content is there. Check dmesg for AVC denials on setattr+vendor_data_file"
+                      printf '[ADRENO] QGL CASE A: in-place write OK but chmod DENIED — mode=0000\n' > /dev/kmsg 2>/dev/null || true
+                    fi
+                  else
+                    log_service "[X] CASE A: all paths exhausted — SELinux fully blocking this domain"
+                    log_service "    Check: dmesg | grep 'avc.*vendor_data_file'"
+                    printf '[ADRENO] QGL CASE A: ALL paths DENIED — check dmesg avc\n' > /dev/kmsg 2>/dev/null || true
+                  fi
+                fi
+              else
+                log_service "[X] CASE A (copy-fallback): rm -f blocked and no ksud available"
+                log_service "    Will self-heal next boot. Check: dmesg | grep 'avc.*vendor_data'"
+                printf '[ADRENO] QGL CASE A: unlink DENIED — no ksud fallback available\n' > /dev/kmsg 2>/dev/null || true
+              fi
+              unset _rmretry_ksud
+            fi
+          else
+            log_service "[X] CASE A (copy-fallback): $MODDIR/qgl_config.txt missing — module may be corrupt"
+            log_service "    Will self-heal next boot."
+          fi
+        fi
+        fi # end timing guard
+        ;;
+
+      *)
+        # ── CASE C: File healthy — verify and correct drift ───────────────────
+        _qgl_sz=$(stat -c%s "$QGL_TARGET" 2>/dev/null || echo "0")
+        _qgl_ctx=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
+        log_service "[OK] CASE C: QGL config active and healthy"
+        log_service "    Mode: ${_qgl_mode}  Size: ${_qgl_sz}B  Context: ${_qgl_ctx}"
+
+        # BUG FIX (644): Pre-inject setattr+relabelfrom+relabelto BEFORE any chmod/chcon.
+        # Without this, the mode-drift chmod below can fail silently on KernelSU-Next
+        # (u:r:ksu:s0 lacks setattr on vendor_data_file without explicit injection).
+        # Injected here once — both mode-drift and context-drift handlers rely on it.
+        # Individual calls (not batched) — same Knox neverallow reasoning as CASE A.
+        if [ -n "$_SVC_SEPOLICY_TOOL" ]; then
+          for _ctx in su ksu magisk; do
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} vendor_data_file file { getattr setattr relabelfrom relabelto }" \
+              >/dev/null 2>&1 || true
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} vendor_data_file dir { getattr search read open }" \
+              >/dev/null 2>&1 || true
+            # BUG FIX: was relabelto-only. Added relabelfrom+unlink — same rationale as CASE A.
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} same_process_hal_file file { getattr setattr relabelto relabelfrom unlink }" \
+              >/dev/null 2>&1 || true
+            # DIRECTORY CHCON FIX: same rationale as CASE A.
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open }" \
+              >/dev/null 2>&1 || true
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} vendor_data_file dir { relabelfrom }" \
+              >/dev/null 2>&1 || true
+            # UNLABELED FIX: same rationale as CASE A injection above.
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} unlabeled file { getattr setattr relabelfrom unlink }" \
+              >/dev/null 2>&1 || true
+            "$_SVC_SEPOLICY_TOOL" --live \
+              "allow ${_ctx} unlabeled dir { getattr setattr relabelfrom }" \
+              >/dev/null 2>&1 || true
+          done
+          "$_SVC_SEPOLICY_TOOL" --live \
+            "allow same_process_hal_file labeledfs filesystem associate" \
+            >/dev/null 2>&1 || true
+          "$_SVC_SEPOLICY_TOOL" --live \
+            "allow same_process_hal_file unlabeled filesystem associate" \
+            >/dev/null 2>&1 || true
+          unset _ctx
+          log_service "    CASE C: SELinux setattr+relabelfrom+associate pre-injected (su, ksu, magisk)"
+        fi
+
+        if [ "$_qgl_mode" != "644" ] && [ "$_qgl_mode" != "0644" ]; then
+          chmod 0644 "$QGL_TARGET" 2>/dev/null && \
+            log_service "    Corrected mode drift → 0644" || \
+            log_service "    [!] mode-drift chmod failed (SELinux EACCES even after injection?)"
+        fi
+
+        # Context-drift check: if chcon failed on a prior boot, file keeps vendor_data_file
+        # context → hal_graphics_* HAL domains (same_process_hal_file-only read rules)
+        # silently cannot open qgl_config.txt → QGL tuning never loaded.
+        # Injection was already done above — just attempt the chcon here.
+        case "$_qgl_ctx" in
+          *same_process_hal_file*)
+            log_service "    Context: same_process_hal_file — correct, no relabeling needed"
+            # Ensure directory also has same_process_hal_file (belt-and-suspenders).
+            _qgl_dir_ctx=$(ls -dZ /data/vendor/gpu/ 2>/dev/null | awk '{print $1}' || echo "unknown")
+            if [ "$_qgl_dir_ctx" != "u:object_r:same_process_hal_file:s0" ]; then
+              chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu/ 2>/dev/null && \
+                log_service "    [OK] CASE C: dir context corrected → same_process_hal_file" || \
+                log_service "    [!] CASE C: dir chcon denied (dir ctx=${_qgl_dir_ctx})"
+            fi
+            unset _qgl_dir_ctx
+            ;;
+          *)
+            log_service "    Context drift detected ('${_qgl_ctx}') — attempting relabel"
+            # Rules (setattr, relabelfrom, relabelto, associate) injected above
+            if chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null; then
+              # Also correct the directory context.
+              chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu/ 2>/dev/null || true
+              _qgl_ctx_new=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
+              log_service "    [OK] Context corrected → ${_qgl_ctx_new}"
+              unset _qgl_ctx_new
+            else
+              _qgl_ctx_new=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
+              log_service "    [!] chcon same_process_hal_file denied (OEM-blocked associate on /data fs)"
+              log_service "    Current ctx: ${_qgl_ctx_new} — HAL fallback via domain→vendor_data_file rule"
+              unset _qgl_ctx_new
+            fi
+            ;;
+        esac
+
+        if [ "$_qgl_sz" = "0" ]; then
+          log_service "[X] CASE C: File is empty — removing so next boot reinstalls"
+          rm -f "$QGL_TARGET" "$QGL_OWNER_MARKER" 2>/dev/null || true
+        fi
+        unset _qgl_sz _qgl_ctx
+        ;;
+    esac
+
+    unset _qgl_mode
+  fi
+  unset _fg_skip
+
+  unset QGL_TARGET QGL_TEMP QGL_OWNER_MARKER
 fi
+unset _SVC_SEPOLICY_TOOL _SVC_KSUD_BIN
 
 # ========================================
 # VALIDATE MODULE MOUNTING
@@ -1839,11 +2005,18 @@ if [ "$PLT" = "y" ]; then
 
   if [ -f /vendor/etc/public.libraries.txt ]; then
     log_service "[OK] Public libraries file exists"
-    if grep -q "gpu++.so" /vendor/etc/public.libraries.txt 2>/dev/null; then
-      log_service "[OK] gpu++.so found in /vendor/etc/public.libraries.txt"
-    else
-      log_service "[!] WARNING: gpu++.so NOT found in public.libraries.txt"
+  _plt_found=false
+  for _plt_f in /vendor/etc/public.libraries*.txt; do
+    [ -f "$_plt_f" ] || continue
+    if grep -q "gpu++.so" "$_plt_f" 2>/dev/null; then
+      _plt_found=true
+      log_service "[OK] gpu++.so found in ${_plt_f##*/}"
+      break
     fi
+  done
+  [ "$_plt_found" = "false" ] && \
+    log_service "[!] WARNING: gpu++.so not found in any public.libraries*.txt"
+  unset _plt_found _plt_f
   else
     log_service "[!] WARNING: /vendor/etc/public.libraries.txt not found"
   fi
@@ -2050,6 +2223,77 @@ fi
 # MARK SUCCESSFUL BOOT
 # ========================================
 
+# ========================================
+# SKIAVK (non-_all): VK COMPAT CANARY WRITE
+# ========================================
+# BUG FIX: For RENDER_MODE=skiavk, adreno_vk_compat was NEVER written by
+# service.sh. All writes of "confirmed" live exclusively inside the
+# All writes of "confirmed" must now happen in service.sh directly.
+#
+# IMPACT: post-fs-data.sh QGL freeze gate requires adreno_vk_compat=confirmed
+# before it allows renderengine.backend=skiavkthreaded. With skiavk+QGL=y,
+# that "confirmed" value never arrives → skiaglthreaded is used on every boot
+# forever, regardless of how healthy the device is.
+#
+# FIX: After boot_completed + service.sh settle time (~35s total), run the
+# same Loophole 4 SystemUI dumpsys canary. If Vulkan is
+# confirmed working, write "confirmed" so the QGL gate clears on next boot.
+# If it fails, write "prop_only" so the gate stays safely locked.
+# Do NOT overwrite existing "incompatible" — that was written for good reason.
+# ========================================
+if [ "$RENDER_MODE" = "skiavk" ]; then
+  _skvk_compat_file="/data/local/tmp/adreno_vk_compat"
+  _skvk_cur=""
+  [ -f "$_skvk_compat_file" ] && \
+    { IFS= read -r _skvk_cur; } < "$_skvk_compat_file" 2>/dev/null || _skvk_cur=""
+
+  if [ "$_skvk_cur" = "incompatible" ]; then
+    log_service "[SKIP] skiavk VK canary: adreno_vk_compat=incompatible — not overwriting (boot_success will also be suppressed)"
+  elif [ "$_skvk_cur" = "confirmed" ]; then
+    log_service "[OK] skiavk VK canary: adreno_vk_compat already confirmed — no write needed"
+  else
+    # Run the canary: check Vulkan driver .so exists (structural guard)
+    _skvk_drv_ok=false
+    for _skvk_vd in /vendor/lib64/hw/vulkan.*.so /vendor/lib/hw/vulkan.*.so \
+                    /system/lib64/hw/vulkan.*.so /system/lib/hw/vulkan.*.so \
+                    /vendor/lib64/libvulkan.so /system/lib64/libvulkan.so; do
+      [ -f "$_skvk_vd" ] && { _skvk_drv_ok=true; break; }
+    done
+    unset _skvk_vd
+
+    if [ "$_skvk_drv_ok" = "false" ]; then
+      log_service "[!] skiavk VK canary: no vulkan.*.so/libvulkan.so found — writing incompatible"
+      printf 'incompatible\n' > "${_skvk_compat_file}.tmp" 2>/dev/null && \
+        mv "${_skvk_compat_file}.tmp" "$_skvk_compat_file" 2>/dev/null || true
+    else
+      # Runtime canary: check SystemUI is actually on Vulkan pipeline
+      _skvk_sysui_count=$(dumpsys gfxinfo com.android.systemui 2>/dev/null \
+                          | grep -c "Skia (Vulkan)" 2>/dev/null || echo "0")
+      _skvk_sysui_count="${_skvk_sysui_count:-0}"
+
+      if [ "$_skvk_sysui_count" -gt 0 ] 2>/dev/null; then
+        printf 'confirmed\n' > "${_skvk_compat_file}.tmp" 2>/dev/null && \
+          mv "${_skvk_compat_file}.tmp" "$_skvk_compat_file" 2>/dev/null || true
+        log_service "[OK] skiavk VK canary: SystemUI on Vulkan (${_skvk_sysui_count} Skia(Vulkan) surface(s)) — writing confirmed, QGL gate cleared for next boot"
+      else
+        _skvk_pipe=$(dumpsys gfxinfo com.android.systemui 2>/dev/null \
+                     | grep -i "Pipeline" | head -1 || echo "")
+        _skvk_live=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
+        printf 'prop_only\n' > "${_skvk_compat_file}.tmp" 2>/dev/null && \
+          mv "${_skvk_compat_file}.tmp" "$_skvk_compat_file" 2>/dev/null || true
+        log_service "[!] skiavk VK canary: SystemUI NOT on Vulkan — writing prop_only (QGL gate stays locked)"
+        log_service "    SystemUI pipeline : '${_skvk_pipe:-unknown}'"
+        log_service "    Live renderer prop: '${_skvk_live}'"
+        log_service "    Skia(Vulkan) count: 0"
+      fi
+      unset _skvk_sysui_count _skvk_pipe _skvk_live
+    fi
+    unset _skvk_drv_ok
+  fi
+  unset _skvk_cur _skvk_compat_file
+fi
+# ── END SKIAVK VK COMPAT CANARY WRITE ────────────────────────────────────────
+
 log_service "========================================"
 log_service "MARKING SUCCESSFUL BOOT"
 log_service "========================================"
@@ -2074,7 +2318,7 @@ fi
 # _PREV_BOOT_SUCCESS=true and promote to skiavkthreaded — but Vulkan is broken, so
 # SF would freeze. Suppressing the marker forces post-fs-data.sh to stay on
 # skiaglthreaded until a future boot re-evaluates compat.
-# "prop_only" is NOT suppressed: that means the ICD runs but force-stop is risky;
+# "prop_only" is NOT suppressed: that means the ICD runs but VK compat is uncertain;
 # SF's own Vulkan compositor path is independent and may still work.
 _bs_vk_compat=""
 [ -f "/data/local/tmp/adreno_vk_compat" ] && \
@@ -2155,7 +2399,7 @@ if cmd_exists resetprop; then
   resetprop debug.hwui.force_dark false 2>/dev/null || true
 
   case "$RENDER_MODE" in
-    skiavk|skiavk_all)
+    skiavk)
       # Reinforce critical skiavk-specific props
       resetprop debug.hwui.renderer skiavk 2>/dev/null || true
       # debug.renderengine.backend intentionally NOT live-resetprop'd here.
@@ -2270,33 +2514,47 @@ if cmd_exists resetprop; then
   #
   # Implementation: persist last active render mode to a state file. Compare on
   # each boot. Clear only on mismatch (mode changed since last boot).
-  _LAST_MODE_FILE="/data/local/tmp/adreno_last_render_mode"
-  _LAST_MODE=""
-  if [ -f "$_LAST_MODE_FILE" ]; then
-    { IFS= read -r _LAST_MODE; } < "$_LAST_MODE_FILE" 2>/dev/null || _LAST_MODE=""
+  # Persist cleared state for next boot comparison.
+  # 3-line format: RENDER_MODE / QGL / QGL_CONFIG_HASH
+  # post-fs-data.sh writes this when it clears. We update it here at end-of-boot
+  # to ensure it reflects the FINAL settings (in case something changed mid-boot).
+  # This is safe to write even when we DID NOT clear above — the state file records
+  # what mode is currently ACTIVE, so next boot's comparison is accurate.
+  _LAST_STATE_FILE="/data/local/tmp/adreno_last_cleared_state"
+  _LS_PREV_MODE=""
+  _LS_PREV_QGL=""
+  if [ -f "$_LAST_STATE_FILE" ]; then
+    {
+      IFS= read -r _LS_PREV_MODE
+      IFS= read -r _LS_PREV_QGL
+    } < "$_LAST_STATE_FILE" 2>/dev/null || true
   fi
-
-  if [ "$RENDER_MODE" != "$_LAST_MODE" ]; then
-    log_service "Render mode changed: '${_LAST_MODE:-<none>}' → '$RENDER_MODE' — clearing stale Skia/HWUI pipeline caches"
-    # shader_journal files — HWUI Skia shader journal manifests
-    find /data/user_de -name "*.shader_journal" 2>/dev/null -delete || true
-    # Global HWUI pipeline key cache — use rm -rf on the directory (glob expansion
-    # is unreliable in POSIX sh when no matching files exist; -rf on dir is safe).
-    rm -rf /data/misc/hwui/ 2>/dev/null || true
-    # Per-app Skia pipeline caches (the main crash culprit on GL→Vulkan switch)
-    # DEPTH: /data/user_de/<uid>/<pkg>/code_cache/app_skia_pipeline_cache/ = 4 levels.
-    find /data/user_de -maxdepth 4 -type d -name "app_skia_pipeline_cache" \
-        -exec rm -rf {} + 2>/dev/null || true
-    find /data/data -maxdepth 3 -type d -name "app_skia_pipeline_cache" \
-        -exec rm -rf {} + 2>/dev/null || true
-    log_service "[OK] Stale Skia/HWUI pipeline caches cleared (mode change: ${_LAST_MODE:-<none>} → $RENDER_MODE)"
+  if [ "$RENDER_MODE" != "$_LS_PREV_MODE" ] || [ "$QGL" != "$_LS_PREV_QGL" ]; then
+    # Settings differ from what's in the state file — rewrite with current values.
+    _LS_HASH="none"
+    if [ "$QGL" = "y" ]; then
+      for _ls_qsrc in \
+          "/sdcard/Adreno_Driver/Config/qgl_config.txt" \
+          "/data/local/tmp/qgl_config.txt" \
+          "$MODDIR/qgl_config.txt"; do
+        if [ -f "$_ls_qsrc" ]; then
+          _LS_HASH=$(cksum "$_ls_qsrc" 2>/dev/null | awk '{print $1}') || _LS_HASH="cksum_fail"
+          break
+        fi
+      done
+      unset _ls_qsrc
+    fi
+    printf '%s\n%s\n%s\n' "$RENDER_MODE" "$QGL" "$_LS_HASH" \
+      > "$_LAST_STATE_FILE" 2>/dev/null || true
+    log_service "[OK] Cleared state file updated: mode=$RENDER_MODE qgl=$QGL hash=$_LS_HASH"
+    unset _LS_HASH
   else
-    log_service "[OK] Render mode unchanged ('$RENDER_MODE') — pipeline caches preserved (no recompile overhead)"
+    log_service "[OK] Cleared state file current: mode=$RENDER_MODE qgl=$QGL — no update needed."
   fi
+  unset _LAST_STATE_FILE _LS_PREV_MODE _LS_PREV_QGL
 
-  # Persist current mode for next boot comparison
-  echo "$RENDER_MODE" > "$_LAST_MODE_FILE" 2>/dev/null || true
-  unset _LAST_MODE _LAST_MODE_FILE
+  # Backward compat: remove old single-line mode file from previous installs.
+  rm -f /data/local/tmp/adreno_last_render_mode 2>/dev/null || true
 
   log_service "========================================"
   log_service "LIVE RESETPROP: Complete"

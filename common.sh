@@ -38,13 +38,12 @@ load_config() {
       RENDER_MODE)
         case "$_v" in
           # Canonical values — pass through as-is
-          normal|skiavk|skiagl|skiavk_all) ;;
+          normal|skiavk|skiagl) ;;
           [Nn][Oo][Rr][Mm][Aa][Ll])            _v='normal' ;;
           [Ss][Kk][Ii][Aa][Vv][Kk])            _v='skiavk' ;;
           [Ss][Kk][Ii][Aa][Gg][Ll])            _v='skiagl' ;;
-          [Ss][Kk][Ii][Aa][Vv][Kk]_[Aa][Ll][Ll]) _v='skiavk_all' ;;
           # Legacy: skiavkthreaded/skiaglthreaded were removed as separate modes.
-          # renderengine.backend is now folded into skiavk/skiavk_all/skiagl.
+          # renderengine.backend is now folded into skiavk/skiagl.
           # Use FORCE_SKIAVKTHREADED_BACKEND=y to force skiavkthreaded backend.
           [Ss][Kk][Ii][Aa][Vv][Kk][Tt][Hh][Rr][Ee][Aa][Dd][Ee][Dd]) _v='skiavk' ;;
           [Ss][Kk][Ii][Aa][Gg][Ll][Tt][Hh][Rr][Ee][Aa][Dd][Ee][Dd]) _v='skiagl' ;;

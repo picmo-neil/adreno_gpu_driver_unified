@@ -2488,6 +2488,74 @@ textarea:focus {
     color: var(--text-3);
     margin-bottom: var(--s-3);
 }
+
+/* ── Per-mode intensity sliders ── */
+.mode-slider-row {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-2);
+    padding: var(--s-3) var(--s-1);
+}
+.mode-slider-label {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+}
+.mode-slider-icon {
+    font-size: 16px;
+    flex-shrink: 0;
+}
+.mode-slider-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-2);
+    flex: 1;
+}
+.mode-slider-val {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    min-width: 28px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+/* Range input — styled to match the reference module */
+.mode-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 4px;
+    border-radius: var(--r-pill);
+    background: var(--border-2);
+    outline: none;
+    cursor: pointer;
+    /* filled track via --p set by JS */
+    background: linear-gradient(to right, var(--accent) var(--p, 50%), var(--border-2) var(--p, 50%));
+    transition: background 0.08s linear;
+}
+.mode-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: linear-gradient(145deg, var(--text-1), rgba(var(--accent-rgb), 0.85));
+    box-shadow: 0 2px 8px rgba(0,0,0,0.35), 0 0 0 2px rgba(var(--accent-rgb), 0.35);
+    cursor: ew-resize;
+    transition: transform 0.18s cubic-bezier(0.34,1.56,0.64,1), box-shadow 0.18s;
+}
+.mode-slider:active::-webkit-slider-thumb,
+.mode-slider:focus::-webkit-slider-thumb {
+    transform: scale(1.28);
+    box-shadow: 0 3px 14px rgba(0,0,0,0.40), 0 0 0 5px rgba(var(--accent-rgb),0.20);
+}
+.mode-slider::-moz-range-thumb {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: linear-gradient(145deg, var(--text-1), rgba(var(--accent-rgb), 0.85));
+    box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+    border: none; cursor: ew-resize;
+}
 .colormode-toggle-row {
     display: flex;
     align-items: center;
@@ -2600,562 +2668,417 @@ textarea:focus {
 .colormode-btn.active .colormode-btn-check { opacity: 1; }
 
 
-/* ═══════════════════════════════════════════════════════════════
-   ██████  GLASS MODE (default) — Apple iOS Frosted Glass  ██████
-   
-   IDENTITY: Light, translucent, colorful. Like holding a sheet of
-   frosted crystal over a vivid painting — color bleeds through,
-   surfaces feel airy and dimensional. Accent tinting throughout.
-   
-   KEY TRAITS:
-   · Low-opacity backgrounds — background colors bleed through
-   · Heavy blur — softens and blends background into the surface
-   · Strong accent tinting — cards glow with theme color
-   · Bright inner highlights — top edge lit like real glass
-   · Everything feels LIGHT and LIFTED
-   ═══════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════════════
+   DISPLAY MODES — 4 distinct visual identities
+   Each mode has a CSS variable hook that JS sliders control:
+     Glass        → --glass-amount      (0–1, default 0.5)  glassiness
+     Blur         → --blur-amount       (0–1, default 0.5)  blur intensity
+     Clear (transp) → --transp-amount   (0–1, default 0.5)  transparency
+     Vivid        → --vivid-amount      (0–1, default 0.5)  vividness/saturation
+   JS sets these on :root via document.documentElement.style.setProperty()
+   ══════════════════════════════════════════════════════════════════════ */
 
-/* Cards — frosted crystal: transparent, heavily blurred, accent-tinted */
+/* ── Slider variable defaults ────────────────────────────────────────── */
+:root {
+    --glass-amount:  0.5;
+    --blur-amount:   0.5;
+    --transp-amount: 0.5;
+    --vivid-amount:  0.5;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   ██████  GLASS MODE (default) — iOS-style frosted glass
+   IDENTITY: Luminous, translucent, accent-tinted surfaces.
+   Background gradients BLEED through semi-transparent cards.
+   Feels like holding colored crystal up to light.
+   GLASSINESS slider: controls card fill opacity (less fill = more see-through)
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* Glass mode card: accent-tinted, semi-transparent, relies on
+   backdrop-filter (quality mode) for the frosted effect.
+   --glass-amount: 0 = near-invisible, 1 = more opaque tinted */
 .card, .glass-panel {
     background: linear-gradient(145deg,
-        rgba(var(--accent-rgb), 0.13) 0%,
-        rgba(var(--accent-rgb), 0.06) 45%,
-        rgba(255,255,255,0.04) 100%
+        rgba(var(--accent-rgb), calc(0.06 + var(--glass-amount, 0.5) * 0.18)) 0%,
+        rgba(var(--accent-rgb), calc(0.02 + var(--glass-amount, 0.5) * 0.08)) 45%,
+        rgba(255,255,255,     calc(0.01 + var(--glass-amount, 0.5) * 0.05)) 100%
     ) !important;
-
-
-    border: 1px solid rgba(var(--accent-rgb), 0.20) !important;
-    border-top: 1px solid rgba(var(--accent-rgb), 0.38) !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.12 + var(--glass-amount, 0.5) * 0.16)) !important;
+    border-top: 1px solid rgba(var(--accent-rgb), calc(0.22 + var(--glass-amount, 0.5) * 0.26)) !important;
     box-shadow:
         0 4px 24px rgba(0,0,0,0.28),
-        inset 0 1px 0 rgba(var(--accent-rgb), 0.35),
+        inset 0 1px 0 rgba(var(--accent-rgb), calc(0.18 + var(--glass-amount, 0.5) * 0.30)),
         inset 0 -1px 0 rgba(0,0,0,0.08),
-        inset 1px 0 0 rgba(var(--accent-rgb), 0.08),
-        0 0 0 0.5px rgba(var(--accent-rgb), 0.08),
-        0 0 30px rgba(var(--accent-rgb), 0.06) !important;
+        0 0 0 0.5px rgba(var(--accent-rgb), calc(0.04 + var(--glass-amount, 0.5) * 0.08)),
+        0 0 30px rgba(var(--accent-rgb), calc(0.02 + var(--glass-amount, 0.5) * 0.08)) !important;
 }
 .card:hover, .glass-panel:hover {
     background: linear-gradient(145deg,
-        rgba(var(--accent-rgb), 0.20) 0%,
-        rgba(var(--accent-rgb), 0.10) 45%,
-        rgba(255,255,255,0.06) 100%
+        rgba(var(--accent-rgb), calc(0.12 + var(--glass-amount, 0.5) * 0.20)) 0%,
+        rgba(var(--accent-rgb), calc(0.04 + var(--glass-amount, 0.5) * 0.12)) 45%,
+        rgba(255,255,255,     calc(0.02 + var(--glass-amount, 0.5) * 0.06)) 100%
     ) !important;
-    border-color: rgba(var(--accent-rgb), 0.30) !important;
-    border-top-color: rgba(var(--accent-rgb), 0.55) !important;
+    border-color: rgba(var(--accent-rgb), calc(0.18 + var(--glass-amount, 0.5) * 0.20)) !important;
+    border-top-color: rgba(var(--accent-rgb), calc(0.35 + var(--glass-amount, 0.5) * 0.30)) !important;
     box-shadow:
         0 8px 36px rgba(0,0,0,0.34),
-        inset 0 1px 0 rgba(var(--accent-rgb), 0.48),
-        0 0 40px rgba(var(--accent-rgb), 0.10) !important;
+        inset 0 1px 0 rgba(var(--accent-rgb), calc(0.28 + var(--glass-amount, 0.5) * 0.36)),
+        0 0 40px rgba(var(--accent-rgb), calc(0.04 + var(--glass-amount, 0.5) * 0.12)) !important;
 }
-
-/* Top bar — heavy frosted glass bar */
+/* Top bar — frosted accent strip */
 .top-bar {
-    background: rgba(var(--bg-base-rgb, 13,11,20), 0.45) !important;
-
-
-    border-bottom: 1px solid rgba(var(--accent-rgb), 0.18) !important;
+    background: rgba(var(--bg-base-rgb, 13,11,20), calc(0.55 - var(--glass-amount, 0.5) * 0.22)) !important;
+    border-bottom: 1px solid rgba(var(--accent-rgb), calc(0.10 + var(--glass-amount, 0.5) * 0.16)) !important;
     box-shadow:
-        0 1px 0 rgba(var(--accent-rgb), 0.14),
-        0 0 50px rgba(var(--accent-rgb), 0.07) !important;
+        0 1px 0 rgba(var(--accent-rgb), calc(0.06 + var(--glass-amount, 0.5) * 0.12)),
+        0 0 50px rgba(var(--accent-rgb), calc(0.02 + var(--glass-amount, 0.5) * 0.08)) !important;
 }
-
-/* Bottom nav — glass pill floater */
+/* Bottom nav — glass pill */
 .bottom-nav, .modern-nav {
-    background: rgba(var(--bg-base-rgb, 13,11,20), 0.50) !important;
-
-
-    border-top: 1px solid rgba(var(--accent-rgb), 0.16) !important;
-    box-shadow: 0 -4px 30px rgba(var(--accent-rgb), 0.08) !important;
+    background: rgba(var(--bg-base-rgb, 13,11,20), calc(0.68 - var(--glass-amount, 0.5) * 0.24)) !important;
+    border-top: 1px solid rgba(var(--accent-rgb), calc(0.08 + var(--glass-amount, 0.5) * 0.14)) !important;
+    box-shadow: 0 -4px 30px rgba(var(--accent-rgb), calc(0.03 + var(--glass-amount, 0.5) * 0.10)) !important;
 }
 
 
-/* ═══════════════════════════════════════════════════════════════
-   ██████  BLUR MODE — Android QS Notification Shade  ██████
-
-   IDENTITY: Heavy, dark, monochrome. Like pulling down Android's
-   notification shade — nearly black surfaces, crushing weight,
-   maximum contrast. The background is EATEN by the blur.
-
-   KEY TRAITS:
-   · Near-black solid backgrounds — almost no transparency
-   · Extreme blur on nav/topbar (the blur IS the aesthetic)
-   · Zero accent tinting on cards — pure dark grey surfaces
-   · No border glows — only thin white hairlines
-   · Everything feels HEAVY, DEEP, and GROUNDED
-   ═══════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════════════
+   ██████  BLUR MODE — Android QS / notification shade depth
+   IDENTITY: Dark, heavy, monochromatic. Nearly black surfaces crushed
+   by extreme backdrop blur. The BLUR IS the aesthetic — pure dark depth.
+   Background gradient is absorbed by the dark body. No accent tinting.
+   BLUR slider: controls blur intensity and card fill darkness
+   ══════════════════════════════════════════════════════════════════════ */
 
 html.blur-mode body {
     background: var(--bg-base) !important;
 }
-
-/* BLUR MODE: body::before = OFF. Dark solid body gets blurred by cards = pure dark QS look */
+/* Kill body glow — dark solid ground */
 html.blur-mode body::before {
     opacity: 0 !important;
     background: none !important;
 }
-
-/* Top bar — very thin, nearly invisible so gradient shows through */
+/* Top bar */
 html.blur-mode .top-bar {
-    background: rgba(var(--bg-base-rgb), 0.55) !important;
-    border-bottom: 1px solid rgba(var(--accent-rgb), 0.18) !important;
+    background: rgba(var(--bg-base-rgb), calc(0.72 - var(--blur-amount, 0.5) * 0.28)) !important;
+    border-bottom: 1px solid rgba(255,255,255, calc(0.05 + var(--blur-amount, 0.5) * 0.04)) !important;
     box-shadow: none !important;
 }
-
-/* Cards — low fill so the vivid background gradient is visible through */
+/* Cards — near-black, blur-heavy */
 html.blur-mode .card,
 html.blur-mode .glass-panel {
-    background: rgba(var(--bg-base-rgb), 0.30) !important;
-    border: 1px solid rgba(var(--accent-rgb), 0.20) !important;
-    border-top: 1px solid rgba(var(--accent-rgb), 0.38) !important;
-    box-shadow: inset 0 1px 0 rgba(var(--accent-rgb), 0.22) !important;
+    background: rgba(var(--bg-base-rgb), calc(0.55 - var(--blur-amount, 0.5) * 0.30)) !important;
+    border: 1px solid rgba(255,255,255, calc(0.04 + var(--blur-amount, 0.5) * 0.03)) !important;
+    border-top: 1px solid rgba(255,255,255, calc(0.08 + var(--blur-amount, 0.5) * 0.06)) !important;
+    box-shadow: 0 2px 16px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255, calc(0.04 + var(--blur-amount, 0.5) * 0.06)) !important;
 }
 html.blur-mode .card:hover,
 html.blur-mode .glass-panel:hover {
-    background: rgba(var(--bg-base-rgb), 0.42) !important;
-    border-color: rgba(var(--accent-rgb), 0.30) !important;
-    border-top-color: rgba(var(--accent-rgb), 0.50) !important;
-    transform: none !important; /* perf: no hover lift */
+    background: rgba(var(--bg-base-rgb), calc(0.60 - var(--blur-amount, 0.5) * 0.25)) !important;
+    border-top-color: rgba(255,255,255,0.14) !important;
 }
-
-/* Welcome card in blur */
+/* Welcome card — slight accent tint even in blur */
 html.blur-mode .welcome-card {
-    background: rgba(var(--accent-rgb), 0.12) !important;
-    border: 1px solid rgba(var(--accent-rgb), 0.25) !important;
-    border-top: 1px solid rgba(var(--accent-rgb), 0.40) !important;
-    box-shadow: inset 0 1px 0 rgba(var(--accent-rgb), 0.20) !important;
+    background: rgba(var(--accent-rgb), calc(0.08 + var(--blur-amount, 0.5) * 0.06)) !important;
+    border: 1px solid rgba(var(--accent-rgb), 0.18) !important;
+    border-top: 1px solid rgba(var(--accent-rgb), 0.30) !important;
+    box-shadow: inset 0 1px 0 rgba(var(--accent-rgb), 0.16) !important;
 }
-
-/* Bottom nav — semi-transparent pill */
+/* Bottom nav */
 html.blur-mode .bottom-nav,
 html.blur-mode .modern-nav {
-    background: rgba(var(--bg-base-rgb), 0.55) !important;
-    border-top: 1px solid rgba(var(--accent-rgb), 0.18) !important;
+    background: rgba(var(--bg-base-rgb), calc(0.75 - var(--blur-amount, 0.5) * 0.28)) !important;
+    border-top: 1px solid rgba(255,255,255, 0.05) !important;
     box-shadow: none !important;
 }
 html.blur-mode .nav-item.active .nav-pill {
     background: rgba(var(--accent-rgb), 0.18) !important;
-
-
     box-shadow: 0 0 18px rgba(var(--accent-rgb), 0.25) !important;
 }
-
-/* Modals — dark QS sheets */
+/* Modals */
 html.blur-mode .modal-container {
-    background: rgba(var(--bg-raised-rgb), 0.80) !important;
-
-
-    border: 1px solid rgba(var(--accent-rgb), 0.16) !important;
-    border-top: 1px solid rgba(var(--accent-rgb), 0.28) !important;
+    background: rgba(var(--bg-raised-rgb), calc(0.82 - var(--blur-amount, 0.5) * 0.14)) !important;
+    border: 1px solid rgba(255,255,255,0.06) !important;
+    border-top: 1px solid rgba(255,255,255,0.12) !important;
 }
-html.blur-mode .theme-sheet {
-    background: rgba(var(--bg-base-rgb), 0.82) !important;
-
-
-}
-html.blur-mode .confirm-container {
-    background: rgba(var(--bg-raised-rgb), 0.80) !important;
-
-
-    border: 1px solid rgba(var(--accent-rgb), 0.16) !important;
-}
-html.blur-mode .modal-overlay {
-    background: rgba(0,0,0,0.82) !important;
-
-
-}
-
-/* Info items — QS dark tiles */
-html.blur-mode .info-item {
-    background: rgba(255,255,255,0.04) !important;
-
-
-    border-color: rgba(255,255,255,0.06) !important;
-}
-html.blur-mode .info-item.highlight {
-    background: rgba(var(--accent-rgb), 0.12) !important;
-    border-color: rgba(var(--accent-rgb), 0.18) !important;
-}
-
-/* Inputs, selects */
-html.blur-mode .select-wrapper select {
-    background: rgba(var(--bg-raised-rgb), 0.85) !important;
-
-    border-color: rgba(var(--accent-rgb), 0.14) !important;
-}
-html.blur-mode .input-glass,
-html.blur-mode .premium-input {
-    background: rgba(255,255,255,0.05) !important;
-
-    border-color: rgba(255,255,255,0.09) !important;
-}
-
+html.blur-mode .theme-sheet { background: rgba(var(--bg-base-rgb), 0.88) !important; }
+html.blur-mode .confirm-container { background: rgba(var(--bg-raised-rgb), 0.85) !important; border: 1px solid rgba(255,255,255,0.06) !important; }
+html.blur-mode .modal-overlay { background: rgba(0,0,0,0.85) !important; }
+/* Info items */
+html.blur-mode .info-item { background: rgba(255,255,255,0.04) !important; border-color: rgba(255,255,255,0.06) !important; }
+html.blur-mode .info-item.highlight { background: rgba(var(--accent-rgb),0.12) !important; border-color: rgba(var(--accent-rgb),0.18) !important; }
+/* Inputs */
+html.blur-mode .select-wrapper select { background: rgba(var(--bg-raised-rgb),0.88) !important; border-color: rgba(255,255,255,0.08) !important; }
+html.blur-mode .input-glass, html.blur-mode .premium-input { background: rgba(255,255,255,0.04) !important; border-color: rgba(255,255,255,0.08) !important; }
 /* Toast */
-html.blur-mode .toast {
-    background: rgba(var(--bg-base-rgb), 0.38) !important;
-
-    border-color: rgba(255,255,255,0.07) !important;
+html.blur-mode .toast { background: rgba(var(--bg-base-rgb),0.92) !important; border-color: rgba(255,255,255,0.07) !important; }
+/* Buttons */
+html.blur-mode .status-indicator, html.blur-mode .icon-btn { background: rgba(255,255,255,0.05) !important; }
+html.blur-mode .tile-btn, html.blur-mode .modern-tile {
+    background: rgba(255,255,255,0.05) !important;
+    border: 1px solid rgba(255,255,255,0.07) !important;
+    border-top: 1px solid rgba(255,255,255,0.12) !important;
 }
-
-/* Icon buttons */
-html.blur-mode .status-indicator,
-html.blur-mode .icon-btn {
-    background: rgba(255,255,255,0.06) !important;
-
-}
-
-/* Tile buttons — frosted glass to match cards */
-html.blur-mode .tile-btn,
-html.blur-mode .modern-tile {
-    background: rgba(var(--bg-base-rgb), 0.22) !important;
-
-
-    border: 1px solid rgba(var(--accent-rgb), 0.14) !important;
-    border-top: 1px solid rgba(var(--accent-rgb), 0.26) !important;
-}
-html.blur-mode .tile-btn:hover {
-    background: rgba(var(--accent-rgb), 0.15) !important;
-    border-top-color: rgba(var(--accent-rgb), 0.40) !important;
-}
-
-/* Maintenance buttons */
-html.blur-mode .maintenance-btn {
-    background: rgba(255,255,255,0.04) !important;
-
-    border-color: rgba(255,255,255,0.06) !important;
-}
-html.blur-mode .maintenance-btn:hover {
-    background: rgba(var(--accent-rgb), 0.12) !important;
-}
-
-/* Stat cards */
-html.blur-mode .stat-card-modern {
-    background: rgba(var(--accent-rgb), 0.07) !important;
-
-    border-color: rgba(255,255,255,0.06) !important;
-}
-
-/* Feature list */
-html.blur-mode .feature-list li {
-    background: rgba(255,255,255,0.04) !important;
-
-    border-color: rgba(255,255,255,0.06) !important;
-}
-
-/* Step items */
-html.blur-mode .step-item {
-    background: rgba(255,255,255,0.03) !important;
-
-}
-
-/* Terminal */
-html.blur-mode .terminal,
-html.blur-mode .modern-terminal {
-    background: #060709 !important;
-
-    border-color: rgba(255,255,255,0.05) !important;
-}
-
-/* Setting item on-state */
-html.blur-mode .setting-item.is-on {
-    background: rgba(var(--accent-rgb), 0.10) !important;
-
-    border-color: rgba(var(--accent-rgb), 0.18) !important;
-}
-
-/* Primary button in blur mode */
-html.blur-mode .btn-primary {
-    background: linear-gradient(135deg, rgba(var(--accent-rgb), 1.0), rgba(var(--accent-rgb), 0.88)) !important;
-    box-shadow: 0 4px 24px var(--accent-glow-strong), inset 0 1px 0 rgba(255,255,255,0.14) !important;
-
-}
-
-/* Info banners */
-html.blur-mode .info-banner,
-html.blur-mode .modern-info {
-    background: rgba(var(--accent-rgb), 0.06) !important;
-
-}
-
-/* Colormode btns */
-html.blur-mode .colormode-btn,
-html.blur-mode .theme-swatch {
-
-}
-
-/* Particle canvas — very muted in blur mode, it's a dark aesthetic */
-html.blur-mode canvas.particle-bg {
-    opacity: 0.30 !important;
-}
-
-/* Section labels more subtle */
-html.blur-mode .section-label {
-    color: rgba(var(--accent-rgb), 0.60) !important;
-}
+html.blur-mode .tile-btn:hover { background: rgba(var(--accent-rgb),0.12) !important; border-top-color: rgba(var(--accent-rgb),0.30) !important; }
+html.blur-mode .maintenance-btn { background: rgba(255,255,255,0.03) !important; border-color: rgba(255,255,255,0.05) !important; }
+html.blur-mode .maintenance-btn:hover { background: rgba(var(--accent-rgb),0.10) !important; }
+html.blur-mode .stat-card-modern { background: rgba(var(--accent-rgb),0.07) !important; border-color: rgba(255,255,255,0.05) !important; }
+html.blur-mode .feature-list li { background: rgba(255,255,255,0.03) !important; border-color: rgba(255,255,255,0.05) !important; }
+html.blur-mode .step-item { background: rgba(255,255,255,0.02) !important; }
+html.blur-mode .terminal, html.blur-mode .modern-terminal { background: #050507 !important; border-color: rgba(255,255,255,0.05) !important; }
+html.blur-mode .setting-item.is-on { background: rgba(var(--accent-rgb),0.09) !important; border-color: rgba(var(--accent-rgb),0.16) !important; }
+html.blur-mode .btn-primary { background: linear-gradient(135deg, var(--accent), rgba(var(--accent-rgb),0.85)) !important; box-shadow: 0 4px 24px var(--accent-glow-strong), inset 0 1px 0 rgba(255,255,255,0.14) !important; }
+html.blur-mode .info-banner, html.blur-mode .modern-info { background: rgba(var(--accent-rgb),0.05) !important; }
+html.blur-mode canvas.particle-bg { opacity: 0.22 !important; }
+html.blur-mode .section-label { color: rgba(var(--accent-rgb),0.55) !important; }
 
 
-/* ═══════════════════════════════════════════════════════════════
-   ██████  CLEAR MODE — Pure See-Through, Zero Filters  ██████
-   No backdrop-filter. No background gradients.
-   Cards are outlined wireframes only — background shows through.
-   ═══════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════════════
+   ██████  CLEAR MODE — Pure transparency, wallpaper shows through
+   IDENTITY: Invisible surfaces. Cards are hollow wireframe outlines.
+   Your wallpaper IS the background. Accent outlines define structure.
+   Background SAME dark tone as other modes — body uses bg-base colors,
+   only cards are transparent (NOT a white/bright background).
+   TRANSPARENCY slider: controls card outline opacity (more = more visible borders)
+   ══════════════════════════════════════════════════════════════════════ */
 
 html.transparency-mode body {
-    background: transparent !important;
+    background: var(--bg-base) !important;
 }
-
-/* TRANSPARENT MODE: body::before = OFF. Wallpaper shows through pure. */
+/* Kill the body gradient glow — wallpaper/bg-base shows pure */
 html.transparency-mode body::before {
     opacity: 0 !important;
     background: none !important;
 }
-
-/* Top bar — semi-transparent so wallpaper is visible */
+/* Top bar — fully transparent, accent outline only */
 html.transparency-mode .top-bar {
-    background: rgba(var(--bg-base-rgb), 0.68) !important;
-    border-bottom: 1px solid rgba(var(--accent-rgb), 0.20) !important;
+    background: rgba(var(--bg-base-rgb), calc(0.10 + var(--transp-amount, 0.5) * 0.25)) !important;
+    border-bottom: 1px solid rgba(var(--accent-rgb), calc(0.08 + var(--transp-amount, 0.5) * 0.20)) !important;
     box-shadow: none !important;
 }
-
-/* Cards — truly transparent, wireframe outlines only */
+/* Cards — pure wireframe, NO background fill */
 html.transparency-mode .card,
 html.transparency-mode .glass-panel {
     background: transparent !important;
-
-
-    border: 1px solid rgba(var(--accent-rgb), 0.22) !important;
-    border-top-color: rgba(var(--accent-rgb), 0.40) !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.10 + var(--transp-amount, 0.5) * 0.24)) !important;
+    border-top-color: rgba(var(--accent-rgb), calc(0.18 + var(--transp-amount, 0.5) * 0.30)) !important;
     box-shadow: none !important;
 }
 html.transparency-mode .card::before,
-html.transparency-mode .glass-panel::before {
-    opacity: 0.5 !important;
-}
+html.transparency-mode .glass-panel::before { opacity: 0.4 !important; }
 html.transparency-mode .card:hover,
 html.transparency-mode .glass-panel:hover {
-    background: rgba(var(--accent-rgb), 0.05) !important;
-    border-color: rgba(var(--accent-rgb), 0.35) !important;
-    border-top-color: rgba(var(--accent-rgb), 0.60) !important;
-    box-shadow: 0 0 20px rgba(var(--accent-rgb), 0.08) !important;
+    background: rgba(var(--accent-rgb), calc(0.02 + var(--transp-amount, 0.5) * 0.06)) !important;
+    border-color: rgba(var(--accent-rgb), calc(0.20 + var(--transp-amount, 0.5) * 0.28)) !important;
+    border-top-color: rgba(var(--accent-rgb), calc(0.35 + var(--transp-amount, 0.5) * 0.36)) !important;
+    box-shadow: 0 0 20px rgba(var(--accent-rgb), calc(0.04 + var(--transp-amount, 0.5) * 0.08)) !important;
 }
-
-/* Welcome card — accent tint only, full gradient title shines through */
+/* Welcome card — tiny accent tint */
 html.transparency-mode .welcome-card {
-    background: rgba(var(--accent-rgb), 0.07) !important;
-
-
-    border: 1px solid rgba(var(--accent-rgb), 0.28) !important;
+    background: rgba(var(--accent-rgb), calc(0.04 + var(--transp-amount, 0.5) * 0.06)) !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.15 + var(--transp-amount, 0.5) * 0.20)) !important;
     box-shadow: none !important;
 }
 html.transparency-mode .welcome-title {
     background: linear-gradient(135deg, #ffffff 0%, var(--accent-2) 50%, var(--accent) 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    filter: drop-shadow(0 0 20px rgba(var(--accent-rgb), 0.30));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    filter: drop-shadow(0 0 20px rgba(var(--accent-rgb),0.30));
 }
-
-/* Nav bar — semi-transparent so wallpaper is visible */
-html.transparency-mode .bottom-nav,
-html.transparency-mode .modern-nav {
-    background: rgba(var(--bg-base-rgb), 0.68) !important;
-    border-top: 1px solid rgba(var(--accent-rgb), 0.20) !important;
+/* Nav */
+html.transparency-mode .bottom-nav, html.transparency-mode .modern-nav {
+    background: rgba(var(--bg-base-rgb), calc(0.10 + var(--transp-amount, 0.5) * 0.22)) !important;
+    border-top: 1px solid rgba(var(--accent-rgb), calc(0.08 + var(--transp-amount, 0.5) * 0.18)) !important;
     box-shadow: none !important;
 }
-html.transparency-mode .nav-item.active .nav-pill {
-    background: rgba(var(--accent-rgb), 0.14) !important;
-    box-shadow: none !important;
+html.transparency-mode .nav-item.active .nav-pill { background: rgba(var(--accent-rgb),0.14) !important; box-shadow: none !important; }
+/* Modals */
+html.transparency-mode .modal-container { background: rgba(var(--bg-base-rgb),0.72) !important; }
+html.transparency-mode .theme-sheet { background: rgba(var(--bg-base-rgb),0.78) !important; }
+html.transparency-mode .confirm-container { background: rgba(var(--bg-base-rgb),0.75) !important; }
+html.transparency-mode .modal-overlay { background: rgba(0,0,0,0.40) !important; }
+/* Info items */
+html.transparency-mode .info-item { background: transparent !important; border-color: rgba(var(--accent-rgb), calc(0.06 + var(--transp-amount, 0.5) * 0.10)) !important; }
+html.transparency-mode .info-item.highlight { background: rgba(var(--accent-rgb),0.05) !important; border-color: rgba(var(--accent-rgb),0.20) !important; }
+/* Inputs */
+html.transparency-mode .select-wrapper select { background: transparent !important; border-color: rgba(var(--accent-rgb),0.18) !important; }
+html.transparency-mode .input-glass, html.transparency-mode .premium-input { background: transparent !important; border-color: rgba(var(--accent-rgb),0.20) !important; }
+/* Toast */
+html.transparency-mode .toast { background: rgba(var(--bg-base-rgb),0.92) !important; border-color: rgba(var(--accent-rgb),0.14) !important; }
+/* Buttons */
+html.transparency-mode .status-indicator { background: transparent !important; border: 1px solid rgba(var(--accent-rgb),0.14) !important; }
+html.transparency-mode .icon-btn { background: transparent !important; border: 1px solid rgba(var(--accent-rgb),0.12) !important; }
+html.transparency-mode .icon-btn:hover { background: rgba(var(--accent-rgb),0.08) !important; }
+html.transparency-mode .tile-btn, html.transparency-mode .modern-tile { background: transparent !important; border: 1px solid rgba(var(--accent-rgb), calc(0.10 + var(--transp-amount, 0.5) * 0.14)) !important; }
+html.transparency-mode .tile-btn:hover { background: rgba(var(--accent-rgb),0.06) !important; border-color: rgba(var(--accent-rgb),0.28) !important; }
+html.transparency-mode .maintenance-btn { background: transparent !important; border: 1px solid rgba(var(--accent-rgb),0.12) !important; }
+html.transparency-mode .maintenance-btn:hover { background: rgba(var(--accent-rgb),0.05) !important; }
+html.transparency-mode .stat-card-modern { background: transparent !important; border: 1px solid rgba(var(--accent-rgb), calc(0.08 + var(--transp-amount, 0.5) * 0.12)) !important; box-shadow: none !important; }
+html.transparency-mode .feature-list li { background: transparent !important; border-color: rgba(var(--accent-rgb),0.10) !important; }
+html.transparency-mode .feature-list li:hover { background: rgba(var(--accent-rgb),0.05) !important; }
+html.transparency-mode .step-item { background: transparent !important; border-color: rgba(var(--accent-rgb),0.10) !important; }
+html.transparency-mode .terminal, html.transparency-mode .modern-terminal { background: rgba(0,0,0,0.22) !important; border: 1px solid rgba(var(--accent-rgb),0.12) !important; }
+html.transparency-mode .setting-item.is-on { background: rgba(var(--accent-rgb),0.05) !important; border-color: rgba(var(--accent-rgb),0.16) !important; }
+html.transparency-mode .btn-primary { background: linear-gradient(135deg, rgba(var(--accent-rgb),0.88), rgba(var(--accent-rgb),0.72)) !important; border: 1px solid rgba(var(--accent-rgb),0.35) !important; box-shadow: 0 2px 16px rgba(var(--accent-rgb),0.22) !important; }
+html.transparency-mode .btn-secondary { background: transparent !important; border-color: rgba(var(--accent-rgb),0.20) !important; }
+html.transparency-mode .info-banner, html.transparency-mode .modern-info { background: rgba(var(--accent-rgb),0.04) !important; }
+html.transparency-mode .divider, html.transparency-mode .elegant-divider { background: linear-gradient(90deg, transparent, rgba(var(--accent-rgb),0.12) 30%, rgba(var(--accent-rgb),0.12) 70%, transparent) !important; }
+html.transparency-mode .performance-bar { background: rgba(var(--accent-rgb),0.05) !important; }
+html.transparency-mode .colormode-btn { background: rgba(var(--accent-rgb),0.03) !important; }
+html.transparency-mode .theme-swatch { background: rgba(255,255,255,0.02) !important; }
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   ██████  VIVID MODE — Maximum color, absolute presence
+   IDENTITY: Rich, bold, high-saturation. Dark backgrounds saturated with
+   theme accent. Vivid welcome card uses the full gradient. All other cards
+   are ultra-dark with a thick glowing accent top edge.
+   The accent color is everywhere — unmistakable, energetic.
+   VIVIDNESS slider: controls accent glow strength and saturation
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* Body — deepest dark, maximum contrast for accent to pop */
+html.vivid-mode body {
+    background: var(--vivid-body-bg) !important;
+}
+/* Body glow — saturated accent clouds, richer than glass mode */
+html.vivid-mode body::before {
+    background:
+        radial-gradient(ellipse 80% 60% at 5%  -5%,  rgba(var(--accent-rgb), calc(0.25 + var(--vivid-amount, 0.5) * 0.28)) 0%, transparent 55%),
+        radial-gradient(ellipse 70% 55% at 98% 105%, rgba(var(--accent-rgb), calc(0.14 + var(--vivid-amount, 0.5) * 0.18)) 0%, transparent 52%),
+        radial-gradient(ellipse 55% 45% at 65%  30%,  rgba(var(--accent-rgb), calc(0.06 + var(--vivid-amount, 0.5) * 0.10)) 0%, transparent 48%),
+        radial-gradient(ellipse 40% 35% at 20%  75%,  rgba(var(--accent-rgb), calc(0.04 + var(--vivid-amount, 0.5) * 0.07)) 0%, transparent 44%) !important;
+    opacity: 1 !important;
+}
+html.vivid-mode body::after { opacity: 0.05 !important; }
+html.vivid-mode .particle-bg { opacity: calc(0.55 + var(--vivid-amount, 0.5) * 0.55) !important; }
+
+/* Welcome card — FULL vivid gradient, glowing */
+html.vivid-mode .welcome-card,
+html.vivid-mode .card.welcome-card,
+html.vivid-mode .glass-panel.welcome-card {
+    background: var(--vivid-welcome-grad) !important;
+    border: none !important;
+    border-top: none !important;
+    box-shadow:
+        0 0 calc(60px + var(--vivid-amount, 0.5) * 80px) rgba(var(--accent-rgb), calc(0.30 + var(--vivid-amount, 0.5) * 0.35)),
+        0 16px 48px rgba(0,0,0,0.65),
+        inset 0 1px 0 rgba(255,255,255,0.18) !important;
+}
+html.vivid-mode .welcome-card::before,
+html.vivid-mode .welcome-card::after,
+html.vivid-mode .card.welcome-card::before,
+html.vivid-mode .card.welcome-card::after { display: none !important; }
+html.vivid-mode .welcome-title { background: none !important; -webkit-text-fill-color: #ffffff !important; color: #ffffff !important; font-weight: 800 !important; text-shadow: none !important; filter: none !important; }
+html.vivid-mode .welcome-subtitle { color: rgba(255,255,255,0.85) !important; }
+html.vivid-mode .welcome-emoji { filter: drop-shadow(0 4px 12px rgba(0,0,0,0.40)) !important; }
+
+/* All other cards — ultra-dark, thick glowing accent top border */
+html.vivid-mode .card,
+html.vivid-mode .glass-panel,
+html.vivid-mode #tab-home .card:not(.welcome-card),
+html.vivid-mode #tab-config .card,
+html.vivid-mode #tab-utils .card,
+html.vivid-mode #tab-data .card {
+    background: var(--vivid-card-bg) !important;
+    border: 1px solid rgba(255,255,255,0.05) !important;
+    border-top: 2px solid rgba(var(--accent-rgb), calc(0.35 + var(--vivid-amount, 0.5) * 0.50)) !important;
+    box-shadow:
+        0 4px 20px rgba(0,0,0,0.55),
+        0 0 0 0.5px rgba(var(--accent-rgb), calc(0.02 + var(--vivid-amount, 0.5) * 0.08)),
+        0 0 calc(20px + var(--vivid-amount, 0.5) * 30px) rgba(var(--accent-rgb), calc(0.01 + var(--vivid-amount, 0.5) * 0.06)) !important;
+}
+html.vivid-mode .card:hover,
+html.vivid-mode .glass-panel:hover {
+    background: var(--vivid-card-hover) !important;
+    border-color: rgba(255,255,255,0.08) !important;
+    border-top-color: rgba(var(--accent-rgb), calc(0.65 + var(--vivid-amount, 0.5) * 0.35)) !important;
+    box-shadow:
+        0 8px 32px rgba(0,0,0,0.65),
+        0 0 calc(30px + var(--vivid-amount, 0.5) * 40px) rgba(var(--accent-rgb), calc(0.06 + var(--vivid-amount, 0.5) * 0.14)) !important;
+    transform: none !important;
+}
+html.vivid-mode .card::before,
+html.vivid-mode .glass-panel::before { display: none !important; }
+/* welcome card override */
+html.vivid-mode .welcome-card, html.vivid-mode .card.welcome-card,
+html.vivid-mode .glass-panel.welcome-card, html.vivid-mode #tab-home .card.welcome-card {
+    background: var(--vivid-welcome-grad) !important; border: none !important; border-top: none !important;
 }
 
-/* Modals — slight dark tint so text is readable */
-html.transparency-mode .modal-container {
-    background: rgba(var(--bg-base-rgb), 0.65) !important;
-
-
-}
-html.transparency-mode .theme-sheet {
-    background: rgba(var(--bg-base-rgb), 0.70) !important;
-
-
-}
-html.transparency-mode .confirm-container {
-    background: rgba(var(--bg-base-rgb), 0.70) !important;
-
-
-}
-html.transparency-mode .modal-overlay {
-    background: rgba(0,0,0,0.40) !important;
-
-
-}
-
-/* Info items — borderline-invisible */
-html.transparency-mode .info-item {
-    background: transparent !important;
-
-
-    border-color: rgba(var(--accent-rgb), 0.12) !important;
-}
-html.transparency-mode .info-item.highlight {
-    background: rgba(var(--accent-rgb), 0.06) !important;
-    border-color: rgba(var(--accent-rgb), 0.22) !important;
-}
-
-/* Select, input */
-html.transparency-mode .select-wrapper select {
-    background: transparent !important;
-
-
-    border-color: rgba(var(--accent-rgb), 0.20) !important;
-}
-html.transparency-mode .input-glass,
-html.transparency-mode .premium-input {
-    background: transparent !important;
-
-
-    border-color: rgba(var(--accent-rgb), 0.22) !important;
-}
-
-/* Toast — needs slight fill for readability */
-html.transparency-mode .toast {
-    background: rgba(var(--bg-base-rgb), 0.92) !important;
-
-
-    border-color: rgba(var(--accent-rgb), 0.16) !important;
-}
-
-/* Status indicator, icon buttons */
-html.transparency-mode .status-indicator {
-    background: transparent !important;
-
-
-    border: 1px solid rgba(var(--accent-rgb), 0.14) !important;
-}
-html.transparency-mode .icon-btn {
-    background: transparent !important;
-
-
-    border: 1px solid rgba(var(--accent-rgb), 0.14) !important;
-}
-html.transparency-mode .icon-btn:hover {
-    background: rgba(var(--accent-rgb), 0.10) !important;
-}
-
-/* Tile buttons — just outlines */
-html.transparency-mode .tile-btn,
-html.transparency-mode .modern-tile {
-    background: transparent !important;
-
-
-    border: 1px solid rgba(var(--accent-rgb), 0.18) !important;
-}
-html.transparency-mode .tile-btn:hover {
-    background: rgba(var(--accent-rgb), 0.08) !important;
-    border-color: rgba(var(--accent-rgb), 0.32) !important;
-}
-
-/* Maintenance buttons */
-html.transparency-mode .maintenance-btn {
-    background: transparent !important;
-
-
-    border: 1px solid rgba(var(--accent-rgb), 0.14) !important;
-}
-html.transparency-mode .maintenance-btn:hover {
-    background: rgba(var(--accent-rgb), 0.06) !important;
-}
-
+/* Info items */
+html.vivid-mode .info-item { background: rgba(255,255,255,0.025) !important; border: 1px solid rgba(255,255,255,0.06) !important; }
+html.vivid-mode .info-item.highlight { background: rgba(var(--accent-rgb), calc(0.08 + var(--vivid-amount, 0.5) * 0.12)) !important; border-color: rgba(var(--accent-rgb), calc(0.18 + var(--vivid-amount, 0.5) * 0.16)) !important; }
 /* Stat cards */
-html.transparency-mode .stat-card-modern {
-    background: transparent !important;
-
-
-    border: 1px solid rgba(var(--accent-rgb), 0.16) !important;
-    box-shadow: none !important;
+html.vivid-mode .stat-card-modern {
+    background: rgba(var(--accent-rgb), calc(0.06 + var(--vivid-amount, 0.5) * 0.08)) !important;
+    border: 1px solid rgba(255,255,255,0.05) !important;
+    border-top: 2px solid rgba(var(--accent-rgb), calc(0.30 + var(--vivid-amount, 0.5) * 0.35)) !important;
 }
-
+/* Tile buttons */
+html.vivid-mode .tile-btn, html.vivid-mode .modern-tile,
+html.vivid-mode #tab-utils .tile-btn, html.vivid-mode #tab-utils .modern-tile {
+    background: var(--vivid-card-bg) !important;
+    border: 1px solid rgba(255,255,255,0.05) !important;
+    border-top: 2px solid rgba(var(--accent-rgb), calc(0.28 + var(--vivid-amount, 0.5) * 0.36)) !important;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.50) !important;
+}
+html.vivid-mode .tile-btn:hover, html.vivid-mode .modern-tile:hover {
+    background: rgba(var(--accent-rgb), calc(0.08 + var(--vivid-amount, 0.5) * 0.14)) !important;
+    border-color: rgba(var(--accent-rgb), 0.30) !important;
+    border-top-color: rgba(var(--accent-rgb), calc(0.65 + var(--vivid-amount, 0.5) * 0.35)) !important;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.60), 0 0 30px rgba(var(--accent-rgb), calc(0.10 + var(--vivid-amount, 0.5) * 0.18)) !important;
+    transform: translateY(-4px) !important;
+}
+/* Maintenance buttons */
+html.vivid-mode .maintenance-btn, html.vivid-mode #tab-utils .maintenance-btn {
+    background: rgba(255,255,255,0.025) !important;
+    border: 1px solid rgba(255,255,255,0.07) !important;
+}
+html.vivid-mode .maintenance-btn:hover { background: rgba(var(--accent-rgb),0.08) !important; border-color: rgba(var(--accent-rgb),0.24) !important; }
+/* Setting items */
+html.vivid-mode .setting-item { border-bottom: 1px solid rgba(255,255,255,0.04) !important; }
+html.vivid-mode .setting-item:hover { background: rgba(var(--accent-rgb),0.04) !important; }
+/* Top bar */
+html.vivid-mode .top-bar {
+    background: rgba(var(--bg-base-rgb), 0.96) !important;
+    border-bottom: 1px solid rgba(var(--accent-rgb), calc(0.16 + var(--vivid-amount, 0.5) * 0.18)) !important;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.55), 0 1px 0 rgba(var(--accent-rgb), calc(0.10 + var(--vivid-amount, 0.5) * 0.14)) !important;
+}
+/* Bottom nav */
+html.vivid-mode .bottom-nav, html.vivid-mode .modern-nav {
+    background: rgba(var(--bg-base-rgb), 0.97) !important;
+    border-top: 1px solid rgba(var(--accent-rgb), calc(0.12 + var(--vivid-amount, 0.5) * 0.16)) !important;
+    box-shadow: 0 -4px 40px rgba(var(--accent-rgb), calc(0.06 + var(--vivid-amount, 0.5) * 0.14)), inset 0 1px 0 rgba(var(--accent-rgb), 0.10) !important;
+}
+html.vivid-mode .modern-nav::before { opacity: 0.6 !important; }
+html.vivid-mode .nav-item.active .nav-pill { background: rgba(var(--accent-rgb), calc(0.16 + var(--vivid-amount, 0.5) * 0.14)) !important; box-shadow: 0 0 24px rgba(var(--accent-rgb), calc(0.24 + var(--vivid-amount, 0.5) * 0.28)) !important; }
+html.vivid-mode .nav-item.active .nav-icon { filter: drop-shadow(0 0 6px rgba(var(--accent-rgb), calc(0.40 + var(--vivid-amount, 0.5) * 0.35))) !important; }
+/* Modals */
+html.vivid-mode .modal-container { background: var(--vivid-card-hover) !important; border: 1px solid rgba(var(--accent-rgb),0.18) !important; border-top: 2px solid rgba(var(--accent-rgb),0.45) !important; }
+html.vivid-mode .theme-sheet { background: var(--vivid-card-bg) !important; }
+html.vivid-mode .confirm-container { background: var(--vivid-card-hover) !important; border: 1px solid rgba(var(--accent-rgb),0.20) !important; }
+html.vivid-mode .modal-overlay { background: rgba(0,0,0,0.75) !important; }
+/* Toast */
+html.vivid-mode .toast { background: var(--vivid-card-hover) !important; border: 1px solid rgba(var(--accent-rgb),0.18) !important; }
+/* Inputs */
+html.vivid-mode .input-glass, html.vivid-mode .premium-input, html.vivid-mode input[type="text"], html.vivid-mode input[type="number"] { background: rgba(255,255,255,0.03) !important; border: 1px solid rgba(255,255,255,0.09) !important; }
+html.vivid-mode .input-glass:focus, html.vivid-mode .premium-input:focus { border-color: rgba(var(--accent-rgb),0.48) !important; box-shadow: 0 0 0 2px rgba(var(--accent-rgb),0.12) !important; }
+html.vivid-mode .select-wrapper select, html.vivid-mode select { background: var(--vivid-card-hover) !important; border: 1px solid rgba(255,255,255,0.09) !important; }
+/* Icon buttons */
+html.vivid-mode .icon-btn { background: rgba(255,255,255,0.04) !important; border: 1px solid rgba(255,255,255,0.07) !important; }
+html.vivid-mode .status-indicator { background: rgba(255,255,255,0.04) !important; }
+/* Section labels */
+html.vivid-mode .section-label { color: rgba(var(--accent-rgb), calc(0.60 + var(--vivid-amount, 0.5) * 0.40)) !important; opacity: 1 !important; }
 /* Feature list */
-html.transparency-mode .feature-list li {
-    background: transparent !important;
-
-
-    border-color: rgba(var(--accent-rgb), 0.12) !important;
-}
-html.transparency-mode .feature-list li:hover {
-    background: rgba(var(--accent-rgb), 0.06) !important;
-}
-
-/* Step items */
-html.transparency-mode .step-item {
-    background: transparent !important;
-
-
-    border-color: rgba(var(--accent-rgb), 0.12) !important;
-}
-
+html.vivid-mode .feature-list li { background: rgba(255,255,255,0.02) !important; border-color: rgba(255,255,255,0.05) !important; }
 /* Terminal */
-html.transparency-mode .terminal,
-html.transparency-mode .modern-terminal {
-    background: rgba(0,0,0,0.18) !important;
-
-
-    border: 1px solid rgba(var(--accent-rgb), 0.14) !important;
-}
-
-/* Setting item on-state */
-html.transparency-mode .setting-item.is-on {
-    background: rgba(var(--accent-rgb), 0.06) !important;
-
-
-    border-color: rgba(var(--accent-rgb), 0.18) !important;
-}
-
-/* Primary button — clean gradient, no glass */
-html.transparency-mode .btn-primary {
-    background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.88), rgba(var(--accent-rgb), 0.72)) !important;
-
-
-    border: 1px solid rgba(var(--accent-rgb), 0.35) !important;
-    box-shadow: 0 2px 16px rgba(var(--accent-rgb), 0.22) !important;
-}
-
-/* Secondary button */
-html.transparency-mode .btn-secondary {
-    background: transparent !important;
-
-
-    border-color: rgba(var(--accent-rgb), 0.22) !important;
-}
-
+html.vivid-mode .terminal, html.vivid-mode .modern-terminal { background: var(--vivid-body-bg) !important; border-color: rgba(255,255,255,0.06) !important; }
 /* Info banner */
-html.transparency-mode .info-banner,
-html.transparency-mode .modern-info {
-    background: rgba(var(--accent-rgb), 0.05) !important;
+html.vivid-mode .info-banner, html.vivid-mode .modern-info { background: rgba(var(--accent-rgb), calc(0.04 + var(--vivid-amount, 0.5) * 0.06)) !important; }
 
-
-}
-
-/* Dividers — ultra-thin */
-html.transparency-mode .divider,
-html.transparency-mode .elegant-divider {
-    background: linear-gradient(90deg, transparent, rgba(var(--accent-rgb), 0.14) 30%, rgba(var(--accent-rgb), 0.14) 70%, transparent) !important;
-}
-
-/* Performance bar */
-html.transparency-mode .performance-bar {
-    background: rgba(var(--accent-rgb), 0.06) !important;
-}
-
-/* Colormode/theme buttons inside transparent mode — keep slight fill for usability */
-html.transparency-mode .colormode-btn {
-    background: rgba(var(--accent-rgb), 0.04) !important;
-}
-html.transparency-mode .theme-swatch {
-    background: rgba(255,255,255,0.03) !important;
-}
-
-/* ═══════════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════════════════
    END DISPLAY MODES
-   ═══════════════════════════════════════════════════════════════ */
+   ══════════════════════════════════════════════════════════════════════ */
+
 
 /* ═══════════════════════════════════════════════════════════════
    ██████  M3 EXPRESSIVE + ANDROID QS FINAL POLISH  ██████
@@ -6172,47 +6095,46 @@ html.quality-mode body::before {
 /* Backdrop blur on glass mode cards — quality mode only */
 html.quality-mode .card,
 html.quality-mode .glass-panel {
-    backdrop-filter: blur(20px) saturate(1.6) !important;
-    -webkit-backdrop-filter: blur(20px) saturate(1.6) !important;
+    backdrop-filter: blur(calc(12px + var(--glass-amount, 0.5) * 20px)) saturate(1.6) !important;
+    -webkit-backdrop-filter: blur(calc(12px + var(--glass-amount, 0.5) * 20px)) saturate(1.6) !important;
 }
 html.quality-mode .top-bar {
     backdrop-filter: blur(24px) saturate(1.5) !important;
     -webkit-backdrop-filter: blur(24px) saturate(1.5) !important;
-    /* With blur, can afford to be more transparent */
-    background: rgba(var(--bg-base-rgb), 0.60) !important;
+    background: rgba(var(--bg-base-rgb), calc(0.72 - var(--glass-amount, 0.5) * 0.28)) !important;
 }
 html.quality-mode .bottom-nav,
 html.quality-mode .modern-nav {
     backdrop-filter: blur(24px) saturate(1.5) !important;
     -webkit-backdrop-filter: blur(24px) saturate(1.5) !important;
-    background: rgba(var(--bg-overlay-rgb), 0.62) !important;
+    background: rgba(var(--bg-overlay-rgb), calc(0.74 - var(--glass-amount, 0.5) * 0.28)) !important;
 }
 
-/* Blur mode + quality: frosted glass — balanced, not over-blurred */
+/* Blur mode + quality: backdrop blur scales with --blur-amount slider */
 html.quality-mode.blur-mode .card,
 html.quality-mode.blur-mode .glass-panel {
-    backdrop-filter: blur(28px) saturate(1.9) brightness(0.90) !important;
-    -webkit-backdrop-filter: blur(28px) saturate(1.9) brightness(0.90) !important;
+    backdrop-filter: blur(calc(16px + var(--blur-amount, 0.5) * 32px)) saturate(calc(1.4 + var(--blur-amount, 0.5) * 0.8)) brightness(calc(0.96 - var(--blur-amount, 0.5) * 0.12)) !important;
+    -webkit-backdrop-filter: blur(calc(16px + var(--blur-amount, 0.5) * 32px)) saturate(calc(1.4 + var(--blur-amount, 0.5) * 0.8)) brightness(calc(0.96 - var(--blur-amount, 0.5) * 0.12)) !important;
 }
 html.quality-mode.blur-mode .top-bar {
-    backdrop-filter: blur(32px) saturate(1.8) !important;
-    -webkit-backdrop-filter: blur(32px) saturate(1.8) !important;
-    background: rgba(var(--bg-base-rgb), 0.58) !important;
+    backdrop-filter: blur(calc(20px + var(--blur-amount, 0.5) * 24px)) saturate(1.8) !important;
+    -webkit-backdrop-filter: blur(calc(20px + var(--blur-amount, 0.5) * 24px)) saturate(1.8) !important;
+    background: rgba(var(--bg-base-rgb), calc(0.72 - var(--blur-amount, 0.5) * 0.28)) !important;
 }
 html.quality-mode.blur-mode .bottom-nav,
 html.quality-mode.blur-mode .modern-nav {
-    backdrop-filter: blur(32px) saturate(1.8) !important;
-    -webkit-backdrop-filter: blur(32px) saturate(1.8) !important;
-    background: rgba(var(--bg-base-rgb), 0.52) !important;
+    backdrop-filter: blur(calc(20px + var(--blur-amount, 0.5) * 24px)) saturate(1.8) !important;
+    -webkit-backdrop-filter: blur(calc(20px + var(--blur-amount, 0.5) * 24px)) saturate(1.8) !important;
+    background: rgba(var(--bg-base-rgb), calc(0.76 - var(--blur-amount, 0.5) * 0.30)) !important;
 }
 
-/* Transparent mode + quality: frosted glass bars */
+/* Transparent mode + quality: frosted bars, scales with --transp-amount */
 html.quality-mode.transparency-mode .top-bar,
 html.quality-mode.transparency-mode .bottom-nav,
 html.quality-mode.transparency-mode .modern-nav {
-    backdrop-filter: blur(30px) saturate(1.8) !important;
-    -webkit-backdrop-filter: blur(30px) saturate(1.8) !important;
-    background: rgba(var(--bg-base-rgb), 0.45) !important;
+    backdrop-filter: blur(calc(18px + var(--transp-amount, 0.5) * 20px)) saturate(1.8) !important;
+    -webkit-backdrop-filter: blur(calc(18px + var(--transp-amount, 0.5) * 20px)) saturate(1.8) !important;
+    background: rgba(var(--bg-base-rgb), calc(0.15 + var(--transp-amount, 0.5) * 0.22)) !important;
 }
 
 /* Shimmer buttons in quality mode */
@@ -7279,3 +7201,788 @@ html:not(.quality-mode-on) .game-excl-item {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
 }
+
+/* ╔══════════════════════════════════════════════════════════════════════════
+   ║  MODES v3 — DEFINITIVE FINAL OVERRIDE
+   ║  MUST be the LAST section in this file to win the cascade.
+   ║
+   ║  ROOT CAUSE FIXES:
+   ║  1. Clear mode: body uses bg-base (NOT transparent) — transparent shows
+   ║     white WebView chrome on Android. Cards are transparent (wireframe),
+   ║     body is dark. This gives the "see-through card" aesthetic without
+   ║     the white-screen bug.
+   ║  2. Sliders now work: all card backgrounds use calc(var(--glass-amount))
+   ║     etc. so slider JS changes are reflected in real-time.
+   ║  3. Glass ≠ Blur: Glass = colored translucent (accent-tinted, ~15% fill).
+   ║     Blur = near-solid DARK (~80% fill), monochrome. Totally different.
+   ║  4. All 4 modes are visually UNMISTAKABLE.
+   ╚══════════════════════════════════════════════════════════════════════════ */
+
+/* ── FIX 1: Transparency mode body — NEVER white ─────────────── */
+html.transparency-mode body {
+    background: var(--bg-base) !important;
+}
+/* Kill body::before/after in transparency mode for max card visibility */
+html.transparency-mode body::before {
+    background:
+        radial-gradient(ellipse 70% 55% at 8% -5%,  rgba(var(--accent-rgb), calc(0.12 + var(--transp-amount,0.5)*0.12)) 0%, transparent 58%),
+        radial-gradient(ellipse 55% 45% at 92% 105%, rgba(var(--accent-rgb), calc(0.08 + var(--transp-amount,0.5)*0.10)) 0%, transparent 55%),
+        radial-gradient(ellipse 45% 38% at 55% 30%,  rgba(var(--accent-rgb), calc(0.05 + var(--transp-amount,0.5)*0.07)) 0%, transparent 50%) !important;
+    opacity: 1 !important;
+}
+
+/* ── Body glow per mode ──────────────────────────────────────── */
+/* Glass: full vivid orbs — color bleeds through translucent cards */
+:not(html[class*="-mode"]) body::before {
+    opacity: 1 !important;
+}
+/* Blur: NO orbs — the near-solid dark cards ARE the aesthetic */
+html.blur-mode body::before {
+    opacity: 0 !important;
+    background: none !important;
+}
+/* Vivid: maximum orbs */
+html.vivid-mode body::before {
+    background:
+        radial-gradient(ellipse 90% 70% at 5% -8%,   rgba(var(--accent-rgb), calc(0.30 + var(--vivid-amount,0.5)*0.28)) 0%, transparent 55%),
+        radial-gradient(ellipse 75% 60% at 95% 108%,  rgba(var(--accent-rgb), calc(0.18 + var(--vivid-amount,0.5)*0.18)) 0%, transparent 52%),
+        radial-gradient(ellipse 60% 50% at 60% 28%,   rgba(var(--accent-rgb), calc(0.10 + var(--vivid-amount,0.5)*0.12)) 0%, transparent 48%),
+        radial-gradient(ellipse 45% 40% at 18% 72%,   rgba(var(--accent-rgb), calc(0.07 + var(--vivid-amount,0.5)*0.09)) 0%, transparent 44%) !important;
+    opacity: 1 !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   GLASS MODE — Accent-colored translucent cards
+   Identity: Color from body orbs bleeds through translucent fill.
+   Feels like holding tinted glass up to a light.
+   Slider: glassiness → controls how opaque/tinted the glass is.
+   ══════════════════════════════════════════════════════════════════ */
+:not(html[class*="-mode"]) .card,
+:not(html[class*="-mode"]) .glass-panel,
+:not(html[class*="-mode"]) #tab-home .card,
+:not(html[class*="-mode"]) #tab-config .card,
+:not(html[class*="-mode"]) #tab-utils .card,
+:not(html[class*="-mode"]) #tab-data .card {
+    background: linear-gradient(145deg,
+        rgba(var(--accent-rgb), calc(0.07 + var(--glass-amount, 0.5) * 0.17)) 0%,
+        rgba(var(--accent-rgb), calc(0.03 + var(--glass-amount, 0.5) * 0.08)) 55%,
+        rgba(255,255,255,       calc(0.01 + var(--glass-amount, 0.5) * 0.04)) 100%
+    ) !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.14 + var(--glass-amount, 0.5) * 0.22)) !important;
+    border-top: 1.5px solid rgba(var(--accent-rgb), calc(0.26 + var(--glass-amount, 0.5) * 0.32)) !important;
+    box-shadow:
+        0 4px 22px rgba(0,0,0, 0.28),
+        inset 0 1px 0 rgba(var(--accent-rgb), calc(0.16 + var(--glass-amount, 0.5) * 0.24)),
+        0 0 0 0.5px rgba(var(--accent-rgb), calc(0.05 + var(--glass-amount, 0.5) * 0.08)) !important;
+}
+:not(html[class*="-mode"]) .card:hover,
+:not(html[class*="-mode"]) .glass-panel:hover {
+    border-color: rgba(var(--accent-rgb), calc(0.22 + var(--glass-amount, 0.5) * 0.28)) !important;
+    border-top-color: rgba(var(--accent-rgb), calc(0.40 + var(--glass-amount, 0.5) * 0.36)) !important;
+}
+:not(html[class*="-mode"]) .welcome-card {
+    background: linear-gradient(155deg,
+        rgba(var(--accent-rgb), calc(0.18 + var(--glass-amount, 0.5) * 0.18)) 0%,
+        rgba(var(--accent-rgb), calc(0.09 + var(--glass-amount, 0.5) * 0.10)) 45%,
+        rgba(var(--bg-raised-rgb), calc(0.30 + var(--glass-amount, 0.5) * 0.25)) 100%
+    ) !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.26 + var(--glass-amount, 0.5) * 0.28)) !important;
+    border-top-color: rgba(var(--accent-rgb), calc(0.48 + var(--glass-amount, 0.5) * 0.30)) !important;
+    box-shadow:
+        0 0 calc(40px + var(--glass-amount, 0.5) * 50px) rgba(var(--accent-rgb), calc(0.12 + var(--glass-amount, 0.5) * 0.14)),
+        0 8px 32px rgba(0,0,0, 0.30),
+        inset 0 1px 0 rgba(var(--accent-rgb), calc(0.25 + var(--glass-amount, 0.5) * 0.28)) !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   BLUR MODE — Near-solid DARK panels (Android QS style)
+   Identity: Near-BLACK cards with no color. Monochromatic.
+   Body orbs are KILLED so dark cards stand out starkly.
+   Slider: blur intensity → controls how dark/opaque the panels are.
+   KEY DIFFERENCE FROM GLASS: No accent color tint. Near-solid.
+   ══════════════════════════════════════════════════════════════════ */
+html.blur-mode .card,
+html.blur-mode .glass-panel,
+html.blur-mode #tab-home .card,
+html.blur-mode #tab-config .card,
+html.blur-mode #tab-utils .card,
+html.blur-mode #tab-data .card {
+    background: rgba(var(--bg-base-rgb), calc(0.72 + var(--blur-amount, 0.5) * 0.22)) !important;
+    border: 1px solid rgba(255,255,255, 0.055) !important;
+    border-top: 1px solid rgba(255,255,255, calc(0.08 + var(--blur-amount, 0.5) * 0.06)) !important;
+    box-shadow:
+        0 4px 20px rgba(0,0,0, calc(0.50 + var(--blur-amount, 0.5) * 0.20)),
+        inset 0 1px 0 rgba(255,255,255, 0.05) !important;
+}
+html.blur-mode .card:hover,
+html.blur-mode .glass-panel:hover {
+    background: rgba(var(--bg-raised-rgb), calc(0.75 + var(--blur-amount, 0.5) * 0.18)) !important;
+    border-top-color: rgba(255,255,255, 0.14) !important;
+}
+html.blur-mode .welcome-card,
+html.blur-mode #tab-home .welcome-card {
+    background: linear-gradient(145deg,
+        rgba(var(--accent-rgb), calc(0.10 + var(--blur-amount, 0.5) * 0.08)) 0%,
+        rgba(var(--bg-base-rgb), calc(0.72 + var(--blur-amount, 0.5) * 0.18)) 100%
+    ) !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.14 + var(--blur-amount, 0.5) * 0.12)) !important;
+    border-top-color: rgba(var(--accent-rgb), calc(0.28 + var(--blur-amount, 0.5) * 0.16)) !important;
+    box-shadow:
+        0 0 40px rgba(var(--accent-rgb), calc(0.10 + var(--blur-amount, 0.5) * 0.08)),
+        0 8px 32px rgba(0,0,0, 0.50) !important;
+}
+/* Blur: tiles and maintenance also go dark */
+html.blur-mode .tile-btn,
+html.blur-mode .modern-tile {
+    background: rgba(var(--bg-base-rgb), calc(0.70 + var(--blur-amount, 0.5) * 0.18)) !important;
+    border-color: rgba(255,255,255, 0.06) !important;
+}
+html.blur-mode .maintenance-btn {
+    background: rgba(var(--bg-base-rgb), calc(0.65 + var(--blur-amount, 0.5) * 0.18)) !important;
+    border-color: rgba(255,255,255, 0.05) !important;
+}
+html.blur-mode .info-item {
+    background: rgba(var(--bg-base-rgb), calc(0.55 + var(--blur-amount, 0.5) * 0.18)) !important;
+    border-color: rgba(255,255,255, 0.06) !important;
+}
+html.blur-mode .stat-card-modern {
+    background: rgba(var(--accent-rgb), calc(0.06 + var(--blur-amount, 0.5) * 0.05)) !important;
+    border-color: rgba(255,255,255, 0.06) !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   CLEAR/TRANSPARENT MODE — Wireframe cards over dark background
+   Identity: Cards are INVISIBLE (no fill). Only accent borders define
+   structure. Background pattern shows through. NOT white — uses bg-base.
+   Slider: transparency → controls border visibility/opacity.
+   ══════════════════════════════════════════════════════════════════ */
+html.transparency-mode .card,
+html.transparency-mode .glass-panel,
+html.transparency-mode #tab-home .card,
+html.transparency-mode #tab-config .card,
+html.transparency-mode #tab-utils .card,
+html.transparency-mode #tab-data .card {
+    background: transparent !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.12 + var(--transp-amount, 0.5) * 0.28)) !important;
+    border-top: 1.5px solid rgba(var(--accent-rgb), calc(0.24 + var(--transp-amount, 0.5) * 0.40)) !important;
+    box-shadow: none !important;
+}
+html.transparency-mode .card:hover,
+html.transparency-mode .glass-panel:hover {
+    background: rgba(var(--accent-rgb), calc(0.02 + var(--transp-amount, 0.5) * 0.05)) !important;
+    border-color: rgba(var(--accent-rgb), calc(0.22 + var(--transp-amount, 0.5) * 0.30)) !important;
+}
+html.transparency-mode .welcome-card,
+html.transparency-mode #tab-home .welcome-card {
+    background: rgba(var(--accent-rgb), calc(0.05 + var(--transp-amount, 0.5) * 0.08)) !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.22 + var(--transp-amount, 0.5) * 0.28)) !important;
+    border-top-color: rgba(var(--accent-rgb), calc(0.40 + var(--transp-amount, 0.5) * 0.35)) !important;
+    box-shadow: none !important;
+}
+html.transparency-mode .tile-btn,
+html.transparency-mode .modern-tile {
+    background: rgba(var(--accent-rgb), calc(0.02 + var(--transp-amount, 0.5) * 0.06)) !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.10 + var(--transp-amount, 0.5) * 0.20)) !important;
+    box-shadow: none !important;
+}
+html.transparency-mode .maintenance-btn {
+    background: transparent !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.08 + var(--transp-amount, 0.5) * 0.18)) !important;
+}
+html.transparency-mode .info-item {
+    background: transparent !important;
+    border-color: rgba(var(--accent-rgb), calc(0.08 + var(--transp-amount, 0.5) * 0.14)) !important;
+}
+html.transparency-mode .stat-card-modern {
+    background: transparent !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.10 + var(--transp-amount, 0.5) * 0.18)) !important;
+    box-shadow: none !important;
+}
+html.transparency-mode .section-label {
+    color: rgba(var(--accent-rgb), calc(0.70 + var(--transp-amount, 0.5) * 0.30)) !important;
+    opacity: 1 !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   VIVID MODE — Solid dark cards with thick glowing accent border
+   Identity: Maximum contrast. Flat dark cards. Neon top border glows.
+   Welcome card = full theme gradient. Highly saturated background.
+   Slider: vividness → controls glow intensity and border brightness.
+   ══════════════════════════════════════════════════════════════════ */
+html.vivid-mode .card,
+html.vivid-mode .glass-panel,
+html.vivid-mode #tab-home .card:not(.welcome-card),
+html.vivid-mode #tab-config .card,
+html.vivid-mode #tab-utils .card,
+html.vivid-mode #tab-data .card {
+    background: var(--vivid-card-bg) !important;
+    border: 1px solid rgba(255,255,255, 0.05) !important;
+    border-top: calc(2px + var(--vivid-amount, 0.5) * 1.5px) solid rgba(var(--accent-rgb), calc(0.52 + var(--vivid-amount, 0.5) * 0.48)) !important;
+    box-shadow:
+        0 4px 18px rgba(0,0,0, 0.55),
+        0 0 calc(8px + var(--vivid-amount, 0.5) * 32px) rgba(var(--accent-rgb), calc(0.02 + var(--vivid-amount, 0.5) * 0.10)) !important;
+}
+html.vivid-mode .card:hover,
+html.vivid-mode .glass-panel:hover {
+    background: var(--vivid-card-hover) !important;
+    border-top-color: rgba(var(--accent-rgb), calc(0.75 + var(--vivid-amount, 0.5) * 0.25)) !important;
+    box-shadow:
+        0 8px 28px rgba(0,0,0, 0.65),
+        0 0 calc(20px + var(--vivid-amount, 0.5) * 50px) rgba(var(--accent-rgb), calc(0.06 + var(--vivid-amount, 0.5) * 0.14)) !important;
+}
+html.vivid-mode .welcome-card,
+html.vivid-mode .card.welcome-card,
+html.vivid-mode #tab-home .card.welcome-card,
+html.vivid-mode .glass-panel.welcome-card {
+    background: var(--vivid-welcome-grad) !important;
+    border: none !important;
+    border-top: none !important;
+    box-shadow:
+        0 0 calc(40px + var(--vivid-amount, 0.5) * 80px) rgba(var(--accent-rgb), calc(0.28 + var(--vivid-amount, 0.5) * 0.32)),
+        0 16px 48px rgba(0,0,0, 0.65),
+        inset 0 1px 0 rgba(255,255,255, 0.20) !important;
+}
+html.vivid-mode .tile-btn,
+html.vivid-mode .modern-tile {
+    background: var(--vivid-card-bg) !important;
+    border: 1px solid rgba(255,255,255, 0.05) !important;
+    border-top: 2px solid rgba(var(--accent-rgb), calc(0.40 + var(--vivid-amount, 0.5) * 0.40)) !important;
+    box-shadow: 0 4px 14px rgba(0,0,0, 0.50) !important;
+}
+html.vivid-mode .tile-btn:hover,
+html.vivid-mode .modern-tile:hover {
+    background: rgba(var(--accent-rgb), calc(0.08 + var(--vivid-amount, 0.5) * 0.12)) !important;
+    border-top-color: rgba(var(--accent-rgb), calc(0.75 + var(--vivid-amount, 0.5) * 0.25)) !important;
+    box-shadow:
+        0 8px 24px rgba(0,0,0, 0.60),
+        0 0 calc(16px + var(--vivid-amount, 0.5) * 30px) rgba(var(--accent-rgb), calc(0.10 + var(--vivid-amount, 0.5) * 0.16)) !important;
+}
+html.vivid-mode .maintenance-btn {
+    background: rgba(255,255,255, 0.03) !important;
+    border-color: rgba(255,255,255, 0.07) !important;
+}
+html.vivid-mode .info-item {
+    background: rgba(255,255,255, 0.03) !important;
+    border-color: rgba(255,255,255, 0.07) !important;
+}
+html.vivid-mode .info-item.highlight {
+    background: rgba(var(--accent-rgb), calc(0.10 + var(--vivid-amount, 0.5) * 0.10)) !important;
+    border-color: rgba(var(--accent-rgb), 0.25) !important;
+}
+html.vivid-mode .stat-card-modern {
+    background: rgba(var(--accent-rgb), calc(0.08 + var(--vivid-amount, 0.5) * 0.08)) !important;
+    border-top: 2px solid rgba(var(--accent-rgb), calc(0.40 + var(--vivid-amount, 0.5) * 0.40)) !important;
+}
+html.vivid-mode .section-label {
+    color: rgba(var(--accent-rgb), calc(0.70 + var(--vivid-amount, 0.5) * 0.30)) !important;
+    opacity: 1 !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   NAVIGATION BAR — Per-mode identities (most visually impactful)
+   ══════════════════════════════════════════════════════════════════ */
+
+/* Glass: accent-tinted, semi-transparent */
+:not(html[class*="-mode"]) .bottom-nav,
+:not(html[class*="-mode"]) .modern-nav {
+    background: linear-gradient(180deg,
+        rgba(var(--accent-rgb), calc(0.06 + var(--glass-amount, 0.5) * 0.08)) 0%,
+        rgba(var(--bg-base-rgb), calc(0.62 + var(--glass-amount, 0.5) * 0.22)) 100%
+    ) !important;
+    border-top: 1px solid rgba(var(--accent-rgb), calc(0.14 + var(--glass-amount, 0.5) * 0.18)) !important;
+    box-shadow:
+        0 -2px 20px rgba(var(--accent-rgb), calc(0.04 + var(--glass-amount, 0.5) * 0.08)),
+        inset 0 1px 0 rgba(var(--accent-rgb), calc(0.08 + var(--glass-amount, 0.5) * 0.12)) !important;
+}
+
+/* Blur: NEAR-SOLID BLACK — starkest difference from glass */
+html.blur-mode .bottom-nav,
+html.blur-mode .modern-nav {
+    background: rgba(0, 0, 0, calc(0.88 + var(--blur-amount, 0.5) * 0.10)) !important;
+    border-top: 1px solid rgba(255,255,255, 0.04) !important;
+    box-shadow: none !important;
+}
+
+/* Clear: ghost strip */
+html.transparency-mode .bottom-nav,
+html.transparency-mode .modern-nav {
+    background: rgba(var(--bg-base-rgb), calc(0.50 + var(--transp-amount, 0.5) * 0.20)) !important;
+    border-top: 1px solid rgba(var(--accent-rgb), calc(0.10 + var(--transp-amount, 0.5) * 0.22)) !important;
+    box-shadow: none !important;
+}
+
+/* Vivid: solid dark + glowing accent top edge */
+html.vivid-mode .bottom-nav,
+html.vivid-mode .modern-nav {
+    background: rgba(0, 0, 0, calc(0.90 + var(--vivid-amount, 0.5) * 0.08)) !important;
+    border-top: 2px solid rgba(var(--accent-rgb), calc(0.20 + var(--vivid-amount, 0.5) * 0.40)) !important;
+    box-shadow: 0 -4px calc(16px + var(--vivid-amount, 0.5) * 40px) rgba(var(--accent-rgb), calc(0.05 + var(--vivid-amount, 0.5) * 0.18)) !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   TOP BAR — Per-mode identities
+   ══════════════════════════════════════════════════════════════════ */
+:not(html[class*="-mode"]) .top-bar {
+    background: rgba(var(--bg-base-rgb), calc(0.55 + var(--glass-amount, 0.5) * 0.28)) !important;
+    border-bottom: 1px solid rgba(var(--accent-rgb), calc(0.10 + var(--glass-amount, 0.5) * 0.14)) !important;
+}
+html.blur-mode .top-bar {
+    background: rgba(0, 0, 0, calc(0.84 + var(--blur-amount, 0.5) * 0.14)) !important;
+    border-bottom: 1px solid rgba(255,255,255, 0.04) !important;
+    box-shadow: none !important;
+}
+html.transparency-mode .top-bar {
+    background: rgba(var(--bg-base-rgb), calc(0.45 + var(--transp-amount, 0.5) * 0.22)) !important;
+    border-bottom: 1px solid rgba(var(--accent-rgb), calc(0.14 + var(--transp-amount, 0.5) * 0.22)) !important;
+    box-shadow: none !important;
+}
+html.vivid-mode .top-bar {
+    background: rgba(0, 0, 0, 0.92) !important;
+    border-bottom: 1px solid rgba(var(--accent-rgb), calc(0.18 + var(--vivid-amount, 0.5) * 0.24)) !important;
+    box-shadow: 0 2px calc(8px + var(--vivid-amount, 0.5) * 20px) rgba(var(--accent-rgb), calc(0.04 + var(--vivid-amount, 0.5) * 0.10)) !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   QUALITY MODE — Adds backdrop-filter blur when enabled
+   Without quality: modes use opacity/color for visual distinction.
+   With quality: proper iOS-style frosted glass effects.
+   ══════════════════════════════════════════════════════════════════ */
+/* Glass + quality */
+html.quality-mode:not(.blur-mode):not(.vivid-mode):not(.transparency-mode) .card,
+html.quality-mode:not(.blur-mode):not(.vivid-mode):not(.transparency-mode) .glass-panel {
+    backdrop-filter: blur(calc(10px + var(--glass-amount, 0.5) * 20px)) saturate(calc(1.4 + var(--glass-amount, 0.5) * 0.6)) !important;
+    -webkit-backdrop-filter: blur(calc(10px + var(--glass-amount, 0.5) * 20px)) saturate(calc(1.4 + var(--glass-amount, 0.5) * 0.6)) !important;
+}
+html.quality-mode:not(.blur-mode):not(.vivid-mode):not(.transparency-mode) .top-bar,
+html.quality-mode:not(.blur-mode):not(.vivid-mode):not(.transparency-mode) .bottom-nav,
+html.quality-mode:not(.blur-mode):not(.vivid-mode):not(.transparency-mode) .modern-nav {
+    backdrop-filter: blur(calc(14px + var(--glass-amount, 0.5) * 16px)) saturate(1.5) !important;
+    -webkit-backdrop-filter: blur(calc(14px + var(--glass-amount, 0.5) * 16px)) saturate(1.5) !important;
+}
+/* Blur + quality: heavy darkness blur */
+html.quality-mode.blur-mode .card,
+html.quality-mode.blur-mode .glass-panel {
+    backdrop-filter: blur(calc(18px + var(--blur-amount, 0.5) * 28px)) brightness(calc(0.82 - var(--blur-amount, 0.5) * 0.14)) !important;
+    -webkit-backdrop-filter: blur(calc(18px + var(--blur-amount, 0.5) * 28px)) brightness(calc(0.82 - var(--blur-amount, 0.5) * 0.14)) !important;
+}
+html.quality-mode.blur-mode .top-bar,
+html.quality-mode.blur-mode .bottom-nav,
+html.quality-mode.blur-mode .modern-nav {
+    backdrop-filter: blur(calc(22px + var(--blur-amount, 0.5) * 22px)) brightness(0.78) !important;
+    -webkit-backdrop-filter: blur(calc(22px + var(--blur-amount, 0.5) * 22px)) brightness(0.78) !important;
+}
+/* Clear + quality: frosted bars, see-through cards */
+html.quality-mode.transparency-mode .top-bar,
+html.quality-mode.transparency-mode .bottom-nav,
+html.quality-mode.transparency-mode .modern-nav {
+    backdrop-filter: blur(20px) saturate(1.8) !important;
+    -webkit-backdrop-filter: blur(20px) saturate(1.8) !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   MODAL / CONFIRM / TOAST — per-mode
+   ══════════════════════════════════════════════════════════════════ */
+html.blur-mode .modal-container,
+html.blur-mode .confirm-container,
+html.blur-mode .theme-sheet {
+    background: rgba(var(--bg-raised-rgb), calc(0.85 + var(--blur-amount, 0.5) * 0.12)) !important;
+    border-color: rgba(255,255,255, 0.06) !important;
+}
+html.blur-mode .modal-overlay { background: rgba(0,0,0, 0.90) !important; }
+html.blur-mode .toast {
+    background: rgba(var(--bg-base-rgb), calc(0.88 + var(--blur-amount, 0.5) * 0.10)) !important;
+}
+
+html.transparency-mode .modal-container,
+html.transparency-mode .confirm-container {
+    background: rgba(var(--bg-raised-rgb), 0.82) !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.20 + var(--transp-amount, 0.5) * 0.20)) !important;
+}
+html.transparency-mode .theme-sheet {
+    background: rgba(var(--bg-base-rgb), 0.88) !important;
+}
+html.transparency-mode .modal-overlay { background: rgba(0,0,0, 0.65) !important; }
+
+html.vivid-mode .modal-container {
+    background: var(--vivid-card-hover) !important;
+    border-top: 2px solid rgba(var(--accent-rgb), calc(0.45 + var(--vivid-amount, 0.5) * 0.35)) !important;
+}
+html.vivid-mode .theme-sheet { background: var(--vivid-card-bg) !important; }
+html.vivid-mode .confirm-container {
+    background: var(--vivid-card-hover) !important;
+    border: 1px solid rgba(var(--accent-rgb), 0.22) !important;
+}
+html.vivid-mode .modal-overlay { background: rgba(0,0,0, 0.80) !important; }
+html.vivid-mode .toast {
+    background: var(--vivid-card-hover) !important;
+    border: 1px solid rgba(var(--accent-rgb), 0.20) !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   GLASS MODE — TILE & MAINTENANCE SLIDER-AWARE
+   ══════════════════════════════════════════════════════════════════ */
+:not(html[class*="-mode"]) .tile-btn,
+:not(html[class*="-mode"]) .modern-tile {
+    background: rgba(var(--accent-rgb), calc(0.07 + var(--glass-amount, 0.5) * 0.13)) !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.12 + var(--glass-amount, 0.5) * 0.18)) !important;
+    box-shadow: 0 4px 16px rgba(0,0,0, 0.28), inset 0 1px 0 rgba(var(--accent-rgb), calc(0.12 + var(--glass-amount, 0.5) * 0.18)) !important;
+}
+:not(html[class*="-mode"]) .maintenance-btn {
+    background: rgba(var(--accent-rgb), calc(0.05 + var(--glass-amount, 0.5) * 0.10)) !important;
+    border-color: rgba(var(--accent-rgb), calc(0.10 + var(--glass-amount, 0.5) * 0.14)) !important;
+}
+:not(html[class*="-mode"]) .info-item {
+    background: rgba(var(--bg-overlay-rgb), calc(0.35 + var(--glass-amount, 0.5) * 0.22)) !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.08 + var(--glass-amount, 0.5) * 0.12)) !important;
+}
+:not(html[class*="-mode"]) .info-item.highlight {
+    background: rgba(var(--accent-rgb), calc(0.10 + var(--glass-amount, 0.5) * 0.12)) !important;
+    border-color: rgba(var(--accent-rgb), calc(0.20 + var(--glass-amount, 0.5) * 0.18)) !important;
+}
+:not(html[class*="-mode"]) .stat-card-modern {
+    background: rgba(var(--accent-rgb), calc(0.08 + var(--glass-amount, 0.5) * 0.10)) !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.14 + var(--glass-amount, 0.5) * 0.16)) !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   END MODES v3
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ╔══════════════════════════════════════════════════════════════════════════
+   ║  MODES v4 — BLUR + VIVID DEFINITIVE FIX
+   ║
+   ║  BLUR ROOT CAUSE: Two bugs prevented blur from working:
+   ║  1. `:not(html.quality-mode) .card { backdrop-filter: none !important }`
+   ║     stripped ALL backdrop-filter unless quality mode was enabled.
+   ║     Fix: Re-enable backdrop-filter for blur-mode cards unconditionally,
+   ║     with higher specificity that wins the cascade.
+   ║  2. `html.blur-mode body::before { opacity: 0 }` killed the background
+   ║     orbs — without a vivid background, blur has nothing to smear through
+   ║     the semi-transparent cards. The other module's secret: cards are
+   ║     ~10-20% opacity + vivid body behind them = smeared color.
+   ║     Fix: Restore strong orbs in blur mode. Lower card opacity drastically.
+   ║
+   ║  VIVID SLIDER ROOT CAUSE: Cards used var(--vivid-card-bg) hardcoded dark.
+   ║     Slider only affected border glow, not fill — imperceptible visually.
+   ║     Fix: Card fill now uses calc() so it shifts from dark flat at 0 to
+   ║     heavily accent-tinted at 1. Glow range increased 0px→80px.
+   ╚══════════════════════════════════════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════════════════════════════
+   BLUR MODE — DEFINITIVE FIX
+   
+   Exact mechanism copied from the reference module:
+   • Body: VIVID colorful background (strong accent orbs, always on)
+   • Cards: LOW opacity fill (10-22%) — background bleeds through
+   • backdrop-filter: blur + saturate ALWAYS applied (no quality gate)
+   • Nav: low-opacity dark + heavy blur (same mechanism)
+   
+   The slider controls blur radius + card opacity together.
+   ══════════════════════════════════════════════════════════════════ */
+
+/* 1. Restore vivid orbs for blur body — the blur has to smear something */
+html.blur-mode body {
+    background: var(--bg-base) !important;
+}
+html.blur-mode body::before {
+    background:
+        radial-gradient(ellipse 110% 80% at 8%  -8%,  rgba(var(--accent-rgb), 0.75) 0%, transparent 55%),
+        radial-gradient(ellipse 90%  75% at 94% 108%, rgba(var(--accent-rgb), 0.55) 0%, transparent 52%),
+        radial-gradient(ellipse 70%  60% at 60%  30%, rgba(var(--accent-rgb), 0.40) 0%, transparent 50%),
+        radial-gradient(ellipse 55%  48% at 20%  72%, rgba(var(--accent-rgb), 0.30) 0%, transparent 46%) !important;
+    opacity: 1 !important;
+}
+
+/* 2. Cards: low-opacity fill + backdrop-filter ALWAYS (no quality gate)
+   These rules have html.blur-mode selector which beats the general
+   :not(html.quality-mode) rule. */
+html.blur-mode .card,
+html.blur-mode .glass-panel,
+html.blur-mode #tab-home .card,
+html.blur-mode #tab-config .card,
+html.blur-mode #tab-utils .card,
+html.blur-mode #tab-data .card {
+    /* Low fill so background orbs bleed through for blur to smear */
+    background: linear-gradient(145deg,
+        rgba(var(--accent-rgb),   calc(0.06 + var(--blur-amount, 0.5) * 0.10)) 0%,
+        rgba(var(--bg-base-rgb),  calc(0.10 + var(--blur-amount, 0.5) * 0.18)) 100%
+    ) !important;
+    /* backdrop-filter ALWAYS — this is the mechanism, not a quality extra */
+    backdrop-filter:
+        blur(calc(14px + var(--blur-amount, 0.5) * 22px))
+        saturate(calc(1.60 + var(--blur-amount, 0.5) * 0.80))
+        brightness(calc(0.90 - var(--blur-amount, 0.5) * 0.18)) !important;
+    -webkit-backdrop-filter:
+        blur(calc(14px + var(--blur-amount, 0.5) * 22px))
+        saturate(calc(1.60 + var(--blur-amount, 0.5) * 0.80))
+        brightness(calc(0.90 - var(--blur-amount, 0.5) * 0.18)) !important;
+    border: 1px solid rgba(255, 255, 255, calc(0.08 + var(--blur-amount, 0.5) * 0.06)) !important;
+    border-top: 1px solid rgba(255, 255, 255, calc(0.14 + var(--blur-amount, 0.5) * 0.10)) !important;
+    box-shadow:
+        0 0 0 1px rgba(255, 255, 255, 0.05),
+        inset 0 1px 0 rgba(255, 255, 255, calc(0.10 + var(--blur-amount, 0.5) * 0.10)),
+        0 4px 20px rgba(0,0,0, 0.35) !important;
+}
+html.blur-mode .card:hover,
+html.blur-mode .glass-panel:hover {
+    background: linear-gradient(145deg,
+        rgba(var(--accent-rgb),  calc(0.10 + var(--blur-amount, 0.5) * 0.12)) 0%,
+        rgba(var(--bg-base-rgb), calc(0.16 + var(--blur-amount, 0.5) * 0.20)) 100%
+    ) !important;
+    border-top-color: rgba(255,255,255, calc(0.22 + var(--blur-amount, 0.5) * 0.14)) !important;
+}
+
+/* Welcome card in blur — slightly more accent tinted */
+html.blur-mode .welcome-card,
+html.blur-mode #tab-home .welcome-card {
+    background: linear-gradient(155deg,
+        rgba(var(--accent-rgb),  calc(0.18 + var(--blur-amount, 0.5) * 0.16)) 0%,
+        rgba(var(--accent-rgb),  calc(0.08 + var(--blur-amount, 0.5) * 0.10)) 55%,
+        rgba(var(--bg-base-rgb), calc(0.10 + var(--blur-amount, 0.5) * 0.14)) 100%
+    ) !important;
+    backdrop-filter:
+        blur(calc(14px + var(--blur-amount, 0.5) * 22px))
+        saturate(calc(1.80 + var(--blur-amount, 0.5) * 0.60))
+        brightness(calc(0.85 - var(--blur-amount, 0.5) * 0.12)) !important;
+    -webkit-backdrop-filter:
+        blur(calc(14px + var(--blur-amount, 0.5) * 22px))
+        saturate(calc(1.80 + var(--blur-amount, 0.5) * 0.60))
+        brightness(calc(0.85 - var(--blur-amount, 0.5) * 0.12)) !important;
+    border: 1px solid rgba(var(--accent-rgb), calc(0.22 + var(--blur-amount, 0.5) * 0.18)) !important;
+    border-top-color: rgba(var(--accent-rgb), calc(0.42 + var(--blur-amount, 0.5) * 0.26)) !important;
+    box-shadow:
+        0 0 calc(30px + var(--blur-amount,0.5)*50px) rgba(var(--accent-rgb), calc(0.20 + var(--blur-amount,0.5)*0.20)),
+        0 8px 36px rgba(0,0,0,0.40) !important;
+}
+
+/* 3. Nav bar — low opacity + heavy blur, same mechanism */
+html.blur-mode .bottom-nav,
+html.blur-mode .modern-nav {
+    background: rgba(var(--bg-base-rgb), calc(0.28 + var(--blur-amount, 0.5) * 0.22)) !important;
+    backdrop-filter:
+        blur(calc(20px + var(--blur-amount, 0.5) * 28px))
+        saturate(calc(1.60 + var(--blur-amount, 0.5) * 0.70))
+        brightness(calc(0.88 - var(--blur-amount, 0.5) * 0.16)) !important;
+    -webkit-backdrop-filter:
+        blur(calc(20px + var(--blur-amount, 0.5) * 28px))
+        saturate(calc(1.60 + var(--blur-amount, 0.5) * 0.70))
+        brightness(calc(0.88 - var(--blur-amount, 0.5) * 0.16)) !important;
+    border-top: 1px solid rgba(255,255,255, 0.08) !important;
+    box-shadow: 0 -4px 24px rgba(0,0,0,0.30) !important;
+}
+html.blur-mode .top-bar {
+    background: rgba(var(--bg-base-rgb), calc(0.30 + var(--blur-amount, 0.5) * 0.22)) !important;
+    backdrop-filter:
+        blur(calc(20px + var(--blur-amount, 0.5) * 24px))
+        saturate(calc(1.60 + var(--blur-amount, 0.5) * 0.70))
+        brightness(calc(0.88 - var(--blur-amount, 0.5) * 0.14)) !important;
+    -webkit-backdrop-filter:
+        blur(calc(20px + var(--blur-amount, 0.5) * 24px))
+        saturate(calc(1.60 + var(--blur-amount, 0.5) * 0.70))
+        brightness(calc(0.88 - var(--blur-amount, 0.5) * 0.14)) !important;
+    border-bottom: 1px solid rgba(255,255,255, 0.06) !important;
+}
+
+/* 4. Tiles and other elements — also low opacity + blur */
+html.blur-mode .tile-btn,
+html.blur-mode .modern-tile {
+    background: rgba(var(--bg-base-rgb), calc(0.15 + var(--blur-amount, 0.5) * 0.16)) !important;
+    backdrop-filter: blur(calc(12px + var(--blur-amount,0.5)*16px)) saturate(1.5) !important;
+    -webkit-backdrop-filter: blur(calc(12px + var(--blur-amount,0.5)*16px)) saturate(1.5) !important;
+    border: 1px solid rgba(255,255,255, 0.07) !important;
+    border-top-color: rgba(255,255,255, 0.13) !important;
+}
+html.blur-mode .maintenance-btn {
+    background: rgba(var(--bg-base-rgb), calc(0.12 + var(--blur-amount, 0.5) * 0.14)) !important;
+    backdrop-filter: blur(calc(10px + var(--blur-amount,0.5)*14px)) saturate(1.4) !important;
+    -webkit-backdrop-filter: blur(calc(10px + var(--blur-amount,0.5)*14px)) saturate(1.4) !important;
+    border-color: rgba(255,255,255, 0.06) !important;
+}
+html.blur-mode .info-item {
+    background: rgba(var(--bg-base-rgb), calc(0.12 + var(--blur-amount, 0.5) * 0.14)) !important;
+    backdrop-filter: blur(calc(8px + var(--blur-amount,0.5)*12px)) saturate(1.4) !important;
+    -webkit-backdrop-filter: blur(calc(8px + var(--blur-amount,0.5)*12px)) saturate(1.4) !important;
+    border-color: rgba(255,255,255, 0.06) !important;
+}
+html.blur-mode .stat-card-modern {
+    background: rgba(var(--accent-rgb), calc(0.08 + var(--blur-amount, 0.5) * 0.08)) !important;
+    backdrop-filter: blur(calc(10px + var(--blur-amount,0.5)*14px)) saturate(1.5) !important;
+    -webkit-backdrop-filter: blur(calc(10px + var(--blur-amount,0.5)*14px)) saturate(1.5) !important;
+    border-color: rgba(var(--accent-rgb), calc(0.14 + var(--blur-amount,0.5)*0.10)) !important;
+}
+
+/* 5. Modals in blur — same low-opacity + blur */
+html.blur-mode .modal-container,
+html.blur-mode .confirm-container {
+    background: rgba(var(--bg-raised-rgb), calc(0.28 + var(--blur-amount,0.5)*0.22)) !important;
+    backdrop-filter: blur(calc(20px + var(--blur-amount,0.5)*24px)) saturate(1.7) brightness(0.85) !important;
+    -webkit-backdrop-filter: blur(calc(20px + var(--blur-amount,0.5)*24px)) saturate(1.7) brightness(0.85) !important;
+    border-color: rgba(255,255,255, 0.07) !important;
+}
+html.blur-mode .theme-sheet {
+    background: rgba(var(--bg-base-rgb), calc(0.30 + var(--blur-amount,0.5)*0.25)) !important;
+    backdrop-filter: blur(28px) saturate(1.6) brightness(0.84) !important;
+    -webkit-backdrop-filter: blur(28px) saturate(1.6) brightness(0.84) !important;
+}
+html.blur-mode .modal-overlay {
+    background: rgba(0,0,0, calc(0.50 + var(--blur-amount,0.5)*0.28)) !important;
+    backdrop-filter: blur(4px) !important;
+    -webkit-backdrop-filter: blur(4px) !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   VIVID MODE — SLIDER FULLY WIRED
+   
+   Previous bug: cards used var(--vivid-card-bg) hardcoded near-black.
+   Slider only affected border glow width/color — visually imperceptible.
+   
+   Fix: Card fill now dramatically changes with slider:
+   • At 0: dark flat (2% accent tint, 90% bg-base fill) — subtle dark card
+   • At 1: heavily tinted (30% accent, 50% bg-base) + 80px glow radius
+   The difference is now like night and day.
+   ══════════════════════════════════════════════════════════════════ */
+
+html.vivid-mode .card,
+html.vivid-mode .glass-panel,
+html.vivid-mode #tab-home .card:not(.welcome-card),
+html.vivid-mode #tab-config .card,
+html.vivid-mode #tab-utils .card,
+html.vivid-mode #tab-data .card {
+    /* Fill shifts from near-solid dark → heavily accent-tinted as slider increases */
+    background: linear-gradient(145deg,
+        rgba(var(--accent-rgb),  calc(0.02 + var(--vivid-amount, 0.5) * 0.28)) 0%,
+        rgba(var(--bg-base-rgb), calc(0.90 - var(--vivid-amount, 0.5) * 0.45)) 100%
+    ) !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    border: 1px solid rgba(255,255,255, calc(0.03 + var(--vivid-amount, 0.5) * 0.05)) !important;
+    /* Top border brightness scales from dim stripe → blazing neon */
+    border-top: calc(1.5px + var(--vivid-amount, 0.5) * 2px) solid
+        rgba(var(--accent-rgb), calc(0.28 + var(--vivid-amount, 0.5) * 0.72)) !important;
+    box-shadow:
+        0 4px 18px rgba(0,0,0, 0.55),
+        /* Card body glow: 0px radius at 0, 80px at 1 — huge visible difference */
+        0 0 calc(var(--vivid-amount, 0.5) * 80px)
+            rgba(var(--accent-rgb), calc(var(--vivid-amount, 0.5) * 0.28)) !important;
+}
+html.vivid-mode .card:hover,
+html.vivid-mode .glass-panel:hover {
+    background: linear-gradient(145deg,
+        rgba(var(--accent-rgb),  calc(0.06 + var(--vivid-amount, 0.5) * 0.32)) 0%,
+        rgba(var(--bg-base-rgb), calc(0.85 - var(--vivid-amount, 0.5) * 0.42)) 100%
+    ) !important;
+    border-top-color: rgba(var(--accent-rgb), calc(0.45 + var(--vivid-amount, 0.5) * 0.55)) !important;
+    box-shadow:
+        0 8px 28px rgba(0,0,0, 0.65),
+        0 0 calc(var(--vivid-amount, 0.5) * 120px)
+            rgba(var(--accent-rgb), calc(var(--vivid-amount, 0.5) * 0.35)) !important;
+}
+
+/* Welcome card — full gradient, slider controls glow burst */
+html.vivid-mode .welcome-card,
+html.vivid-mode .card.welcome-card,
+html.vivid-mode #tab-home .card.welcome-card,
+html.vivid-mode .glass-panel.welcome-card {
+    background: var(--vivid-welcome-grad) !important;
+    border: none !important;
+    border-top: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    box-shadow:
+        0 0 calc(40px + var(--vivid-amount, 0.5) * 120px)
+            rgba(var(--accent-rgb), calc(0.22 + var(--vivid-amount, 0.5) * 0.48)),
+        0 16px 48px rgba(0,0,0, 0.65),
+        inset 0 1px 0 rgba(255,255,255, 0.22) !important;
+}
+
+/* Tiles — also vivid-slider-wired */
+html.vivid-mode .tile-btn,
+html.vivid-mode .modern-tile,
+html.vivid-mode #tab-utils .tile-btn,
+html.vivid-mode #tab-utils .modern-tile {
+    background: linear-gradient(155deg,
+        rgba(var(--accent-rgb),  calc(0.02 + var(--vivid-amount, 0.5) * 0.22)) 0%,
+        rgba(var(--bg-base-rgb), calc(0.88 - var(--vivid-amount, 0.5) * 0.42)) 100%
+    ) !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    border: 1px solid rgba(255,255,255, 0.04) !important;
+    border-top: 2px solid rgba(var(--accent-rgb), calc(0.30 + var(--vivid-amount, 0.5) * 0.60)) !important;
+    box-shadow:
+        0 4px 14px rgba(0,0,0, 0.50),
+        0 0 calc(var(--vivid-amount, 0.5) * 40px)
+            rgba(var(--accent-rgb), calc(var(--vivid-amount, 0.5) * 0.18)) !important;
+}
+html.vivid-mode .tile-btn:hover,
+html.vivid-mode .modern-tile:hover {
+    background: linear-gradient(155deg,
+        rgba(var(--accent-rgb),  calc(0.08 + var(--vivid-amount, 0.5) * 0.26)) 0%,
+        rgba(var(--bg-base-rgb), calc(0.80 - var(--vivid-amount, 0.5) * 0.38)) 100%
+    ) !important;
+    border-top-color: rgba(var(--accent-rgb), calc(0.60 + var(--vivid-amount, 0.5) * 0.40)) !important;
+    transform: translateY(-4px) !important;
+    box-shadow:
+        0 8px 24px rgba(0,0,0, 0.60),
+        0 0 calc(20px + var(--vivid-amount, 0.5) * 60px)
+            rgba(var(--accent-rgb), calc(0.08 + var(--vivid-amount, 0.5) * 0.28)) !important;
+}
+
+/* Maintenance buttons in vivid */
+html.vivid-mode .maintenance-btn,
+html.vivid-mode #tab-utils .maintenance-btn {
+    background: linear-gradient(145deg,
+        rgba(var(--accent-rgb),  calc(0.01 + var(--vivid-amount, 0.5) * 0.12)) 0%,
+        rgba(var(--bg-base-rgb), calc(0.88 - var(--vivid-amount, 0.5) * 0.38)) 100%
+    ) !important;
+    border-color: rgba(var(--accent-rgb), calc(0.06 + var(--vivid-amount, 0.5) * 0.18)) !important;
+}
+
+/* Stat cards — strong accent shift with slider */
+html.vivid-mode .stat-card-modern {
+    background: rgba(var(--accent-rgb), calc(0.06 + var(--vivid-amount, 0.5) * 0.22)) !important;
+    border-top: 2px solid rgba(var(--accent-rgb), calc(0.35 + var(--vivid-amount, 0.5) * 0.55)) !important;
+    box-shadow:
+        0 0 calc(var(--vivid-amount, 0.5) * 30px)
+            rgba(var(--accent-rgb), calc(var(--vivid-amount, 0.5) * 0.20)) !important;
+}
+
+/* Vivid nav — slider controls border glow and fill */
+html.vivid-mode .bottom-nav,
+html.vivid-mode .modern-nav {
+    background: rgba(0, 0, 0, calc(0.82 - var(--vivid-amount, 0.5) * 0.20)) !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    border-top: calc(1.5px + var(--vivid-amount, 0.5) * 2px) solid
+        rgba(var(--accent-rgb), calc(0.18 + var(--vivid-amount, 0.5) * 0.52)) !important;
+    box-shadow:
+        0 calc(-2px - var(--vivid-amount, 0.5) * 4px)
+            calc(8px + var(--vivid-amount, 0.5) * 50px)
+            rgba(var(--accent-rgb), calc(0.04 + var(--vivid-amount, 0.5) * 0.28)),
+        inset 0 1px 0 rgba(var(--accent-rgb), calc(0.05 + var(--vivid-amount, 0.5) * 0.16)) !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   PERFORMANCE MODE OVERRIDE — do NOT strip blur from blur-mode cards
+   The original rule `:not(html.quality-mode) .card { backdrop-filter: none }`
+   was killing blur mode. This override has higher specificity and wins.
+   ══════════════════════════════════════════════════════════════════ */
+html.blur-mode .card,
+html.blur-mode .glass-panel,
+html.blur-mode .tile-btn,
+html.blur-mode .modern-tile,
+html.blur-mode .maintenance-btn,
+html.blur-mode .info-item,
+html.blur-mode .stat-card-modern,
+html.blur-mode .bottom-nav,
+html.blur-mode .modern-nav,
+html.blur-mode .top-bar,
+html.blur-mode .modal-container,
+html.blur-mode .confirm-container,
+html.blur-mode .theme-sheet {
+    /* Signal that backdrop-filter is intentional in blur mode.
+       The actual values are set above — this rule just prevents the
+       general performance-mode stripe from overriding them. */
+    will-change: backdrop-filter;
+}
+
+/* END MODES v4 */

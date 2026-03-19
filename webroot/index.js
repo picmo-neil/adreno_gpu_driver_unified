@@ -504,7 +504,7 @@ const DEFAULT_EN = {
     renderDesc: "Default rendering backend with balanced performance",
     renderDescSkiaVK: "Skia with Vulkan backend - Better performance on modern GPUs",
     renderDescSkiaGL: "Skia with OpenGL backend - Better compatibility",
-    renderDescSkiaVKAll: "Aggressive SkiaVK with forced app restarts - Maximum performance",
+    renderDescSkiaVK: "Aggressive SkiaVK with forced app restarts - Maximum performance",
     forceThreadedName: "Force Skiavkthreaded Backend",
     forceThreadedDesc: "Force debug.renderengine.backend=skiavkthreaded even on Android <14 (API 34). Strict OEM ROMs (MIUI/HyperOS, OneUI) may bootloop — only enable if you know your device supports it.",
     forceThreadedSub: "⚠️ Android 14+ recommended",
@@ -516,8 +516,8 @@ const DEFAULT_EN = {
     renderStatusHint: "Renderer props written to system.prop (persistent) + applied live via resetprop — takes full effect on next reboot",
     // Game Exclusion List
     gameExclTitle: "Game Exclusion List",
-    gameExclSub: "⚠️ Only add a game if it CRASHES in skiavk or skiavk_all mode — remove it if it runs fine",
-    gameExclDesc: "Only add a game here if it crashes immediately when skiavk or skiavk_all is active (black screen, instant force-close, GPU fault). If the game works fine in skiavk mode, do NOT add it — adding it unnecessarily keeps the game on the older GL renderer and wastes daemon protection slots. Remove any game that no longer crashes.",
+    gameExclSub: "⚠️ Only add a game if it CRASHES in skiavk mode — remove it if it runs fine",
+    gameExclDesc: "Only add a game here if it crashes immediately when skiavk is active (black screen, instant force-close, GPU fault). If the game works fine in skiavk mode, do NOT add it — adding it unnecessarily keeps the game on the older GL renderer and wastes daemon protection slots. Remove any game that no longer crashes.",
     gameExclBadge: "Shared · post-fs-data & service",
     gameExclAdd: "Add Package",
     gameExclPlaceholder: "e.g. com.example.game or com.example.*",
@@ -532,7 +532,7 @@ const DEFAULT_EN = {
     gameExclCount: "packages",
     gameExclWildcard: "Wildcards supported (e.g. com.epicgames.*)",
     gameExclWhyTitle: "When to add / remove a game",
-    gameExclWhyBody: "ADD a game only if it crashes in skiavk/skiavk_all mode: the crash is caused by a dual-VkDevice conflict — apps that create their own VkDevice (game engines using Vulkan directly, e.g. UE4, custom Vulkan) conflict with HWUI holding a second one, which custom Adreno drivers cannot handle → SIGSEGV. The compat daemon switches HWUI to skiagl within ~1s of detecting the app, resolving the conflict. REMOVE a game if it runs fine in skiavk — it does not need to be here, and keeping it unnecessarily delays its transition to the Vulkan renderer.",
+    gameExclWhyBody: "ADD a game only if it crashes in skiavk mode: the crash is caused by a dual-VkDevice conflict — apps that create their own VkDevice (game engines using Vulkan directly, e.g. UE4, custom Vulkan) conflict with HWUI holding a second one, which custom Adreno drivers cannot handle → SIGSEGV. The compat daemon switches HWUI to skiagl within ~1s of detecting the app, resolving the conflict. REMOVE a game if it runs fine in skiavk — it does not need to be here, and keeping it unnecessarily delays its transition to the Vulkan renderer.",
     applyNowTitle: "Apply Render Mode Now",
     applyNowDesc: "Apply via resetprop instantly — no reboot needed. Kill & reopen apps to see effect.",
     applyNow: "Apply Now",
@@ -777,7 +777,7 @@ const BUILTIN_ZH_CN = {
     renderDesc: "默认渲染后端，性能均衡",
     renderDescSkiaVK: "Skia + Vulkan 后端 - 现代GPU性能更佳",
     renderDescSkiaGL: "Skia + OpenGL 后端 - 兼容性更好",
-    renderDescSkiaVKAll: "激进SkiaVK模式，强制重启应用 - 最高性能",
+    renderDescSkiaVK: "激进SkiaVK模式，强制重启应用 - 最高性能",
     forceThreadedName: "强制 Skiavkthreaded 后端",
     forceThreadedDesc: "即使设备低于 Android 14（API 34）也强制设置 debug.renderengine.backend=skiavkthreaded。严格的 OEM ROM（MIUI/HyperOS、OneUI）可能导致启动循环——仅在确认设备支持时启用。",
     forceThreadedSub: "⚠️ 建议 Android 14 及以上",
@@ -789,8 +789,8 @@ const BUILTIN_ZH_CN = {
     renderStatusHint: "渲染器属性已写入 system.prop（持久化）并通过 resetprop 实时应用 — 重启后完全生效",
     // Game Exclusion List
     gameExclTitle: "游戏排除列表",
-    gameExclSub: "⚠️ 仅在游戏于 skiavk 或 skiavk_all 模式下崩溃时才添加 — 正常运行则请移除",
-    gameExclDesc: "仅在游戏于 skiavk 或 skiavk_all 模式下立即崩溃时（黑屏、即时强制关闭、GPU 故障）才添加到此列表。如果游戏在 skiavk 模式下运行正常，请勿添加 — 不必要地添加会使该游戏继续使用旧版 GL 渲染器，并浪费守护进程保护槽位。若游戏已不再崩溃，请将其移除。",
+    gameExclSub: "⚠️ 仅在游戏于 skiavk 模式下崩溃时才添加 — 正常运行则请移除",
+    gameExclDesc: "仅在游戏于 skiavk 模式下立即崩溃时（黑屏、即时强制关闭、GPU 故障）才添加到此列表。如果游戏在 skiavk 模式下运行正常，请勿添加 — 不必要地添加会使该游戏继续使用旧版 GL 渲染器，并浪费守护进程保护槽位。若游戏已不再崩溃，请将其移除。",
     gameExclBadge: "共享 · post-fs-data 和 service",
     gameExclAdd: "添加包名",
     gameExclPlaceholder: "例如 com.example.game 或 com.example.*",
@@ -805,7 +805,7 @@ const BUILTIN_ZH_CN = {
     gameExclCount: "个包",
     gameExclWildcard: "支持通配符（例如 com.epicgames.*）",
     gameExclWhyTitle: "何时添加或移除游戏",
-    gameExclWhyBody: "仅在游戏于 skiavk/skiavk_all 模式下崩溃时才添加：崩溃由双 VkDevice 冲突引起 — 直接使用 Vulkan 的应用（自定义 Vulkan 引擎，如 UE4 等）与 HWUI 同时创建 VkDevice，自定义 Adreno 驱动无法处理 → SIGSEGV。兼容守护进程会在检测到应用后约 1 秒内将 HWUI 切换为 skiagl 解决冲突。若游戏在 skiavk 模式下运行正常 — 请将其移除，无需保留在此列表中。",
+    gameExclWhyBody: "仅在游戏于 skiavk 模式下崩溃时才添加：崩溃由双 VkDevice 冲突引起 — 直接使用 Vulkan 的应用（自定义 Vulkan 引擎，如 UE4 等）与 HWUI 同时创建 VkDevice，自定义 Adreno 驱动无法处理 → SIGSEGV。兼容守护进程会在检测到应用后约 1 秒内将 HWUI 切换为 skiagl 解决冲突。若游戏在 skiavk 模式下运行正常 — 请将其移除，无需保留在此列表中。",
     applyNowTitle: "立即应用渲染模式",
     applyNowDesc: "通过 resetprop 即时应用 — 无需重启。重启应用以查看效果。",
     applyNow: "立即应用",
@@ -1050,7 +1050,7 @@ const BUILTIN_ZH_TW = {
     renderDesc: "默認渲染後端，性能均衡",
     renderDescSkiaVK: "Skia + Vulkan 後端 - 現代GPU性能更佳",
     renderDescSkiaGL: "Skia + OpenGL 後端 - 兼容性更好",
-    renderDescSkiaVKAll: "激進SkiaVK模式，強制重啟應用 - 最高性能",
+    renderDescSkiaVK: "激進SkiaVK模式，強制重啟應用 - 最高性能",
     forceThreadedName: "強制 Skiavkthreaded 後端",
     forceThreadedDesc: "即使裝置低於 Android 14（API 34）也強制設定 debug.renderengine.backend=skiavkthreaded。嚴格的 OEM ROM（MIUI/HyperOS、OneUI）可能導致啟動循環——僅在確認裝置支援時啟用。",
     forceThreadedSub: "⚠️ 建議 Android 14 及以上",
@@ -1062,8 +1062,8 @@ const BUILTIN_ZH_TW = {
     renderStatusHint: "渲染器屬性已寫入 system.prop（持久化）並透過 resetprop 即時套用 — 重新啟動後完全生效",
     // Game Exclusion List
     gameExclTitle: "遊戲排除清單",
-    gameExclSub: "⚠️ 僅在遊戲於 skiavk 或 skiavk_all 模式下崩潰時才新增 — 正常運行則請移除",
-    gameExclDesc: "僅在遊戲於 skiavk 或 skiavk_all 模式下立即崩潰時（黑屏、即時強制關閉、GPU 故障）才新增至此清單。若遊戲在 skiavk 模式下運行正常，請勿新增 — 不必要地新增會使遊戲繼續使用舊版 GL 渲染器，並浪費守護程式保護槽位。若遊戲已不再崩潰，請將其移除。",
+    gameExclSub: "⚠️ 僅在遊戲於 skiavk 模式下崩潰時才新增 — 正常運行則請移除",
+    gameExclDesc: "僅在遊戲於 skiavk 模式下立即崩潰時（黑屏、即時強制關閉、GPU 故障）才新增至此清單。若遊戲在 skiavk 模式下運行正常，請勿新增 — 不必要地新增會使遊戲繼續使用舊版 GL 渲染器，並浪費守護程式保護槽位。若遊戲已不再崩潰，請將其移除。",
     gameExclBadge: "共享 · post-fs-data 和 service",
     gameExclAdd: "新增套件名稱",
     gameExclPlaceholder: "例如 com.example.game 或 com.example.*",
@@ -1078,7 +1078,7 @@ const BUILTIN_ZH_TW = {
     gameExclCount: "個套件",
     gameExclWildcard: "支援萬用字元（例如 com.epicgames.*）",
     gameExclWhyTitle: "何時新增或移除遊戲",
-    gameExclWhyBody: "僅在遊戲於 skiavk/skiavk_all 模式下崩潰時才新增：崩潰由雙 VkDevice 衝突引起 — 直接使用 Vulkan 的應用程式（自訂 Vulkan 引擎，如 UE4 等）與 HWUI 同時建立 VkDevice，自訂 Adreno 驅動程式無法處理 → SIGSEGV。相容守護程式會在偵測到應用程式後約 1 秒內將 HWUI 切換為 skiagl 解決衝突。若遊戲在 skiavk 模式下運行正常 — 請將其移除，無需保留在此清單中。",
+    gameExclWhyBody: "僅在遊戲於 skiavk 模式下崩潰時才新增：崩潰由雙 VkDevice 衝突引起 — 直接使用 Vulkan 的應用程式（自訂 Vulkan 引擎，如 UE4 等）與 HWUI 同時建立 VkDevice，自訂 Adreno 驅動程式無法處理 → SIGSEGV。相容守護程式會在偵測到應用程式後約 1 秒內將 HWUI 切換為 skiagl 解決衝突。若遊戲在 skiavk 模式下運行正常 — 請將其移除，無需保留在此清單中。",
     applyNowTitle: "立即套用渲染模式",
     applyNowDesc: "透過 resetprop 即時套用 — 無需重新啟動。重啟應用以查看效果。",
     applyNow: "立即套用",
@@ -2029,13 +2029,13 @@ function initGameExclSection() {
 }
 
 // Show or hide the FORCE_SKIAVKTHREADED_BACKEND toggle row based on selected render mode.
-// The force-threaded backend option is only relevant for skiavk / skiavk_all
-// (those are the only modes that apply debug.renderengine.backend=skiavkthreaded).
+// The force-threaded backend option is only relevant for skiavk
+// (skiavk applies debug.renderengine.backend=skiavkthreaded).
 function updateForceThreadedRowVisibility() {
     const mode = document.getElementById('RENDER_MODE')?.value || 'normal';
     const row  = document.getElementById('forceThreadedRow');
     if (row) {
-        row.style.display = (mode === 'skiavk' || mode === 'skiavk_all') ? '' : 'none';
+        row.style.display = (mode === 'skiavk') ? '' : 'none';
     }
 }
 
@@ -2376,13 +2376,12 @@ async function applyRenderNow() {
             'persist.vendor.vulkan.enable',  // OEM Vulkan gate — vendor init service reacts live
         ]);
 
-        if (renderMode === 'skiavk' || renderMode === 'skiavk_all') {
+        if (renderMode === 'skiavk') {
             // Apply skiavk props live via resetprop, EXCLUDING _LIVE_UNSAFE_PROPS.
             // Unsafe props (SF backend, OEM Vulkan gates) are written to system.prop only
             // and take effect on next boot — setting them live causes systemic app crashes
             // on OEM ROMs that have runtime property watchers for these props.
-            // skiavk_all additionally throttled-force-stops background apps (150ms gap)
-            // so every process cold-starts fresh with skiavk — no mixed renderer state.
+            // skiavk props applied — all processes will adopt skiavk on next cold-start.
             for (const [prop, val] of _ALL_SKIAVK_PROPS) {
                 if (_LIVE_UNSAFE_PROPS.has(prop)) continue; // system.prop only — see comment above
                 await exec(`resetprop ${prop} "${val}"`);
@@ -2539,7 +2538,7 @@ async function applyRenderNow() {
             const sysprPath = `${MOD_PATH}/system.prop`;
             await exec(`[ -f "${sysprPath}" ] || touch "${sysprPath}"`);
             await exec(`awk '!/${_STRIP_PATTERN}/' "${sysprPath}" > "${sysprPath}.tmp" && mv "${sysprPath}.tmp" "${sysprPath}" 2>/dev/null || true`);
-            if (renderMode === 'skiavk' || renderMode === 'skiavk_all') {
+            if (renderMode === 'skiavk') {
                 // ── Write ALL skiavk props to system.prop for boot persistence ─────────────
                 //
                 // STRATEGY: Both hwui.renderer and renderengine.backend written to system.prop.
@@ -2653,618 +2652,35 @@ async function applyRenderNow() {
         }
 
 
-        // ── Step 4: Force-stop apps (skiavk_all only) + Step 3 cache clear AFTER ───
-        // debug.hwui.renderer is read ONCE per process at first HWUI init, then
-        // cached as a static variable (sRenderPipelineType in Properties.cpp). Any
-        // process that has already started is stuck on the old renderer until it dies
-        // and cold-restarts. We must restart all relevant processes.
-        //
-        // skiavk / skiagl: props-only. No force-stop, no cache deletion.
-        //   resetprop already set the prop live. All NEW processes launched after
-        //   this point automatically use the configured renderer. SystemUI keeps its
-        //   current renderer for this session — invisible to the user.
-        //   Crashing SystemUI for these modes caused: black screen, GMS account loss
-        //   (DeadObjectException in AccountManager mid-sync → OAuth tokens wiped →
-        //   all Google accounts removed from Settings), Facebook/Messenger crash
-        //   (dangling ANativeWindow refs), and Android watchdog bootloop.
-        //   Pipeline cache clearing is also SKIPPED for these modes — no apps are
-        //   restarted, so old caches cannot cause cold-start crashes this session.
-        //   Boot scripts clear caches on next reboot before apps start.
-        //   On next reboot, system.prop delivers the correct renderer to every process.
-        //
-        // skiavk_all: SystemUI is NOT crashed (stability fix). All 3rd-party apps
-        //   are force-stopped (Step 4c). THEN per-app pipeline caches are deleted
-        //   (Step 3, after force-stop — correct order: kill first, then clear cache).
-        //   GMS, GSF, and Meta apps excluded from force-stop to prevent OAuth token
-        //   corruption and Google account loss.
-        logToTerminal('⏳ Applying renderer switch...', 'info');
+        logToTerminal('ℹ️ Props applied live — no force-stops. Apps adopt skiavk on next cold-start (LYB approach).', 'info');
 
-        // ══════════════════════════════════════════════════════════════════════════
-        // LEGACY DEVICE VULKAN COMPAT GATE — mirrors service.sh's skiavk_all
-        // protection chain exactly. Prevents the "skiavk_all crashes everything"
-        // scenario on legacy/incompatible devices.
-        //
-        // ROOT CAUSE of the crash (preserved for reference):
-        //   debug.hwui.renderer=skiavk only asks HWUI to TRY Vulkan. On legacy
-        //   devices, HWUI reads the prop, attempts vkCreateInstance, fails silently
-        //   (VK_ERROR_INCOMPATIBLE_DRIVER, missing KGSL IOCTL, gralloc mismatch,
-        //   etc.) and falls back to GL. The prop still reads "skiavk" but apps are
-        //   actually on GL. skiavk_all then:
-        //     1. Passes the prop check (prop IS "skiavk" — we just set it)
-        //     2. Clears GL pipeline caches
-        //     3. Force-stops all apps → they restart WITHOUT their GL caches
-        //     4. Each app tries Vulkan → fails → GL fallback
-        //     5. All apps recompile shaders from scratch simultaneously
-        //     6. Facebook (2000+ shaders) + GMS OOM cascade → ALL apps crash on open
-        //   The symptom: "every app crashes immediately when opened for 5-10 min"
-        //
-        // WHEN THIS GATE APPLIES: skiavk AND skiavk_all.
-        //   skiavk: gralloc compat props + ICD fix may still be needed to prevent
-        //           silent Vulkan fallback even without force-stop.
-        //   skiavk_all: all checks required before force-stop is allowed to run.
-        // ══════════════════════════════════════════════════════════════════════════
-
-        // ── Shared gate state ─────────────────────────────────────────────────────
-        let _vkForceStopAllowed = true;   // becomes false on any failed check
-        let _vkGateAbortReason  = '';     // human-readable reason for the UI
-        let _vkPropOnlyMode     = false;  // true = apply prop only, skip force-stop
-
-        if (renderMode === 'skiavk' || renderMode === 'skiavk_all') {
-
-            logToTerminal('', 'info');
-            logToTerminal('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-            logToTerminal('🔍 LEGACY DEVICE VK COMPAT GATE — running checks...', 'info');
-            logToTerminal('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-
-            // ── Check 1: Persisted compat flag from a previous boot / apply ──────
-            // If service.sh or a previous applyRenderNow already determined this
-            // device cannot safely run the force-stop, respect that decision.
-            // The user must manually rm /data/local/tmp/adreno_vk_compat to retry
-            // (e.g. after a ROM upgrade that fixes the incompatibility).
-            const _compatFlagResult = await exec('cat /data/local/tmp/adreno_vk_compat 2>/dev/null || echo ""');
-            const _compatFlag = (_compatFlagResult.stdout || '').trim();
-            if (_compatFlag === 'prop_only' || _compatFlag === 'incompatible') {
-                logToTerminal(`⚠️  [GATE-1] Persisted compat flag: "${_compatFlag}" from a previous boot/apply.`, 'warn');
-                logToTerminal('    This device could not safely run skiavk_all force-stop previously.', 'warn');
-                logToTerminal('    Force-stop SKIPPED. Props already applied (prop-only mode).', 'warn');
-                logToTerminal('    To retry after ROM/driver update: rm /data/local/tmp/adreno_vk_compat', 'info');
-                _vkForceStopAllowed = false;
-                _vkPropOnlyMode     = true;
-                _vkGateAbortReason  = `Persisted compat flag: "${_compatFlag}" — device previously incompatible`;
-            } else {
-                logToTerminal(`✅ [GATE-1] No persisted incompatibility flag (flag="${_compatFlag || 'none'}")`, 'success');
-            }
-
-            // ── Check 2: Structural score from post-fs-data probe ─────────────────
-            // post-fs-data.sh writes adreno_vk_compat_score at every boot when
-            // skiavk/skiavk_all is configured. Use it here to skip force-stop on
-            // structurally blocked devices before wasting time on runtime probes.
-            let _structLevel = '';
-            let _structScore = 100;
-            let _structGralloc = 'unknown';
-            let _structReasons = '';
-            const _scoreFileResult = await exec('cat /data/local/tmp/adreno_vk_compat_score 2>/dev/null || echo ""');
-            if (_scoreFileResult.stdout && _scoreFileResult.stdout.trim()) {
-                for (const line of _scoreFileResult.stdout.trim().split('\n')) {
-                    const eq = line.indexOf('=');
-                    if (eq < 0) continue;
-                    const k = line.slice(0, eq).trim();
-                    const v = line.slice(eq + 1).trim();
-                    if (k === 'LEVEL')   _structLevel   = v;
-                    if (k === 'SCORE')   _structScore   = parseInt(v, 10) || 0;
-                    if (k === 'GRALLOC') _structGralloc = v;
-                    if (k === 'REASONS') _structReasons = v;
-                }
-                logToTerminal(`✅ [GATE-2] Post-fs-data score: ${_structScore}/100  level: ${_structLevel}  gralloc: ${_structGralloc}`, 'success');
-                if (_structReasons) logToTerminal(`    Deductions: ${_structReasons}`, 'info');
-            } else {
-                logToTerminal('ℹ️  [GATE-2] No adreno_vk_compat_score file — device not yet probed at boot (first apply or normal mode at boot)', 'info');
-            }
-
-            // Check auto-degrade marker (post-fs-data degraded this boot already)
-            // NOTE: post-fs-data.sh now only degrades on risky+no_driver (driver .so absent).
-            // blocked is no longer a degrade trigger there, but old state files may exist.
-            const _degradeResult = await exec('cat /data/local/tmp/adreno_skiavk_degraded 2>/dev/null || echo ""');
-            const _degradeReason = (_degradeResult.stdout || '').trim();
-            if (_degradeReason) {
-                // Check if it's a no-driver degrade (hard) vs old blocked degrade (warn only now)
-                const _isNoDriver = _degradeReason.includes('no_driver');
-                if (_isNoDriver) {
-                    logToTerminal(`⛔ [GATE-2] Boot auto-degrade: "${_degradeReason}"`, 'error');
-                    logToTerminal('    No Vulkan driver .so found — skiavk cannot function.', 'error');
-                    logToTerminal('    Force-stop ABORTED. Props applied in skiagl mode.', 'error');
-                    _vkForceStopAllowed = false;
-                    _vkPropOnlyMode     = true;
-                    _vkGateAbortReason  = `No Vulkan driver: ${_degradeReason}`;
-                } else {
-                    // Old blocked/risky degrade — warn but proceed (user chose skiavk)
-                    logToTerminal(`⚠️  [GATE-2] Stale boot auto-degrade marker: "${_degradeReason}"`, 'warn');
-                    logToTerminal('    This was set by an older/stricter check. Applying skiavk anyway as requested.', 'warn');
-                    logToTerminal('    If Vulkan fails silently, HWUI falls back to GL automatically.', 'warn');
-                }
-            } else if (_structLevel === 'blocked') {
-                // LENIENT: blocked is now a warning, not an abort.
-                // Many real devices that work fine with skiavk score "blocked" due to
-                // conservative heuristics (old vendor partition, gralloc version mismatch, etc).
-                logToTerminal(`⚠️  [GATE-2] Compat score BLOCKED (${_structScore}/100) — applying skiavk anyway`, 'warn');
-                logToTerminal(`    Reasons: ${_structReasons || 'see boot log'}`, 'warn');
-                logToTerminal('    If Vulkan fails HWUI falls back to GL automatically — no crash, just GL rendering.', 'warn');
-                logToTerminal('    Disable skiavk only if you see visual corruption or persistent black screen.', 'warn');
-            } else if (_structLevel === 'risky' || _structLevel === 'marginal') {
-                logToTerminal(`⚠️  [GATE-2] Compat score ${_structLevel.toUpperCase()} (${_structScore}/100)`, 'warn');
-                logToTerminal('    skiavk prop applied. Force-stop disabled as precaution on risky/marginal devices.', 'warn');
-                if (renderMode === 'skiavk_all') {
-                    _vkForceStopAllowed = false;
-                    _vkPropOnlyMode     = true;
-                    _vkGateAbortReason  = `Compat score ${_structLevel} (${_structScore}/100) — force-stop disabled`;
-                }
-            } else {
-                logToTerminal(`✅ [GATE-2] Structural score OK (${_structScore}/100, level="${_structLevel || 'no score yet'}")`, 'success');
-            }
-
-            // ── Info: skiavkthreaded vs debug.hwui.renderer=skiavk ───────────────
-            // These are different things. Clarify so the user isn't confused when
-            // they see "skiavkthreaded" in dumpsys gfxinfo Pipeline output.
-            logToTerminal('ℹ️  [INFO] Renderer notes:', 'info');
-            logToTerminal('    debug.hwui.renderer=skiavk → tells HWUI to use the Skia Vulkan backend.', 'info');
-            logToTerminal('    debug.renderengine.backend=skiavkthreaded → tells SurfaceFlinger RenderEngine to use threaded Vulkan compositing.', 'info');
-            logToTerminal('    Both are set by this module. They are independent props for different subsystems.', 'info');
-            logToTerminal('    If Vulkan init fails, HWUI silently falls back to GL — the prop stays "skiavk" but apps run on GL.', 'info');
-            logToTerminal('    Use: dumpsys gfxinfo <pkg> | grep Pipeline   to verify actual runtime renderer.', 'info');
-
-
-            // Some device trees set this to "false" to explicitly disable HWUI Vulkan.
-            // HWUI checks this BEFORE vkCreateInstance — if false, the skiavk prop
-            // is silently ignored and all apps run on GL. Force-stop would then:
-            //   clear GL caches → apps restart → HWUI ignores skiavk → GL fallback
-            //   → mass shader recompile from scratch → OOM → cascade crashes.
-            if (_vkForceStopAllowed || renderMode === 'skiavk') {
-                const _useVkResult = await exec('getprop ro.hwui.use_vulkan 2>/dev/null || echo ""');
-                const _useVk = (_useVkResult.stdout || '').trim();
-                if (_useVk === 'false' || _useVk === '0') {
-                    logToTerminal(`⛔ [GATE-3] ro.hwui.use_vulkan="${_useVk}" — ROM device tree disables HWUI Vulkan.`, 'error');
-                    logToTerminal('    HWUI ignores debug.hwui.renderer=skiavk when this is false.', 'error');
-                    logToTerminal('    Force-stop ABORTED — apps restart on GL with no benefit.', 'error');
-                    _vkForceStopAllowed = false;
-                    _vkPropOnlyMode     = true;
-                    _vkGateAbortReason  = `ro.hwui.use_vulkan="${_useVk}" — ROM device tree disables HWUI Vulkan`;
-                    // Persist so future apply-nows don't repeat this
-                    await exec('echo "prop_only" > /data/local/tmp/adreno_vk_compat 2>/dev/null || true');
-                } else {
-                    logToTerminal(`✅ [GATE-3] ro.hwui.use_vulkan="${_useVk || 'not set (default enabled)'}"`, 'success');
-                }
-            }
-
-            // ── Check 4: Vulkan ICD .so existence ────────────────────────────────
-            // Without a Vulkan ICD, vkCreateInstance always returns
-            // VK_ERROR_INCOMPATIBLE_DRIVER. HWUI falls back to GL silently.
-            // Force-stop with no Vulkan ICD = guaranteed OOM cascade.
-            if (_vkForceStopAllowed || renderMode === 'skiavk') {
-                const _vkSoCheck = await exec(
-                    'for f in /vendor/lib64/hw/vulkan.*.so /vendor/lib/hw/vulkan.*.so ' +
-                    '/system/lib64/hw/vulkan.*.so /system/lib/hw/vulkan.*.so ' +
-                    '/vendor/lib64/libvulkan.so /system/lib64/libvulkan.so; do ' +
-                    '[ -f "$f" ] && echo "found:$f" && break; done 2>/dev/null || echo "none"'
-                );
-                const _vkSoOut = (_vkSoCheck.stdout || '').trim();
-                if (!_vkSoOut || _vkSoOut === 'none' || !_vkSoOut.startsWith('found:')) {
-                    logToTerminal('⛔ [GATE-4] No Vulkan ICD .so found in vendor/system lib dirs.', 'error');
-                    logToTerminal('    vkCreateInstance → VK_ERROR_INCOMPATIBLE_DRIVER → HWUI silent GL fallback.', 'error');
-                    logToTerminal('    Force-stop ABORTED — applying skiavk prop has no real effect.', 'error');
-                    _vkForceStopAllowed = false;
-                    _vkPropOnlyMode     = true;
-                    _vkGateAbortReason  = 'No Vulkan ICD .so found — skiavk will always fail silently';
-                    await exec('echo "incompatible" > /data/local/tmp/adreno_vk_compat 2>/dev/null || true');
-                } else {
-                    logToTerminal(`✅ [GATE-4] Vulkan ICD found: ${_vkSoOut.replace('found:', '')}`, 'success');
-                }
-            }
-
-            // ── Check 5: ro.hardware.vulkan ICD fix ──────────────────────────────
-            // OEM ROMs set ro.hardware.vulkan to the SoC codename (sm6115, kona,
-            // lahaina) instead of "adreno". The Vulkan loader opens
-            // vulkan.${ro.hardware.vulkan}.so → ENOENT → VK_ERROR_INCOMPATIBLE_DRIVER.
-            // Fix it now if vulkan.adreno.so exists, so vkCreateInstance succeeds.
-            const _hwVkResult = await exec('getprop ro.hardware.vulkan 2>/dev/null || echo ""');
-            const _hwVkVal    = (_hwVkResult.stdout || '').trim();
-            if (_hwVkVal && _hwVkVal !== 'adreno') {
-                const _adrSoCheck = await exec(
-                    '[ -f /vendor/lib64/hw/vulkan.adreno.so ] || ' +
-                    '[ -f /vendor/lib/hw/vulkan.adreno.so ] && echo "yes" || echo "no"'
-                );
-                if ((_adrSoCheck.stdout || '').trim() === 'yes') {
-                    await exec('resetprop ro.hardware.vulkan adreno 2>/dev/null || true');
-                    logToTerminal(`🔧 [GATE-5] ro.hardware.vulkan: "${_hwVkVal}" → "adreno" (ICD fix applied live)`, 'warn');
-                } else {
-                    logToTerminal(`⚠️  [GATE-5] ro.hardware.vulkan="${_hwVkVal}" but vulkan.adreno.so absent — ICD fix skipped`, 'warn');
-                }
-            } else {
-                logToTerminal(`✅ [GATE-5] ro.hardware.vulkan="${_hwVkVal || 'not set (uses icd.d/)'}"`, 'success');
-            }
-
-            // ── Check 6: Gralloc WSI compat props ────────────────────────────────
-            // On old-vendor devices with gralloc2 or gralloc3, the Vulkan swapchain
-            // buffer allocation path is broken in specific ways. Apply mitigations:
-            //   gralloc2/3: disable SF backpressure stall (fence interop broken →
-            //     backpressure stall waits forever on a fence that never signals →
-            //     swapchain deadlock → black screen after first frame).
-            //   gralloc2/3: cap SF buffer pool (gralloc2/3 has hard allocator pool
-            //     limits; Vulkan swapchain exhausts them unless capped at 2 acquired).
-            //   gralloc2/3: clear OEM validation layers (wrong ABI → vkCreateInstance
-            //     fails with VK_ERROR_LAYER_NOT_PRESENT → every app crashes at init).
-            // These mirror BLOCK B in post-fs-data.sh and BLOCK C in service.sh.
-            if (renderMode === 'skiavk' || renderMode === 'skiavk_all') {
-                if (_structGralloc === '2' || _structGralloc === '3') {
-                    logToTerminal(`🔧 [GATE-6] Gralloc ${_structGralloc} (old vendor) — applying WSI compat props...`, 'warn');
-                    await exec('resetprop debug.sf.disable_backpressure 0 2>/dev/null || true');
-                    await exec('resetprop debug.sf.max_frame_buffer_acquired_buffers 2 2>/dev/null || true');
-                    await exec('resetprop debug.vulkan.dev.layers "" 2>/dev/null || true');
-                    await exec('resetprop debug.vulkan.layers "" 2>/dev/null || true');
-                    await exec('resetprop persist.graphics.vulkan.validation_enable 0 2>/dev/null || true');
-                    logToTerminal(`    ✅ Gralloc ${_structGralloc} WSI compat: backpressure=0, buffer_acquired=2, layers cleared`, 'success');
-                } else if (_structGralloc !== 'unknown') {
-                    logToTerminal(`✅ [GATE-6] Gralloc ${_structGralloc} — no WSI compat workarounds needed`, 'success');
-                } else {
-                    logToTerminal('ℹ️  [GATE-6] Gralloc version unknown (no boot-time score) — WSI compat props skipped', 'info');
-                }
-            }
-
-            // ── Check 7: KGSL device accessible ──────────────────────────────────
-            // /dev/kgsl-3d0 must exist. If not, there's no GPU at all and Vulkan
-            // is structurally impossible regardless of any other check.
-            if (_vkForceStopAllowed) {
-                const _kgslCheck = await exec('[ -e /dev/kgsl-3d0 ] && echo "yes" || echo "no"');
-                if ((_kgslCheck.stdout || '').trim() !== 'yes') {
-                    logToTerminal('⛔ [GATE-7] /dev/kgsl-3d0 not found — no GPU device. Vulkan impossible.', 'error');
-                    _vkForceStopAllowed = false;
-                    _vkPropOnlyMode     = true;
-                    _vkGateAbortReason  = '/dev/kgsl-3d0 absent — no GPU device';
-                } else {
-                    logToTerminal('✅ [GATE-7] /dev/kgsl-3d0 accessible', 'success');
-                }
-            }
-
-            // ── Check 8: KGSL game protection ────────────────────────────────────
-            // UE4/native-Vulkan games (PUBG, Fortnite, CoD, Genshin) hold open
-            // KGSL contexts. Concurrent force-stops while a game is running races
-            // the KGSL context allocation table → permanent corruption this boot →
-            // vkCreateDevice fails for every subsequent app until reboot.
-            // Mirrors the KGSL protection check in service.sh's skiavk_all subshell.
-            if (_vkForceStopAllowed && renderMode === 'skiavk_all') {
-                const _gamePackages = [
-                    'com.tencent.ig', 'com.pubg.krmobile', 'com.pubg.imobile',
-                    'com.vng.pubgmobile', 'com.rekoo.pubgm', 'com.tencent.tmgp.pubgmhd',
-                    'com.epicgames.', 'com.activision.callofduty.shooter',
-                    'com.garena.game.codm', 'com.tencent.tmgp.cod', 'com.vng.codmvn',
-                    'com.miHoYo.GenshinImpact', 'com.cognosphere.GenshinImpact',
-                    'com.miHoYo.enterprise.HSRPrism', 'com.HoYoverse.hkrpgoversea',
-                    'com.levelinfinite.hotta', 'com.proximabeta.mfh',
-                    'com.HoYoverse.Nap', 'com.miHoYo.ZZZ'
-                ];
-                // Read all cmdlines from /proc — same technique as service.sh daemon
-                const _procResult = await exec(
-                    'for f in /proc/[0-9]*/cmdline; do [ -f "$f" ] && ' +
-                    'tr "\\0" " " < "$f" 2>/dev/null; echo; done 2>/dev/null | head -200'
-                );
-                const _procOut = _procResult.stdout || '';
-                let _gameRunning = false;
-                let _runningGame = '';
-                for (const pkg of _gamePackages) {
-                    if (_procOut.includes(pkg)) {
-                        _gameRunning = true;
-                        _runningGame = pkg;
-                        break;
+        // ── VK Compat: ICD fix + gralloc WSI workarounds ─────────────────────────
+        if (renderMode === 'skiavk') {
+            try {
+                const _hwVkRes = await exec('getprop ro.hardware.vulkan 2>/dev/null || echo ""');
+                const _hwVkVal = (_hwVkRes.stdout || '').trim();
+                if (_hwVkVal && _hwVkVal !== 'adreno') {
+                    const _adrSo = await exec('[ -f /vendor/lib64/hw/vulkan.adreno.so ] || [ -f /vendor/lib/hw/vulkan.adreno.so ] && echo "yes" || echo "no"');
+                    if ((_adrSo.stdout || '').trim() === 'yes') {
+                        await exec('resetprop ro.hardware.vulkan adreno 2>/dev/null || true');
+                        logToTerminal(`🔧 ro.hardware.vulkan: "${_hwVkVal}" → "adreno" (ICD fix applied)`, 'warn');
                     }
                 }
-                if (_gameRunning) {
-                    logToTerminal(`⛔ [GATE-8] Native-Vulkan game running: "${_runningGame}"`, 'error');
-                    logToTerminal('    Force-stopping apps while a KGSL game runs corrupts the KGSL context table.', 'error');
-                    logToTerminal('    vkCreateDevice will fail for ALL apps until reboot.', 'error');
-                    logToTerminal('    Close the game first, then apply skiavk_all.', 'error');
-                    _vkForceStopAllowed = false;
-                    _vkGateAbortReason  = `Native-Vulkan game running: ${_runningGame}`;
-                } else {
-                    logToTerminal('✅ [GATE-8] No native-Vulkan games running — KGSL safe', 'success');
+                const _scoreRes = await exec('cat /data/local/tmp/adreno_vk_compat_score 2>/dev/null || echo ""');
+                if (_scoreRes.stdout) {
+                    let _gralloc = '';
+                    for (const line of _scoreRes.stdout.trim().split('\n')) {
+                        if (line.startsWith('GRALLOC=')) _gralloc = line.split('=')[1];
+                    }
+                    if (_gralloc === '2' || _gralloc === '3') {
+                        await exec('resetprop debug.vulkan.dev.layers "" 2>/dev/null || true');
+                        await exec('resetprop persist.graphics.vulkan.validation_enable 0 2>/dev/null || true');
+                        logToTerminal(`🔧 gralloc${_gralloc}: cleared OEM Vulkan layers (WSI compat)`, 'warn');
+                    }
+                    logToTerminal(`✅ VK compat: gralloc=${_gralloc || 'unknown'}`, 'info');
                 }
-            }
-
-            // ── Check 9: SystemUI Vulkan canary (THE CRITICAL CHECK) ─────────────
-            //
-            // This is the most important check. It answers: "Is Vulkan actually
-            // working on this device RIGHT NOW?" not just "could it theoretically work?"
-            //
-            // SystemUI has been running since early boot. dumpsys gfxinfo reports its
-            // ACTUAL render pipeline (what HWUI is really using), not what the prop says.
-            // "Skia (Vulkan)" appears in the output for every active Vulkan surface.
-            //
-            // If count == 0: HWUI read "skiavk", attempted vkCreateInstance, failed
-            // (silently), fell back to GL. Props say "skiavk" — reality is GL.
-            //
-            // If we force-stop apps in this state:
-            //   → GL caches already cleared (we cleared them above)
-            //   → Apps restart → HWUI tries Vulkan → fails → GL fallback
-            //   → No GL caches → must recompile every shader from scratch
-            //   → All apps doing this simultaneously → OOM cascade
-            //   → Every app crashes on open for 5-10 minutes
-            //   → Root cause of ALL "skiavk_all crashes everything" user reports
-            //
-            // If count > 0: Vulkan is real, working, hardware-confirmed.
-            //   Force-stop is safe — restarted apps will also get working Vulkan.
-            //
-            // Only runs for skiavk_all (force-stop path). skiavk (prop-only) doesn't
-            // need this — if Vulkan fails silently, no caches are cleared and no apps
-            // are restarted, so there's no OOM cascade.
-            if (_vkForceStopAllowed && renderMode === 'skiavk_all') {
-                logToTerminal('⏳ [GATE-9] SystemUI Vulkan canary: querying dumpsys gfxinfo...', 'info');
-                logToTerminal('    (This is the definitive runtime check: is Vulkan ACTUALLY running?)', 'info');
-
-                // dumpsys gfxinfo may take a moment; SystemUI must be fully drawn
-                await new Promise(r => setTimeout(r, 1500));
-
-                const _dumpsysResult = await exec(
-                    'dumpsys gfxinfo com.android.systemui 2>/dev/null | grep -c "Skia (Vulkan)" 2>/dev/null || echo "0"'
-                );
-                const _vkCount = parseInt((_dumpsysResult.stdout || '0').trim(), 10) || 0;
-
-                if (_vkCount === 0) {
-                    // Also capture the Pipeline line for the log — mirrors service.sh Loophole 4
-                    const _pipeResult = await exec(
-                        'dumpsys gfxinfo com.android.systemui 2>/dev/null | grep -i "Pipeline" | head -1 || echo ""'
-                    );
-                    const _livePropResult = await exec('getprop debug.hwui.renderer 2>/dev/null || echo ""');
-                    const _sysUiPipe  = (_pipeResult.stdout  || '').trim() || 'not found';
-                    const _liveProp   = (_livePropResult.stdout || '').trim();
-
-                    logToTerminal('', 'error');
-                    logToTerminal('⛔ ⛔ ⛔  VK CANARY FAILED — FORCE-STOP ABORTED  ⛔ ⛔ ⛔', 'error');
-                    logToTerminal(`    SystemUI pipeline: "${_sysUiPipe}"`, 'error');
-                    logToTerminal(`    Live renderer prop: "${_liveProp}"`, 'error');
-                    logToTerminal('    Skia(Vulkan) surface count: 0', 'error');
-                    logToTerminal('', 'error');
-                    logToTerminal('    DIAGNOSIS: HWUI read skiavk but Vulkan init FAILED SILENTLY.', 'error');
-                    logToTerminal('    Every app is actually running on GL despite prop saying skiavk.', 'error');
-                    logToTerminal('', 'error');
-                    logToTerminal('    IMPACT if force-stop had run:', 'error');
-                    logToTerminal('      GL caches cleared + apps killed → restart on GL without caches', 'error');
-                    logToTerminal('      → mass concurrent shader recompile → OOM → ALL apps crash on open', 'error');
-                    logToTerminal('', 'error');
-                    logToTerminal('    Possible root causes (check boot log for details):', 'error');
-                    logToTerminal('      • Incomplete Vulkan stack (missing extensions/KGSL IOCTL)', 'error');
-                    logToTerminal('      • vendor_init overrode prop after our resetprop', 'error');
-                    logToTerminal('      • ro.hardware.vulkan points to wrong ICD', 'error');
-                    logToTerminal('      • Gralloc version mismatch (swapchain alloc fails)', 'error');
-                    logToTerminal('      • SELinux blocking /dev/kgsl-3d0 for app processes', 'error');
-                    logToTerminal('', 'error');
-                    logToTerminal('    skiavk prop remains ACTIVE — new apps will attempt Vulkan.', 'error');
-                    logToTerminal('    To retry: rm /data/local/tmp/adreno_vk_compat && reboot', 'error');
-                    logToTerminal('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'error');
-
-                    _vkForceStopAllowed = false;
-                    _vkPropOnlyMode     = true;
-                    _vkGateAbortReason  = `SystemUI Vulkan canary FAILED (0 Skia(Vulkan) surfaces, pipeline="${_sysUiPipe}")`;
-
-                    // Persist so future apply-nows and future service.sh boots both skip force-stop
-                    await exec('echo "prop_only" > /data/local/tmp/adreno_vk_compat 2>/dev/null || true');
-                    logToTerminal('    Persisted "prop_only" flag → future apply-nows and boot scripts skip force-stop.', 'warn');
-
-                } else {
-                    logToTerminal(`✅ [GATE-9] SystemUI Vulkan canary PASSED: ${_vkCount} Skia(Vulkan) surface(s) confirmed.`, 'success');
-                    logToTerminal('    Vulkan is real and working on this device — force-stop is SAFE.', 'success');
-                    // Clear any stale incompatibility flag — device is working fine
-                    await exec('echo "confirmed" > /data/local/tmp/adreno_vk_compat 2>/dev/null || true');
-                }
-            }
-
-            // ── Gate summary ──────────────────────────────────────────────────────
-            logToTerminal('', 'info');
-            if (!_vkForceStopAllowed && renderMode === 'skiavk_all') {
-                logToTerminal('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
-                logToTerminal('⚠️  LEGACY COMPAT GATE: Force-stop SKIPPED for this device.', 'warn');
-                logToTerminal(`    Reason: ${_vkGateAbortReason}`, 'warn');
-                logToTerminal('    Props have been applied live — new apps will use skiavk.', 'warn');
-                logToTerminal('    Existing background apps keep their old renderer until they', 'warn');
-                logToTerminal('    close and reopen naturally (no OOM risk).', 'warn');
-                logToTerminal('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'warn');
-            } else if (renderMode === 'skiavk_all') {
-                logToTerminal('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'success');
-                logToTerminal('✅ LEGACY COMPAT GATE: All checks passed — force-stop AUTHORIZED.', 'success');
-                logToTerminal('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'success');
-            } else {
-                logToTerminal('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-                logToTerminal('✅ LEGACY COMPAT GATE: skiavk prop-only checks complete.', 'success');
-                logToTerminal('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-            }
-            logToTerminal('', 'info');
-
-        } // end skiavk/skiavk_all compat gate block
-
-        // ══════════════════════════════════════════════════════════════════════════
-        // END LEGACY DEVICE VULKAN COMPAT GATE
-        // _vkForceStopAllowed is now authoritative for whether force-stop may run.
-        // ══════════════════════════════════════════════════════════════════════════
-
-        if (renderMode === 'skiavk_all' && !_vkForceStopAllowed) {
-            // Gate blocked force-stop — treat as skiavk prop-only for the rest of this function.
-            // Props are already live (applied above). Log and skip to settle delay.
-            logToTerminal('ℹ️  skiavk_all downgraded to skiavk prop-only by compat gate.', 'info');
-            logToTerminal('    Background apps will switch to skiavk naturally on next cold-start.', 'info');
-            await new Promise(r => setTimeout(r, 2000));
-            await loadRenderStatus();
-            showToast(`✅ skiavk props applied (force-stop skipped — legacy device compat gate)`);
-            setLoading(false);
-            return;
+            } catch(e) { /* non-fatal */ }
         }
-
-        if (renderMode === 'skiavk_all') {
-            // ── Step 4a: SystemUI — NOT crashed (intentional, permanent fix) ────
-            //
-            // ROOT CAUSE ANALYSIS — why crashing SystemUI caused ALL user problems:
-            //
-            // When "Apply Now" is clicked the user is ACTIVELY using the device.
-            // Firing am crash com.android.systemui at this moment causes:
-            //
-            //   1. SystemUI dies → SurfaceFlinger loses ALL layer references
-            //      → BLACK SCREEN for 5–15 seconds
-            //
-            //   2. GMS AccountManager is mid-OAuth-sync (holds live Binder to
-            //      SystemUI's AccountManagerService proxy). SystemUI death delivers
-            //      DeadObjectException → AccountManager marks ALL OAuth tokens
-            //      invalid → removes EVERY Google account from Settings.
-            //      ("Google accounts disappear" symptom)
-            //
-            //   3. Meta apps (Facebook/Messenger/Instagram) hold ANativeWindow
-            //      handles from SF's first draw. When SF loses layer refs on
-            //      SystemUI crash, handles go dangling. Next draw → stale pointer
-            //      dereference → SIGSEGV → instant app crash.
-            //
-            //   4. On custom ROMs: services die in solidarity with SystemUI
-            //      (tight death dependencies). Android watchdog counts 3+ crashes
-            //      in 5 min → system_server kill → ROM logo → reboot.
-            //
-            // FIX: Do NOT crash SystemUI. It is NOT necessary:
-            //   - resetprop already set debug.hwui.renderer=skiavk LIVE (Step 2).
-            //   - Every NEW process opened after this point reads skiavk.
-            //   - SystemUI keeps its current renderer for THIS session.
-            //     (It's already rendering at 60fps; the difference is invisible.)
-            //   - After reboot: system.prop delivers skiavk to SystemUI from init.
-            //     No crash needed. Ever.
-            //
-            // Force-stops in Step 4c below still run — they make background apps
-            // cold-start fresh with skiavk on next user-open. These don't touch
-            // SystemUI, GMS, the launcher, or any foreground process.
-            logToTerminal('ℹ️ [skiavk_all] SystemUI NOT crashed — stability fix (props already live via resetprop)', 'info');
-            logToTerminal('ℹ️ All newly opened apps use skiavk immediately. SystemUI uses new renderer after reboot.', 'info');
-
-            // ── Step 4c: Force-stop all 3rd-party apps (THROTTLED) ─────────────
-            //
-            // PURPOSE: Make background apps cold-start with skiavk on next open.
-            // debug.hwui.renderer is cached per-process at first HWUI init. Apps
-            // already running when resetprop fired still have the old renderer.
-            // Force-stopping them makes them exit and re-read the prop on next launch.
-            //
-            // WHY THROTTLED (150ms between each package):
-            //   Each app holds open /dev/kgsl-3d0 FDs. KGSL (Qualcomm kernel GPU
-            //   driver) runs per-FD context cleanup on process death. Killing hundreds
-            //   of apps simultaneously → hundreds of concurrent KGSL teardowns →
-            //   race condition in KGSL's context allocation table (on custom Adreno
-            //   drivers) → entries left corrupted → EVERY new app that opens
-            //   /dev/kgsl-3d0 gets a broken context → vkCreateDevice fails →
-            //   ALL apps crash on open forever until reboot.
-            //   150ms gives KGSL time to fully complete each teardown serially.
-            //
-            // am kill-all is NEVER used — kills all cached procs simultaneously,
-            // which is exactly the concurrent KGSL teardown problem above.
-            //
-            // EXCLUSIONS: GMS/GSF/Play (RemoteException cascade on custom ROMs),
-            //   Meta apps (GMS OAuth token corruption), launchers (jarring restart),
-            //   SystemUI (black screen + GMS account loss + reboot loop).
-            logToTerminal('⏳ [skiavk_all] Force-stopping apps (throttled 150ms, GMS/Meta excluded)...', 'info');
-            // BUG FIX: Previously the game exclusion list was hardcoded here, so
-            // any game the user added via WebUI or manually to game_exclusion_list.sh
-            // was still force-stopped, causing the exact dual-VkDevice crash we're
-            // trying to prevent. Now we use _gameExclPkgs (already loaded from the
-            // saved game_exclusion_list.sh at WebUI init) so the force-stop exclusions
-            // always match the daemon's exclusion list exactly.
-            //
-            // Glob wildcard entries (e.g. "com.epicgames.*") are expanded here:
-            // we strip the trailing ".*" and use startsWith() for prefix matching,
-            // exactly mirroring the shell daemon's `case "$_cl" in *"${_ge_base}"*)`.
-            const _gameExclExact   = new Set(_gameExclPkgs.filter(e => !e.endsWith('.*')));
-            const _gameExclPrefixes = _gameExclPkgs
-                .filter(e => e.endsWith('.*'))
-                .map(e => e.slice(0, -1)); // strip trailing '*', keep trailing '.'
-
-            const _isGameExcluded = (p) => {
-                if (_gameExclExact.has(p)) return true;
-                return _gameExclPrefixes.some(prefix => p.startsWith(prefix));
-            };
-
-            const pkgListResult = await exec('pm list packages -3 2>/dev/null');
-            if (pkgListResult.stdout) {
-                const pkgs = pkgListResult.stdout.trim().split('\n')
-                    .map(l => l.replace(/^package:/, '').trim())
-                    .filter(p => p &&
-                        // ── System / framework packages ───────────────────────
-                        !p.startsWith('android') &&
-                        !p.startsWith('com.android.') &&
-                        // ── GMS / Play — RemoteException cascade on custom ROMs
-                        !p.startsWith('com.google.android.gms') &&
-                        !p.startsWith('com.google.android.gsf') &&
-                        p !== 'com.android.vending' &&
-                        // ── SystemUI — black screen + GMS account loss + bootloop
-                        p !== 'com.android.systemui' &&
-                        // ── Meta apps — hold live GMS AccountManager Binder for
-                        //    OAuth sync. Killing mid-sync → DeadObjectException on
-                        //    AccountManager thread → ALL Google OAuth tokens invalid
-                        //    → every Google account removed from Settings.
-                        p !== 'com.facebook.katana' &&
-                        p !== 'com.facebook.orca' &&
-                        p !== 'com.facebook.lite' &&
-                        p !== 'com.facebook.mlite' &&
-                        p !== 'com.instagram.android' &&
-                        p !== 'com.instagram.lite' &&
-                        p !== 'com.whatsapp' &&
-                        p !== 'com.whatsapp.w4b' &&
-                        // ── Game exclusion list (dynamic — matches daemon exactly) ─
-                        // UE4/native-Vulkan games create their own VkDevice; force-
-                        // stopping them while skiavk is active triggers a cold start
-                        // where both the game engine and HWUI race to call
-                        // vkCreateDevice → SIGSEGV on custom Adreno drivers.
-                        // The game daemon protects these at runtime — they must NOT
-                        // be force-stopped here.
-                        !_isGameExcluded(p));
-                let stopped = 0;
-                logToTerminal(`ℹ️ [skiavk_all] Game exclusion list: ${_gameExclPkgs.length} packages excluded from force-stop`, 'info');
-                for (const pkg of pkgs) {
-                    await exec(`am force-stop "${pkg}" 2>/dev/null || true`);
-                    stopped++;
-                    // Throttle: 150ms between kills — lets KGSL complete context
-                    // teardown before the next SIGKILL arrives. Prevents concurrent
-                    // KGSL context table corruption on custom Adreno drivers.
-                    await new Promise(r => setTimeout(r, 150));
-                }
-                logToTerminal(`✅ [skiavk_all] ${stopped} apps force-stopped (throttled, GMS/Meta/Play/SystemUI/game-excl excluded)`, 'success');
-            }
-
-            // ── Step 3 (skiavk_all ONLY, AFTER force-stop): Clear stale pipeline caches ──
-            //
-            // CORRECT ORDER: apps are force-stopped FIRST (Step 4c above), THEN we delete
-            // their pipeline caches. This guarantees no app process has its pipeline cache
-            // directory open when we delete it.
-            //
-            // WHY CACHE CLEARING IS NEEDED HERE:
-            // When switching GL → Vulkan, per-app pipeline cache dirs contain GL-format
-            // VkPipelineCache data. On cold start with skiavk active, HWUI passes this as
-            // VkPipelineCacheCreateInfo.pInitialData. The Vulkan driver sees the wrong cache
-            // header magic → VK_ERROR_FORMAT_FEATURE_NOT_SUPPORTED or GPU fault → SIGSEGV.
-            // Every app that was running before Apply Now will crash on first open after
-            // skiavk_all force-stop until their caches are regenerated. Deleting them here
-            // ensures clean Vulkan caches on cold-start.
-            //
-            // NOTE: /data/misc/hwui/ is deliberately NOT deleted — SF uses it for its own
-            // pipeline cache and has it open while running. Boot scripts handle it at boot
-            // before SF starts. Deleting it here causes SF write errors → SF crash.
-            logToTerminal('⏳ [skiavk_all] Clearing stale per-app Skia pipeline caches (apps already stopped)...', 'info');
-            // Per-app Skia pipeline caches — format-incompatible between GL and Vulkan
-            await exec('find /data/user_de/0 -maxdepth 2 -type d -name "app_skia_pipeline_cache" -exec rm -rf {} + 2>/dev/null; true');
-            // Fallback: legacy /data/data path (direct boot disabled devices)
-            await exec('find /data/data -maxdepth 2 -type d -name "app_skia_pipeline_cache" -exec rm -rf {} + 2>/dev/null; true');
-            // Per-app shader journal manifests (contain GL pipeline keys — invalid under Vulkan)
-            await exec('find /data/user_de/0 -maxdepth 2 -name "*.shader_journal" -delete 2>/dev/null; true');
-            // Per-app Skia shader caches (format-incompatible between GL and Vulkan)
-            await exec('find /data/user_de/0 -maxdepth 2 -type d \\( -name "skia_shaders" -o -name "shader_cache" \\) -exec rm -rf {} + 2>/dev/null; true');
-            logToTerminal('✅ [skiavk_all] Per-app Skia pipeline caches cleared (prevents GL→VK cache format mismatch crash on cold-start)', 'success');
-        }
-
-        // am kill-all — INTENTIONALLY NOT USED.
-        // It kills ALL cached processes simultaneously → mass concurrent KGSL
-        // teardowns → permanent KGSL context table corruption for the boot session.
-        // The throttled loop above already handles background apps safely.
-        logToTerminal('ℹ️ am kill-all skipped (prevents KGSL corruption on custom Adreno drivers)', 'info');
-
-        // Settle delay — let GMS Binder connections re-establish after force-stops.
-        await new Promise(r => setTimeout(r, 3000));
-        logToTerminal('✅ Services settled (3s). Apps will cold-start with new renderer when opened.', 'success');
 
         // ── App-triggered renderer switching daemon respawn ───────────────────
         //
@@ -3306,7 +2722,7 @@ async function applyRenderNow() {
         //   POSIX sh pipeline runs in a subshell; shell variables don't
         //   propagate back. The file is the IPC channel between subshells.
         //   "1" = switched to skiagl. "0" = on restore renderer.
-        if (renderMode === 'skiavk' || renderMode === 'skiavk_all') {
+        if (renderMode === 'skiavk') {
             try {
                 const daemonPath = '/data/local/tmp/adreno_game_daemon.sh';
                 const exclPkgs   = _gameExclPkgs.join(' ');
@@ -3329,10 +2745,7 @@ async function applyRenderNow() {
                     // [1] GAME_EXCLUSION_PKGS (written with separate printf for JS interpolation)
                     `GAME_EXCLUSION_PKGS="${exclPkgs}"`,
                     // [2..] body lines (appended in one printf call)
-                    // FIX: hardcode _RESTORE=skiavk. Reading live prop captures 'skiavk_all'
-                    // (invalid renderer value) if a prior daemon exit left that stale prop,
-                    // causing a bad restore on the next game exit. This daemon is only
-                    // spawned for skiavk/skiavk_all modes; restore target is always 'skiavk'.
+                    // _RESTORE=skiavk: daemon always restores to skiavk on game exit.
                     '_RESTORE=skiavk',
                     '_SF=/data/local/tmp/adreno_daemon_active',
                     'printf "0\\n" > "$_SF" 2>/dev/null || true',
@@ -3454,7 +2867,7 @@ async function saveConfig() {
     
     // Validate RENDER_MODE
     const renderMode2 = getValue('RENDER_MODE');
-    const validModes = ['normal', 'skiavk', 'skiagl', 'skiavk_all'];
+    const validModes = ['normal', 'skiavk', 'skiagl'];
     const finalRenderMode = validModes.includes(renderMode2) ? renderMode2 : 'normal';
     if (!validModes.includes(renderMode2)) {
         showToast('⚠️ Invalid render mode, using default');
@@ -3541,7 +2954,7 @@ async function saveConfig() {
         const STRIP = _SAVE_CLEAR.map(p => `${p.replace(/\./g, '\\\\.')}=`).join('|');
         await exec(`[ -f "${sysprPath}" ] || touch "${sysprPath}"`);
         await exec(`awk '!/^(${STRIP})/' "${sysprPath}" > "${sysprPath}.tmp" && mv "${sysprPath}.tmp" "${sysprPath}" 2>/dev/null || true`);
-        if (finalRenderMode === 'skiavk' || finalRenderMode === 'skiavk_all') {
+        if (finalRenderMode === 'skiavk') {
             // ── UPDATED STRATEGY: write renderer props to system.prop ────────────────
             // Module system.prop is applied by root manager (Magisk/KSU/APatch) via resetprop
             // AFTER magic-mount completes — Vulkan driver overlay is already in place.
@@ -3788,7 +3201,14 @@ async function openQGLEditor() {
         if (editor) {
             editor.value = content;
             updateQGLLineCount();
-            logToTerminal(`✓ QGL Config loaded (${content.split('\n').length} lines)`, 'success');
+            const lines = content.split('\n').filter(l => l.trim() && !l.trim().startsWith('#')).length;
+            if (lines === 0 && content.trim()) {
+                logToTerminal('⚠️ QGL config has no key=value entries — only comments or blank lines. Apps may crash if QGL is enabled.', 'warn');
+            } else if (!content.trim()) {
+                logToTerminal('⚠️ QGL config file is empty. Do NOT save without adding content, or disable the QGL toggle.', 'warn');
+            } else {
+                logToTerminal(`✓ QGL Config loaded (${lines} key(s))`, 'success');
+            }
         }
         
         modal.style.display = 'block';
@@ -3806,6 +3226,26 @@ async function saveQGL() {
 
     setLoading(true);
     const content = editor.value || '';
+
+    // ── VALIDATION: Do not save empty or obviously broken QGL config ──────────
+    // An empty QGL file + QGL=y causes the module to apply no settings,
+    // which leaves the Qualcomm Graphics Library in an undefined state → app crashes.
+    const nonCommentLines = content.split('\n').filter(l => {
+        const t = l.trim();
+        return t && !t.startsWith('#');
+    });
+    if (nonCommentLines.length === 0) {
+        setLoading(false);
+        showToast('⚠️ QGL config is empty — not saved. Add keys or use Reset to restore defaults.');
+        logToTerminal('QGL save blocked: empty config would crash apps when QGL=y is enabled', 'warn');
+        return;
+    }
+    // Check for key=value format validity
+    const malformed = nonCommentLines.filter(l => !l.includes('=') || l.indexOf('=') < 1);
+    if (malformed.length > 0) {
+        logToTerminal(`QGL save warning: ${malformed.length} line(s) without key=value format (will be ignored by driver)`, 'warn');
+    }
+
     // escape single quotes for safe shell usage
     const safeContent = content.replace(/'/g, "'\\''");
 
@@ -4630,6 +4070,8 @@ function initColorModeToggle() {
         btn.addEventListener('click', () => {
             const mode = btn.dataset.mode;
             applyColorMode(mode);
+            // Show correct slider for this mode
+            updateModeSliderVisibility(mode);
             const labels = {
                 glass:       `🌙 ${currentTranslations.colorModeGlass  || 'Glass Mode'}`,
                 blur:        `💧 ${currentTranslations.colorModeBlur   || 'Blur Mode'}`,
@@ -4639,7 +4081,64 @@ function initColorModeToggle() {
             showToast(labels[mode] || mode);
         });
     });
+    // Show correct slider for initial mode
+    updateModeSliderVisibility(currentColorMode);
 }
+
+// ─── Per-mode intensity sliders ───────────────────────────────────────────────
+
+const _MODE_SLIDER_MAP = {
+    glass:       { row: 'sliderGlass',  input: 'sliderGlassInput',  val: 'glassVal',  cssVar: '--glass-amount',  key: 'adreno_glass_amount' },
+    blur:        { row: 'sliderBlur',   input: 'sliderBlurInput',   val: 'blurVal',   cssVar: '--blur-amount',   key: 'adreno_blur_amount' },
+    transparent: { row: 'sliderTransp', input: 'sliderTranspInput', val: 'transpVal', cssVar: '--transp-amount', key: 'adreno_transp_amount' },
+    vivid:       { row: 'sliderVivid',  input: 'sliderVividInput',  val: 'vividVal',  cssVar: '--vivid-amount',  key: 'adreno_vivid_amount' },
+};
+
+function updateModeSliderVisibility(mode) {
+    Object.keys(_MODE_SLIDER_MAP).forEach(m => {
+        const row = document.getElementById(_MODE_SLIDER_MAP[m].row);
+        if (row) row.style.display = (m === mode) ? '' : 'none';
+    });
+}
+
+function _applySliderCssVar(cssVar, value0to100) {
+    const v = Math.max(0, Math.min(100, value0to100)) / 100;
+    document.documentElement.style.setProperty(cssVar, v.toFixed(3));
+}
+
+function _updateSliderTrack(inputEl, value) {
+    inputEl.style.setProperty('--p', value + '%');
+}
+
+function initModeSliders() {
+    Object.entries(_MODE_SLIDER_MAP).forEach(([mode, cfg]) => {
+        // Restore saved value
+        let savedVal = 50;
+        try {
+            const s = localStorage.getItem(cfg.key);
+            if (s !== null) savedVal = Math.max(0, Math.min(100, parseInt(s, 10) || 50));
+        } catch(e) {}
+
+        const inputEl = document.getElementById(cfg.input);
+        const valEl   = document.getElementById(cfg.val);
+        if (!inputEl) return;
+
+        inputEl.value = savedVal;
+        if (valEl) valEl.textContent = savedVal;
+        _applySliderCssVar(cfg.cssVar, savedVal);
+        _updateSliderTrack(inputEl, savedVal);
+
+        inputEl.addEventListener('input', () => {
+            const v = parseInt(inputEl.value, 10);
+            if (valEl) valEl.textContent = v;
+            _applySliderCssVar(cfg.cssVar, v);
+            _updateSliderTrack(inputEl, v);
+            try { localStorage.setItem(cfg.key, String(v)); } catch(e) {}
+        });
+    });
+}
+
+
 
 async function openDocs() {
     const modal = document.getElementById('docModal');
@@ -5593,11 +5092,45 @@ document.addEventListener('DOMContentLoaded', async () => {
     bind('btnFormatQGL', () => {
     const el = document.getElementById('qglEditor');
     if (!el) return;
-    // Clear editor contents (user must press Save to persist)
-    el.value = '';
+    const raw = el.value || '';
+    if (!raw.trim()) {
+        showToast('⚠️ Nothing to format — editor is empty');
+        return;
+    }
+    // FORMAT: parse key=value pairs, remove blank lines & dupes, sort, reformat cleanly.
+    // Comments (lines starting with #) are preserved at the top.
+    // This does NOT clear the content — it cleans and organises it.
+    const comments = [];
+    const entries = new Map(); // key → last value (deduplicates, keeps last occurrence)
+    raw.split('\n').forEach(line => {
+        const trimmed = line.trim();
+        if (!trimmed) return; // skip blank lines
+        if (trimmed.startsWith('#')) {
+            comments.push(trimmed);
+            return;
+        }
+        const eqIdx = trimmed.indexOf('=');
+        if (eqIdx > 0) {
+            const k = trimmed.slice(0, eqIdx).trim();
+            const v = trimmed.slice(eqIdx + 1).trim();
+            if (k) entries.set(k, v);
+        } else {
+            // Line without = (bare key or unknown) — keep as comment
+            comments.push('# ' + trimmed);
+        }
+    });
+    // Sort alphabetically by key
+    const sorted = [...entries.entries()].sort(([a], [b]) => a.localeCompare(b));
+    const formatted = [
+        ...comments,
+        ...(comments.length > 0 && sorted.length > 0 ? [''] : []),
+        ...sorted.map(([k, v]) => `${k}=${v}`)
+    ].join('\n');
+    el.value = formatted;
     if (typeof updateQGLLineCount === 'function') updateQGLLineCount();
-    showToast('QGL editor cleared');
-    logToTerminal('QGL editor cleared by Format', 'info');
+    const dupesSaved = (raw.split('\n').filter(l => l.includes('=')).length) - sorted.length;
+    showToast(`✅ Formatted — ${sorted.length} keys${dupesSaved > 0 ? `, ${dupesSaved} duplicate(s) removed` : ''}`);
+    logToTerminal(`QGL formatted: ${sorted.length} unique keys${dupesSaved > 0 ? `, ${dupesSaved} duplicate(s) removed` : ''}`, 'success');
     });
     bind('btnResetQGL', async () => {
     // Confirm with the user before destructive action
@@ -5661,6 +5194,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // ── COLOR MODE TOGGLE ─────────────────────────────────────────
     initColorModeToggle();
     initQualityMode();
+    initModeSliders();
     bind('btnTransDocs', performDocsTranslation);
     bind('closeDocs', () => document.getElementById('docModal').style.display = 'none');
     bind('btnClearGPUCache', clearGPUCaches);
@@ -5801,7 +5335,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                 'normal': currentTranslations.renderDesc || 'Default rendering backend — no debug props set',
                 'skiavk': currentTranslations.renderDescSkiaVK || 'HWUI uses Skia+Vulkan — smoother UI on Adreno GPUs. renderengine.backend: skiavkthreaded if API ≥ 34 (or Force flag enabled), else skiaglthreaded.',
                 'skiagl': currentTranslations.renderDescSkiaGL || 'HWUI uses Skia+OpenGL — better compatibility fallback. renderengine.backend=skiaglthreaded (threaded GL compositor, all versions).',
-                'skiavk_all': currentTranslations.renderDescSkiaVKAll || 'SkiaVK + boot-time renderer activation subshell (boot+35s). Throttled force-stops all 3rd-party AND non-critical system apps (150ms gap, GMS/Meta/SystemUI excluded) so they cold-start with Vulkan. renderengine.backend: skiavkthreaded if API ≥ 34 (or Force flag enabled), else skiaglthreaded.',
             };
             renderModeDesc.textContent = descriptions[mode] || descriptions['normal'];
             updateForceThreadedRowVisibility();

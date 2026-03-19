@@ -1,0 +1,163 @@
+# Adreno GPU Driver Module - Static SELinux Policy Rules
+# =========================================================
+# Loaded by Magisk/KernelSU/APatch at post-fs-data BEFORE any module script
+# runs. This provides the most reliable pre-boot injection layer.
+#
+# Rules are applied line-by-line; a failing rule does NOT block others.
+# Types that don't exist on the current ROM are silently skipped.
+#
+# SAFETY NOTES:
+#   - No broad 'domain' rules here (Samsung OneUI neverallow: vendor_firmware_file)
+#   - No 'domain firmware_file' (MIUI/HyperOS neverallow)
+#   - 'ksu' type: KernelSU-Next (rifsxd) only; silently skipped on Magisk/tiann-KSU
+#   - 'same_process_hal_file * filesystem associate' avoided; use labeledfs+unlabeled
+#     to reduce neverallow surface area while covering ext4/f2fs /data mounts
+#
+# WHAT THESE RULES FIX:
+#   1. su/ksu/magisk setattr on vendor_data_file -> chmod 0644 in service.sh CASE A
+#   2. su/ksu/magisk relabelfrom vendor_data_file (FILE+DIR) -> chcon dir/file from vendor_data_file
+#   3. su/ksu/magisk relabelto same_process_hal_file (FILE+DIR) -> chcon dir/file to same_process_hal_file
+#   4. same_process_hal_file filesystem associate -> chcon to label on /data partition
+#   5. surfaceflinger/HAL read vendor_data_file -> QGL config tuning loaded at init
+#   6. [UNLABELED FIX] OEM ROMs (HyperOS/MIUI/ColorOS/OneUI) often lack
+#      type_transition init vendor_data_file:dir vendor_data_file in their kernel
+#      policy. Files created by init OR by su/ksu/magisk in /data/vendor/gpu/ then
+#      receive the 'unlabeled' label instead of 'vendor_data_file'. This breaks:
+#        - post-fs-data.sh chcon to vendor_data_file (init needs relabelfrom+relabelto)
+#        - service.sh CASE A chmod 0644 (needs setattr on unlabeled, not vendor_data_file)
+#        - service.sh CASE A rm fallback (needs unlink on unlabeled, not vendor_data_file)
+#      The unlabeled rules below fix all three failure paths. 'unlabeled' is a
+#      special catch-all type for files without labels; granting setattr/relabelfrom/
+#      unlink to privileged root domains for it is standard Android practice.
+#   7. [SAME_PROCESS_HAL_FILE LIFECYCLE FIX] After service.sh CASE A successfully
+#      chcon's qgl_config.txt to same_process_hal_file, subsequent post-fs-data.sh
+#      boots must be able to:
+#        - unlink (rm/mv-over) the file: init needs 'unlink' on same_process_hal_file
+#        - relabelfrom same_process_hal_file: init needs this for chcon back to vendor_data_file
+#        - unlink by su/ksu/magisk: needed for service.sh CASE A copy-fallback rm -f
+#        - relabelfrom same_process_hal_file by su/ksu/magisk: needed for future chcon ops
+#      Without these, rm/mv in post-fs-data.sh fails silently on every subsequent boot
+#      once the file has been activated, and the QGL=n disable path also fails to clean up.
+#   8. [DIRECTORY CHCON FIX — ROOT CAUSE OF QGL NOT LOADING]
+#      The Adreno driver validates the SELinux context of BOTH the directory
+#      (/data/vendor/gpu/) AND the file (qgl_config.txt) before reading the config.
+#      If the directory does NOT have same_process_hal_file context, the driver
+#      silently ignores the file regardless of the file's context or permissions.
+#      This has been verified from LYB Kernel Manager reverse engineering:
+#        "both chcon calls are mandatory or driver ignores the file"
+#      Fix: service.sh CASE A now chcon's the directory in addition to the file.
+#           post-fs-data.sh pre-labels the directory as same_process_hal_file.
+#      Required new rules:
+#        - vendor_data_file dir relabelfrom (all domains — was missing)
+#        - same_process_hal_file dir relabelto/relabelfrom/search/read/open/getattr (all domains)
+#        - appdomain/surfaceflinger/HAL same_process_hal_file dir search (consumer access)
+# =========================================================
+
+# -- Root domain: su (KernelSU tiann, APatch - service.sh context) ---------
+allow su vendor_data_file dir { create read write open search add_name remove_name setattr getattr relabelfrom }
+allow su vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }
+allow su same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }
+allow su same_process_hal_file file { getattr setattr relabelto relabelfrom create write open read unlink rename }
+# UNLABELED FIX: setattr=chmod, relabelfrom=chcon-from, unlink=rm -f, rename=mv on unlabeled files/dirs
+# write+add_name+remove_name on dir: needed for creating/removing files in same_process_hal_file dirs
+# rename on file: needed for mv of unlabeled temp file (created in same_process_hal_file dir, no type_transition)
+allow su unlabeled dir { getattr setattr relabelfrom write add_name remove_name }
+allow su unlabeled file { create read write open getattr setattr relabelfrom unlink rename }
+
+# -- Root domain: ksu (KernelSU-Next rifsxd - service.sh context) ----------
+# NOTE: 'ksu' type only exists on KernelSU-Next builds. Silently skipped elsewhere.
+allow ksu vendor_data_file dir { create read write open search add_name remove_name setattr getattr relabelfrom }
+allow ksu vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }
+allow ksu same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }
+allow ksu same_process_hal_file file { getattr setattr relabelto relabelfrom create write open read unlink rename }
+# UNLABELED FIX (same rationale as su above):
+allow ksu unlabeled dir { getattr setattr relabelfrom write add_name remove_name }
+allow ksu unlabeled file { create read write open getattr setattr relabelfrom unlink rename }
+
+# -- Root domain: magisk (Magisk - service.sh context) ---------------------
+# Magisk already has 'allow magisk * * *' but explicit rules here are belt+suspenders
+# and ensure coverage on forks (Delta Magisk, Magisk Alpha, Kitsune Mask) that may
+# not have the same blanket permissive grant.
+allow magisk vendor_data_file dir { create read write open search add_name remove_name setattr getattr relabelfrom }
+allow magisk vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }
+allow magisk same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }
+allow magisk same_process_hal_file file { getattr setattr relabelto relabelfrom create write open read unlink rename }
+# UNLABELED FIX (same rationale as su above):
+allow magisk unlabeled dir { getattr setattr relabelfrom write add_name remove_name }
+allow magisk unlabeled file { create read write open getattr setattr relabelfrom unlink rename }
+
+# -- init domain: install qgl_config.txt and manage /data/vendor/gpu/ ------
+# UNLABELED FIX: init creates the protected-mode file via cp+mv. On OEM ROMs
+# without type_transition, the mv'd file is labeled 'unlabeled'. The chcon call
+# in post-fs-data.sh (chcon vendor_data_file) then requires:
+#   relabelfrom unlabeled  (FROM the current 'unlabeled' label)
+#   relabelto vendor_data_file  (TO the target 'vendor_data_file' label)
+# Without these two, chcon silently returns EACCES -> file stays 'unlabeled' ->
+# service.sh CASE A fails because its setattr/relabelfrom rules only cover
+# vendor_data_file, not 'unlabeled'.
+allow init vendor_data_file dir { create read write open add_name remove_name search setattr getattr relabelfrom }
+allow init vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }
+allow init same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }
+allow init same_process_hal_file file { read open getattr execute map relabelto relabelfrom unlink rename }
+# UNLABELED FIX: init needs rename on unlabeled files for mv(QGL_TEMP→QGL_TARGET) when QGL_TEMP is
+# created in a same_process_hal_file directory (no type_transition → unlabeled context).
+# write+add_name+remove_name on unlabeled dir: needed for managing files in unlabeled dirs.
+# CRITICAL: 'create' must be present — without it, cp/touch in a same_process_hal_file
+# directory silently fails (the new file gets unlabeled type, init needs 'create' on unlabeled).
+# This was the root cause of the "second boot SF hang" bug:
+#   Boot N: dir=same_process_hal_file, file activated to 0644
+#   Boot N+1: post-fs-data cp → new file = unlabeled → create denied → cp fails → old 0644 stays
+#   → SF reads qgl_config.txt during skiavkthreaded vkCreateDevice → hang → watchdog → reboot
+allow init unlabeled dir { getattr setattr relabelfrom write add_name remove_name }
+allow init unlabeled file { create read write open getattr setattr relabelfrom unlink rename }
+
+# -- Filesystem associate: same_process_hal_file on /data ------------------
+# /data is typically 'labeledfs' (ext4/f2fs/erofs with xattrs).
+# Without this, chcon to same_process_hal_file on any /data file silently
+# fails - the kernel's security_sid_mls_copy check returns -EACCES at the
+# filesystem associate step before relabelfrom/relabelto are evaluated.
+allow same_process_hal_file labeledfs filesystem associate
+allow same_process_hal_file unlabeled filesystem associate
+
+# -- SurfaceFlinger and GPU HAL: read QGL config from /data/vendor/gpu/ ----
+# Two context paths: vendor_data_file (ACTIVE MODE or PROTECTED MODE with init
+# fallback) and same_process_hal_file (after service.sh CASE A chcon activation).
+# Both are needed - which one is active depends on boot path and chcon success.
+allow surfaceflinger vendor_data_file dir { read search getattr }
+allow surfaceflinger vendor_data_file file { read open getattr }
+allow surfaceflinger same_process_hal_file dir { search read open getattr }
+allow surfaceflinger same_process_hal_file file { read open getattr }
+allow hal_graphics_composer_default vendor_data_file dir { read search getattr }
+allow hal_graphics_composer_default vendor_data_file file { read open getattr }
+allow hal_graphics_composer_default same_process_hal_file dir { search read open getattr }
+allow hal_graphics_composer_default same_process_hal_file file { read open getattr execute map }
+allow hal_graphics_allocator_default vendor_data_file dir { read search getattr }
+allow hal_graphics_allocator_default vendor_data_file file { read open getattr }
+allow hal_graphics_allocator_default same_process_hal_file dir { search read open getattr }
+allow hal_graphics_allocator_default same_process_hal_file file { read open getattr execute map }
+allow hal_graphics_mapper_default vendor_data_file dir { read search getattr }
+allow hal_graphics_mapper_default vendor_data_file file { read open getattr }
+allow hal_graphics_mapper_default same_process_hal_file dir { search read open getattr }
+allow hal_graphics_mapper_default same_process_hal_file file { read open getattr execute map }
+allow hal_graphics_mapper vendor_data_file dir { read search getattr }
+allow hal_graphics_mapper vendor_data_file file { read open getattr }
+allow hal_graphics_mapper same_process_hal_file dir { search read open getattr }
+allow hal_graphics_mapper same_process_hal_file file { read open getattr execute map }
+
+# -- App and framework processes: read QGL config post same_process_hal_file chcon -
+# After service.sh CASE A activates the file (chcon vendor_data_file->same_process_hal_file),
+# every new HWUI/Vulkan process (apps, zygote-forked processes, system_server) needs
+# read access via same_process_hal_file context. Without these, QGL config is silently
+# ignored at vkCreateDevice even though the file is chmod 0644.
+# DIR rules needed: the Adreno driver checks directory context too (validated via LYB RE).
+# Without same_process_hal_file dir search, the kernel denies directory traversal before
+# the file open() is even attempted.
+# Note: appdomain and zygote are SELinux attributes - magiskpolicy expands them to all
+# member types (untrusted_app, platform_app, priv_app, isolated_app, etc.). Silently
+# skipped on ROMs where the attribute doesn't exist in the compiled policy.
+allow appdomain same_process_hal_file dir { search read open getattr }
+allow appdomain same_process_hal_file file { read open getattr }
+allow zygote same_process_hal_file dir { search read open getattr }
+allow zygote same_process_hal_file file { read open getattr }
+allow system_server same_process_hal_file dir { search read open getattr }
+allow system_server same_process_hal_file file { read open getattr }

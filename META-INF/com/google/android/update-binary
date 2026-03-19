@@ -1105,18 +1105,126 @@ export DETECTION_REASON
 
   if [ "$QGL" = "y" ] && [ -f "$TMPDIR/qgl_config.txt" ]; then
     ui_print " "
+    ui_print "===================================="
+    ui_print "QGL Configuration"
+    ui_print "===================================="
+    ui_print " "
     ui_print "Installing QGL configuration..."
-    mkdir -p /data/vendor/gpu 2>/dev/null || true
-    chmod 0755 /data/vendor/gpu 2>/dev/null || true
-    if cp -f "$TMPDIR/qgl_config.txt" /data/vendor/gpu/qgl_config.txt 2>/dev/null; then
-      chmod 0644 /data/vendor/gpu/qgl_config.txt 2>/dev/null || true
-      ui_print "✓ QGL config installed"
-    else
-      ui_print "⚠ QGL installation failed"
+
+    # ── Ensure /data/vendor/gpu directory with correct ownership + context ──
+    # AOSP init.rc: mkdir /data/vendor 0771 root root
+    # /data/vendor/gpu is vendor_data_file context per AOSP file_contexts rule:
+    #   /data/vendor(/.*)?  u:object_r:vendor_data_file:s0
+    # Set 0771 root:root to match Android's own post-fs-data mkdir behavior.
+    _qgl_dir_created=false
+    if [ ! -d /data/vendor/gpu ]; then
+      mkdir -p /data/vendor/gpu 2>/dev/null && _qgl_dir_created=true || true
     fi
+    if [ -d /data/vendor/gpu ]; then
+      chmod 0771 /data/vendor/gpu 2>/dev/null || true
+      chown 0:0 /data/vendor/gpu 2>/dev/null || true
+      # Set vendor_data_file context on the directory so Android init's later
+      # restorecon of /data/vendor (if any) doesn't get confused. In recovery
+      # SELinux policy is not enforced — chcon writes the xattr directly.
+      if command -v chcon >/dev/null 2>&1; then
+        chcon u:object_r:vendor_data_file:s0 /data/vendor/gpu 2>/dev/null || true
+      fi
+    else
+      ui_print "⚠ Failed to create /data/vendor/gpu — aborting QGL install"
+      QGL_INSTALL_FAILED=true
+    fi
+
+    if [ "${QGL_INSTALL_FAILED:-false}" != "true" ]; then
+      _qgl_tgt="/data/vendor/gpu/qgl_config.txt"
+      _qgl_tmp="/data/vendor/gpu/.qgl_config.txt.tmp.$$"
+      _qgl_marker="/data/vendor/gpu/.adreno_qgl_owner"
+      _qgl_ok=false
+
+      # ── Atomic copy with integrity check ──────────────────────────────────
+      if cp -f "$TMPDIR/qgl_config.txt" "$_qgl_tmp" 2>/dev/null && \
+         [ -s "$_qgl_tmp" ]; then
+
+        # ── Permissions: 0644 root:system ─────────────────────────────────
+        # Owner=root(0), Group=system(1000). System-privileged processes
+        # (hal_graphics_composer_default etc.) have gid=system and can read
+        # group-readable files. uid=0 ensures no accidental world-write.
+        chmod 0644 "$_qgl_tmp" 2>/dev/null || true
+        chown 0:1000 "$_qgl_tmp" 2>/dev/null || \
+          chown root:system "$_qgl_tmp" 2>/dev/null || true
+
+        # ── SELinux context: same_process_hal_file ─────────────────────────
+        # AOSP: HAL library dependencies for same-process HALs must be labeled
+        # same_process_hal_file (system/sepolicy/private/file_contexts).
+        # qgl_config.txt is read by every process calling vkCreateDevice /
+        # opening /dev/kgsl-3d0 via the Adreno userspace driver. The HAL
+        # domains (hal_graphics_composer_default, hal_graphics_allocator_default
+        # etc.) only have 'allow ... same_process_hal_file file { read open
+        # getattr }' — NOT vendor_data_file read. So vendor_data_file context
+        # means the file is silently never loaded by the GPU HAL.
+        #
+        # Recovery environment: SELinux policy is NOT enforced on /data writes.
+        # chcon directly sets the security.selinux xattr on the inode.
+        # AOSP init.rc does NOT restorecon /data/vendor/gpu recursively, so
+        # this label persists through the first normal boot. On rare OEM init.rc
+        # variants that DO run restorecon_recursive /data/vendor, service.sh's
+        # CASE C context-drift detection will re-apply chcon on first boot.
+        _qgl_ctx_set=false
+        if command -v chcon >/dev/null 2>&1; then
+          if chcon u:object_r:same_process_hal_file:s0 "$_qgl_tmp" 2>/dev/null; then
+            _qgl_ctx_set=true
+          else
+            # chcon to same_process_hal_file failed — rare on recovery kernel
+            # that enforces policy against unlabeled filesystem associate.
+            # Fall back to vendor_data_file (safe default). service.sh CASE C
+            # drift correction will relabel on first normal boot.
+            chcon u:object_r:vendor_data_file:s0 "$_qgl_tmp" 2>/dev/null || true
+          fi
+        fi
+
+        # ── Atomic rename into final path ──────────────────────────────────
+        if mv -f "$_qgl_tmp" "$_qgl_tgt" 2>/dev/null && [ -s "$_qgl_tgt" ]; then
+          # ── Owner marker ────────────────────────────────────────────────
+          touch "$_qgl_marker" 2>/dev/null || true
+          chmod 0600 "$_qgl_marker" 2>/dev/null || true
+
+          _qgl_ok=true
+
+          # ── Diagnostics ─────────────────────────────────────────────────
+          _qgl_mode=$(stat -c '%a' "$_qgl_tgt" 2>/dev/null || echo "?")
+          _qgl_owner=$(stat -c '%U:%G' "$_qgl_tgt" 2>/dev/null || \
+                        stat -c '%u:%g' "$_qgl_tgt" 2>/dev/null || echo "?:?")
+          _qgl_size=$(stat -c%s "$_qgl_tgt" 2>/dev/null || echo "?")
+          _qgl_ctx_actual="?"
+          if command -v ls >/dev/null 2>&1; then
+            _qgl_ctx_actual=$(ls -Z "$_qgl_tgt" 2>/dev/null | \
+              awk '{print $1}' 2>/dev/null || echo "?")
+          fi
+
+          ui_print "✓ QGL config installed"
+          ui_print "  Mode:  ${_qgl_mode}  Owner: ${_qgl_owner}  Size: ${_qgl_size}B"
+          if [ "$_qgl_ctx_set" = "true" ]; then
+            ui_print "  Context: same_process_hal_file [OK — HAL will load directly]"
+          else
+            ui_print "  Context: vendor_data_file [service.sh will relabel on first boot]"
+          fi
+          unset _qgl_mode _qgl_owner _qgl_size _qgl_ctx_actual _qgl_ctx_set
+        fi
+      fi
+
+      rm -f "$_qgl_tmp" 2>/dev/null || true
+
+      if [ "$_qgl_ok" = "false" ]; then
+        ui_print "⚠ QGL install failed (cp or mv to /data/vendor/gpu denied)"
+        ui_print "  post-fs-data.sh will retry from init domain on first boot"
+      fi
+      unset _qgl_tgt _qgl_tmp _qgl_marker _qgl_ok _qgl_ctx_set
+    fi
+    unset QGL_INSTALL_FAILED _qgl_dir_created
+
   elif [ "$QGL" = "y" ]; then
     ui_print " "
-    ui_print "⚠ QGL enabled but config file missing"
+    ui_print "⚠ QGL enabled but config file missing from package"
+    ui_print "  post-fs-data.sh will install from module on first boot"
   else
     ui_print " "
     ui_print "⊘ QGL configuration disabled"
