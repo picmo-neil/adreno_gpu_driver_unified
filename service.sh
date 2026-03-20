@@ -766,34 +766,28 @@ esac
 # ARCHITECTURE — Game Exclusion Daemon (GED):
 #
 #   The GED is launched by post-fs-data.sh after boot_completed+2s.
-#   Two GED variants exist, tried in order:
+#   Only the native binary (bin/<abi>/adreno_ged) is used.
 #
-#   NATIVE GED (bin/<abi>/adreno_ged, preferred):
-#     Uses NETLINK_CONNECTOR + PROC_EVENT_FORK/COMM to detect game launches
-#     at kernel level — zero CPU overhead between events.
-#     Death detection: pidfd_open(pid, 0) + epoll (Linux 5.3+), with fallback
-#     to 1s /proc scan on older kernels that lack pidfd.
-#     Immune to SELinux logcat restrictions.
-#     Active per-game re-enforcement: while any game is active, re-applies
-#     debug.hwui.renderer=skiagl every ~5s in case GOS/OEM daemons reset it.
-#
-#   SHELL GED (game_excl_daemon.sh, fallback):
-#     Primary: logcat -b events -v brief, parses am_proc_start (tag 30014).
-#     Fallback: if logcat exits 3 times in <2s (SELinux-blocked), switches to
-#     2s /proc-poll mode for new launch detection.
-#     Death detection: _wait_game_death() sub-daemon, 1s /proc/$PID poll.
-#     Active per-game re-enforcement: _wait_game_death checks
-#     debug.hwui.renderer every 5 iterations (~5s) and re-applies skiagl if
-#     any OEM/GOS daemon has reset it.
+#   NATIVE GED (bin/<abi>/adreno_ged):
+#     Launch detection: Netlink PROC_EVENT_FORK+COMM — kernel delivers events
+#       via CN_PROC socket; zero CPU between events.
+#     Foreground verification: reads oom_score_adj ≤ 100 (AMS sets this in
+#       real-time: 0=FOREGROUND, 100=VISIBLE, ≥200=background service).
+#       This rejects Meta background services and deferred-classify processes.
+#       Periodic /proc scan every 1 s catches already-running apps and Meta
+#       apps that come to the foreground from persistent background (no new
+#       COMM event — only oom_score_adj changes). Equivalent to how Encore
+#       Tweaks uses ActivityManager + inotify to detect focused-app changes.
+#     Death detection: pidfd_open + epoll (Linux 5.3+) — kernel wakes epoll
+#       the instant the process exits; no polling.
+#       Falls back to /proc existence check on older kernels.
+#     GOS re-enforcement: re-applies skiagl every 5 s while any game is
+#       active, guarding against Samsung GOS / OEM perf daemon resets.
 #
 # STATE FILE: /data/local/tmp/adreno_ged_active
-#   "1" = game running, renderer = skiagl
-#   "0" = no game running, renderer = restore target
-#   Written by the active GED on game open/close.
-#
-# NOTE: There is no Zygisk .so in this module. PATH A (Zygisk hook) described
-# in earlier comments was a planned future feature and has NOT been implemented.
-# The GED (logcat/netlink) is the only launch detection mechanism.
+#   "1" = at least one excluded game/app active, renderer = skiagl
+#   "0" = no excluded game/app active, renderer = restore target
+#   Written by the native GED on open/close.
 # ========================================
 
 # ========================================
@@ -804,14 +798,11 @@ esac
 # restores the configured renderer once all listed games exit.
 #
 # ARCHITECTURE:
-#   Launch detection:  native GED via NETLINK_CONNECTOR (preferred)
-#                      OR shell GED via logcat am_proc_start (fallback)
-#                      OR shell GED via 2s /proc-poll (SELinux fallback)
-#   Death detection:   native GED via pidfd + epoll; fallback to 1s /proc scan
-#                      shell GED via 1s /proc/$PID poll per active game
-#   GOS re-enforcement: both GED variants re-apply skiagl every ~5s while
-#                       any listed game is active, guarding against OEM/GOS
-#                       property resets mid-session
+#   Launch detection:  Netlink PROC_EVENT_FORK+COMM (zero CPU between events)
+#                      + oom_score_adj ≤ 100 foreground verification
+#                      + 1 s /proc scan for already-running / adj-only changes
+#   Death detection:   pidfd_open + epoll (Linux 5.3+); /proc fallback otherwise
+#   GOS re-enforcement: re-applies skiagl every 5 s while any game is active
 #
 # STATE FILE: /data/local/tmp/adreno_ged_active
 #   "1" = at least one listed game running, renderer = skiagl

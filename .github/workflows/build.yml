@@ -103,12 +103,6 @@ jobs:
             exit 0
           fi
 
-          # Filter + sort in jq:
-          #   1. prerelease == false
-          #   2. tag matches ^r[0-9]+[a-z]?$  (no hyphens → rejects rc/beta/canary)
-          #   3. name does not contain "lts"   (case-insensitive → rejects LTS track)
-          #   4. Sort by [major_number_desc, letter_suffix_desc]
-          #   5. Take first .tag_name
           NDK_VER=$(echo "$API_RESPONSE" | jq -r '
             [ .[]
               | select(
@@ -135,7 +129,6 @@ jobs:
           echo "ndk-version=${NDK_VER}" >> "$GITHUB_OUTPUT"
           echo "Resolved NDK: ${NDK_VER}"
 
-          # Emit a summary table so the resolved version is visible at a glance
           echo "### NDK Resolution" >> "$GITHUB_STEP_SUMMARY"
           echo "| | |"             >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|"         >> "$GITHUB_STEP_SUMMARY"
@@ -143,9 +136,6 @@ jobs:
           echo "| Fallback | \`${FALLBACK_NDK}\` |" >> "$GITHUB_STEP_SUMMARY"
 
       # ── 4. Cache NDK ───────────────────────────────────────────────────────
-      # NDK tarballs are ~700 MB — caching saves ~2 min per run.
-      # Cache key includes the resolved version so upgrading to a new NDK
-      # automatically busts the cache without any manual intervention.
       - name: Cache NDK ${{ steps.ndk-version.outputs.ndk-version }}
         uses: actions/cache@v4
         with:
@@ -172,10 +162,19 @@ jobs:
           echo "Clang    : $(${CLANG} --version | head -1)"
 
       # ── 7. Build adreno_ged (arm64-v8a + armeabi-v7a) ─────────────────────
-      # Repo layout:
-      #   jni/Android.mk
-      #   jni/Application.mk
-      #   jni/src/ged.c
+      #
+      # Source layout (standard ndk-build jni/ convention):
+      #   jni/Android.mk          — module build script
+      #   jni/Application.mk      — ABI / platform settings
+      #   jni/src/ged.c           — daemon source
+      #
+      # Architecture:
+      #   Netlink CN_PROC FORK+COMM+EXIT  → zero-overhead reactive detection
+      #   oom_score_adj ≤ 100             → foreground verification (Encore approach)
+      #   periodic /proc scan (1 s)       → catch already-running foreground apps
+      #   pidfd_open + epoll              → zero-latency exit detection
+      #   timerfd 500 ms                  → GOS enforcement every 5 s
+      #   signalfd                        → non-blocking signal handling
       #
       # Outputs:
       #   build/libs/arm64-v8a/adreno_ged
@@ -184,21 +183,18 @@ jobs:
         run: |
           NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
 
-          "${NDK}/ndk-build"           \
-            NDK_PROJECT_PATH=.         \
-            APP_BUILD_SCRIPT=jni/Android.mk \
+          "${NDK}/ndk-build"                      \
+            NDK_PROJECT_PATH=.                    \
+            APP_BUILD_SCRIPT=jni/Android.mk       \
             NDK_APPLICATION_MK=jni/Application.mk \
-            NDK_OUT=build/obj          \
-            NDK_LIBS_OUT=build/libs    \
+            NDK_OUT=build/obj                     \
+            NDK_LIBS_OUT=build/libs               \
             -j$(nproc)
 
           echo "=== Built binaries ==="
           find build/libs -type f -name "adreno_ged" -exec ls -lh {} \;
 
       # ── 8. Strip + verify binaries ─────────────────────────────────────────
-      # llvm-strip removes debug symbols (~40-60% size reduction).
-      # file(1) confirms correct ELF architecture per ABI — catches a silent
-      # cross-compile failure before the binary reaches a device.
       - name: Strip and verify binaries
         run: |
           NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
@@ -297,11 +293,15 @@ jobs:
             fi
           done
 
-          # ── Optional root files ────────────────────────────────────────────
+          # ── Module shell scripts and config files ──────────────────────────
+          # NOTE: game_excl_daemon.sh intentionally omitted — replaced by the
+          # native adreno_ged binary which uses the Encore-inspired approach:
+          # oom_score_adj foreground detection + periodic /proc scan.
           for f in \
             module.prop system.prop \
             customize.sh post-fs-data.sh service.sh uninstall.sh \
-            common.sh game_excl_daemon.sh game_exclusion_list.sh \
+            boot-completed.sh \
+            common.sh game_exclusion_list.sh \
             adreno_config.txt qgl_config.txt sepolicy.rule \
             files.sh action.sh banner; do
             [ -f "$f" ] && cp "$f" "${S}/" && echo "  + $f"
@@ -367,9 +367,6 @@ jobs:
           echo "| Files | $(find "${S}" -type f | wc -l) |"     >> "$GITHUB_STEP_SUMMARY"
 
       # ── 10. Upload artifact ────────────────────────────────────────────────
-      #
-      # path: staging/  →  GitHub zips the directory contents directly.
-      # Downloaded artifact: adreno-gpu-driver-<ver>.zip → module files at root.
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -391,16 +388,21 @@ jobs:
 
             Flash via Magisk / KernelSU / APatch.
 
-            ### Native game exclusion daemon
-            Zero-overhead C binary replaces the shell `game_excl_daemon.sh`.
-            Shell fallback is still included and used automatically if the binary can't run.
+            ### Native game exclusion daemon — redesigned (Encore-inspired)
+
+            The `adreno_ged` binary now uses the same **focused-app detection**
+            strategy as Encore Tweaks, implemented in pure C without a Java companion:
 
             | Mechanism | Purpose | CPU when idle |
             |---|---|---|
-            | Netlink PROC_EVENT_FORK | Detect zygote fork | Zero |
-            | Netlink PROC_EVENT_COMM | Confirm app identity | Zero |
-            | pidfd + epoll | Instant game-exit detection | Zero |
-            | PROC_EVENT_EXIT | Exit backup signal | Zero |
+            | Netlink PROC_EVENT_FORK+COMM | Detect new game processes instantly | Zero |
+            | `oom_score_adj` ≤ 100 check | Verify foreground status (replaces Encore's ActivityManager) | Zero |
+            | 500 ms `/proc` scan | Catch already-running Meta apps coming to foreground | < 0.1 % |
+            | pidfd + epoll | Instant zero-latency exit detection (identical to Encore PIDTracker) | Zero |
+            | timerfd 500 ms | GOS / OEM renderer re-enforcement every 5 s | Zero |
+            | signalfd | Non-blocking signal handling (no waitpid in event loop) | Zero |
+
+            **Shell fallback (`game_excl_daemon.sh`) removed** — native binary only.
 
             Built with NDK `${{ steps.ndk-version.outputs.ndk-version }}` · `${{ github.sha }}`
           files: ${{ steps.assemble.outputs.zippath }}

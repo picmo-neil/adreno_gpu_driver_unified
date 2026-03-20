@@ -88,7 +88,7 @@ elif [ -f "$_GAME_EXCL_MOD" ]; then
 else
   # Fallback inline definition (matches bundled game_exclusion_list.sh defaults)
   # NOTE: Meta packages (Facebook/Instagram/WhatsApp) included here to match
-  # service.sh (line ~56) and game_excl_daemon.sh — prevents exclude Meta
+  # service.sh (line ~56) — prevents exclude Meta
   # apps during boot which causes dangling ANativeWindow handles.
   GAME_EXCLUSION_PKGS="com.tencent.ig com.pubg.krmobile com.pubg.imobile com.pubg.newstate com.vng.pubgmobile com.rekoo.pubgm com.tencent.tmgp.pubgmhd com.epicgames.* com.activision.callofduty.shooter com.garena.game.codm com.tencent.tmgp.cod com.vng.codmvn com.miHoYo.GenshinImpact com.cognosphere.GenshinImpact com.miHoYo.enterprise.HSRPrism com.HoYoverse.hkrpgoversea com.levelinfinite.hotta com.proximabeta.mfh com.HoYoverse.Nap com.miHoYo.ZZZ com.facebook.katana com.facebook.orca com.facebook.lite com.facebook.mlite com.instagram.android com.instagram.lite com.instagram.barcelona com.whatsapp com.whatsapp.w4b"
   _game_pkg_excluded() { local _p="$1" _e; for _e in $GAME_EXCLUSION_PKGS; do case "$_p" in $_e) return 0;; esac; done; return 1; }
@@ -2691,8 +2691,7 @@ case "$RENDER_MODE" in
     log_boot "[OK] skiavk: renderer re-enforced after boot_completed (no force-stops — LYB approach)"
 
     # ── GAME EXCLUSION DAEMON LAUNCH ──────────────────────────────────────────
-    # Launches the native adreno_ged binary if available (zero overhead),
-    # falls back to game_excl_daemon.sh (shell, low overhead) if not.
+    # Launches the native adreno_ged binary (zero overhead).
     #
     # Native binary architecture (truly zero overhead):
     #   NETLINK_CONNECTOR PROC_EVENT_FORK+COMM: kernel delivers fork/comm events
@@ -2716,8 +2715,8 @@ case "$RENDER_MODE" in
         # Give ActivityManager 2 extra seconds to fully initialize.
         sleep 2
 
-        # ── Try native binary first ──────────────────────────────────────────
-        # Detect CPU ABI to pick the right binary.
+        # ── Launch native binary ─────────────────────────────────────────────
+        # Detect CPU ABI to select the correct pre-compiled binary.
         _GED_ABI="$(getprop ro.product.cpu.abi 2>/dev/null || echo '')"
         _GED_BIN=""
         case "$_GED_ABI" in
@@ -2730,32 +2729,16 @@ case "$RENDER_MODE" in
         esac
 
         if [ -n "$_GED_BIN" ]; then
-          # Launch native binary: pass restore mode and MODDIR
-          # MODDIR passed as $2 so binary can find game_exclusion_list.sh
+          # argv[1] = restore mode; argv[2] = MODDIR so binary can find
+          # game_exclusion_list.sh without a hard-coded path.
           "$_GED_BIN" "$RENDER_MODE" "$MODDIR" &
-          echo "[ADRENO] Game exclusion daemon (NATIVE) launched PID=$! binary=$_GED_BIN mode=$RENDER_MODE" \
+          echo "[ADRENO] Game exclusion daemon launched PID=$! binary=$_GED_BIN mode=$RENDER_MODE" \
             > /dev/kmsg 2>/dev/null || true
-          exit 0
-        fi
-
-        # ── Shell fallback ───────────────────────────────────────────────────
-        _GED_SCRIPT=""
-        for _gp in \
-            "/sdcard/Adreno_Driver/Config/game_excl_daemon.sh" \
-            "${MODDIR}/game_excl_daemon.sh" \
-            "/data/local/tmp/adreno_game_excl_daemon.sh"; do
-          [ -f "$_gp" ] && [ -r "$_gp" ] && { _GED_SCRIPT="$_gp"; break; }
-        done
-
-        if [ -z "$_GED_SCRIPT" ]; then
-          echo "[ADRENO] GAME_EXCLUSION_DAEMON=y but neither binary nor shell script found -- not started" \
+        else
+          echo "[ADRENO] GAME_EXCLUSION_DAEMON=y but adreno_ged binary not found for ABI=$_GED_ABI" \
             > /dev/kmsg 2>/dev/null || true
-          exit 1
         fi
-
-        /system/bin/sh "$_GED_SCRIPT" "$RENDER_MODE" "$MODDIR" &
-        echo "[ADRENO] Game exclusion daemon (SHELL fallback) launched PID=$! script=$_GED_SCRIPT mode=$RENDER_MODE" \
-          > /dev/kmsg 2>/dev/null || true
+        unset _GED_ABI _GED_BIN
       ) &
       log_boot "[OK] Game exclusion daemon: scheduled for boot_completed+2s (GAME_EXCLUSION_DAEMON=y, mode=$RENDER_MODE)"
     elif [ "$GAME_EXCLUSION_DAEMON" = "n" ]; then

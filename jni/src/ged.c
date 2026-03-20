@@ -1,421 +1,377 @@
 /*
- * ============================================================
- * ADRENO DRIVER MODULE — GAME EXCLUSION DAEMON (NATIVE C)
- * ============================================================
+ * adreno_ged — Adreno Game Exclusion Daemon
  *
- * Developer  : @pica_pica_picachu
- * Channel    : @zesty_pic (driver channel)
+ * Switches debug.hwui.renderer to skiagl when an excluded game or app
+ * enters the foreground, then restores the configured renderer once all
+ * excluded processes have exited.
  *
- * ⚠️  ANTI-THEFT NOTICE ⚠️
- * This module was developed by @pica_pica_picachu.
- * If someone claims this as their own work and asks for
- * donations — report them immediately to @zesty_pic.
+ * ══════════════════════════════════════════════════════════════════════
+ * DESIGN — ENCORE-INSPIRED PURE-C ARCHITECTURE
+ * ══════════════════════════════════════════════════════════════════════
  *
- * ============================================================
+ * Encore Tweaks (github.com/Rem01Gaming/encore) uses a Java companion
+ * daemon (app_process + system_monitor.apk) to call ActivityManager and
+ * write the currently-focused app to a status file.  Its C++ daemon then
+ * watches that file via inotify and acts on focus changes.
  *
- * Switches debug.hwui.renderer to skiagl when an excluded game
- * launches, restores the configured render mode when all excluded
- * games exit.
+ * We replicate the same "which app is active" signal in pure C using
+ * oom_score_adj.  ActivityManagerService continuously updates this value:
  *
- * SUPPORTED RENDER MODES (argv[1]):
- *   skiavk        — restore to skiavk
- *   skiavk_all    — restore to skiavk (skiavk_all is not a valid
- *                   hwui.renderer value; normalized to skiavk)
- *   skiavkthreaded — restore to skiavk (skiavkthreaded is only valid for
- *                    debug.renderengine.backend, not debug.hwui.renderer;
- *                    HWUI only accepts "skiavk" and "skiagl")
- *   skiaglthreaded — restore to skiagl (skiaglthreaded is only valid
- *                    for debug.renderengine.backend, not hwui.renderer)
+ *   /proc/[pid]/oom_score_adj values (AOSP ProcessList.java, stable since
+ *   Android 5.0):
+ *     0   FOREGROUND_APP_ADJ  — top app, receiving input
+ *     100 VISIBLE_APP_ADJ     — visible (split-screen, overlay, PiP)
+ *     200 PERCEPTIBLE_APP_ADJ — audible in background, navigation GPS
+ *     ≥200 services, cached, empty processes
  *
- * ANDROID APP LAUNCH MODEL (why we use FORK+COMM, not EXEC):
- *   Every Android app is born from zygote via fork(). execve() is never
- *   called for Java apps. PROC_EVENT_EXEC fires only for native binaries
- *   (sh, grep, etc.) — it would miss every game on our list.
- *   Correct sequence: PROC_EVENT_FORK (PID known, name = "zygote64") →
- *   PROC_EVENT_COMM (process renames itself to package name) →
- *   read /proc/<pid>/cmdline → fnmatch against exclusion list.
+ * Reading oom_score_adj ≤ 100 is structurally equivalent to Encore's
+ * "focused_app" query.  It correctly rejects persistent background
+ * service processes (e.g. Facebook :service has adj ≥ 200 while the
+ * app is not open).
  *
- * BUGS FIXED vs PREVIOUS VERSION:
- *   1. waitpid() was blocking the epoll loop for ~200ms per resetprop call.
- *      Fix: SIGCHLD added to signalfd mask; resetprop reaped asynchronously.
- *   2. ENOBUFS on netlink recv (kernel dropped events under load) caused
- *      a tight spin: epoll kept waking, recv kept returning -1, no break.
- *      Fix: on any persistent netlink error, remove fd from epoll and fall
- *      back to 1s /proc scan. The daemon never spins.
- *   3. SIGCHLD not blocked → zombie resetprop children accumulated.
- *      Fix: SIGCHLD blocked and routed through signalfd; waitpid(-1,WNOHANG)
- *      reaps all children on each SIGCHLD delivery.
- *   4. No restart guard → Magisk/init could restart a crashed daemon in a
- *      tight loop → watchdog reboot. Fix: PID file checked and refreshed;
- *      daemon exits cleanly (not crashes) on all error paths.
- *   5. set_renderer() forked a child but did not handle fork() == -1.
- *      Fix: fork failure falls back to direct setprop.
- *   6. skiavkthreaded/skiaglthreaded modes not handled.
- *      Fix: SDK detection at startup; g_restore_hwui set to the correct
- *      hwui.renderer value for the configured mode.
- *   7. PROC_EVENT_COMM handler was broken — zero games ever detected:
- *      a) Used process_tgid unconditionally for pending_remove().
- *         Worker threads (FinalizerDaemon, RenderThread, etc.) share their
- *         process's tgid but have distinct pids.  The first worker-thread
- *         COMM after zygote fork consumed the pending entry; the main
- *         thread's package-name COMM arrived later to find an empty table.
- *         Kernel source confirms: process_pid = task->pid (caller TID),
- *         process_tgid = task->tgid (thread group PID).
- *         Fix: if (process_pid != process_tgid) ignore — worker thread.
- *      b) Called pending_remove() BEFORE comm_could_be_app().
- *         ActivityThread.main() fires Process.setArgV0("<pre-initialized>")
- *         immediately after fork.  This fires PROC_EVENT_COMM on the main
- *         thread (pid==tgid) with comm="<pre-initialized>".  The old order
- *         called pending_remove (success, entry gone) then comm_could_be_app
- *         (fails, starts with '<').  Entry consumed before the real package
- *         name COMM from handleBindApplication() arrived 1–15 s later.
- *         Fix: comm_could_be_app() first; only remove from pending on match.
- *      c) Zygote restart detection was placed after comm_could_be_app() —
- *         making it dead code since "zygote64" never passes that filter.
- *         Fix: zygote check moved before comm_could_be_app().
- *   8. PENDING_TIMEOUT_S was 5 s — too short for heavy games (Genshin Impact,
- *      PUBG on some devices) where AMS bind + handleBindApplication can take
- *      5–15 s, causing the entry to expire before the package-name COMM.
- *      Fix: raised to 20 s.
+ * ── Detection pipeline ────────────────────────────────────────────────
  *
- * ARCHITECTURE:
- *   Launch detection : Netlink PROC_EVENT_FORK + PROC_EVENT_COMM
- *   Death detection  : pidfd_open + epoll (kernel 5.3+/Android 12+)
- *                      falls back to 1s /proc stat on older kernels
- *   Death backup     : PROC_EVENT_EXIT (belt-and-suspenders)
- *   Signals          : signalfd (SIGTERM, SIGINT, SIGHUP, SIGCHLD)
- *   Fallback         : 1s /proc scan if netlink unavailable
+ *  PRIMARY  Netlink CN_PROC  FORK + COMM + EXIT  (zero CPU overhead)
+ *           On PROC_EVENT_COMM for a matching package:
+ *             ● adj ≤ 100 → game_open() immediately (minimum latency)
+ *             ● adj > 100 → deferred; proc_scan catches it at next tick
  *
- * USAGE:  adreno_ged <skiavk|skiavk_all|skiavkthreaded|skiaglthreaded> [MODDIR]
+ *  SECONDARY  timerfd 500 ms periodic /proc scan
+ *           ● Startup: games already running when daemon started
+ *           ● GROUP-2 Meta apps coming to foreground from persistent
+ *             background (oom_score_adj change, no new COMM event)
+ *           ● Missed netlink events (belt-and-suspenders)
+ *           Structurally equivalent to Encore's inotify-on-status-file.
+ *
+ *  DEATH    pidfd_open + epoll  (identical to Encore's PIDTracker)
+ *           Kernel wakes epoll the instant the process exits.
+ *           Fallback: /proc existence check every 500 ms tick.
+ *
+ *  BACKUP   PROC_EVENT_EXIT — instant exit notification from kernel.
+ *
+ * ── Two groups of excluded packages ──────────────────────────────────
+ *
+ *  GROUP 1 — UE4 / native-Vulkan games (PUBG, Genshin, CoD, …)
+ *    Problem: game engine creates VkDevice on RHI thread; HWUI in
+ *    skiavk creates a second VkDevice in the same process → SIGSEGV.
+ *    Fix: skiagl while any such process is alive, because vkDestroyDevice
+ *    is only called on process exit.
+ *
+ *  GROUP 2 — Meta apps (Facebook, Instagram, WhatsApp)
+ *    Problem: HWUI Vulkan swapchain uses UBWC tile layout incompatible
+ *    with Meta native render layers → green scan-line artefact.
+ *    Fix: skiagl while any Meta process is in the foreground.
+ *    These processes are persistent; oom_score_adj is the only signal.
+ *
+ * ── Bugs fixed vs initial ged.c ──────────────────────────────────────
+ *
+ *  BUG-A  PROC_EVENT_COMM: missing pid == tgid guard → worker-thread
+ *         COMM events (RenderThread, FinalizerDaemon, …) consumed pending
+ *         entries before the main thread sent its package name.
+ *
+ *  BUG-B  comm_could_be_app() called AFTER pending_remove() →
+ *         "<pre-initialized>" COMM consumed the entry 1-15 s too early.
+ *
+ *  BUG-C  Zygote restart detection placed after comm_could_be_app() —
+ *         dead code; "zygote64" has no dot, fails the filter.
+ *
+ *  BUG-D  waitpid() inside set_renderer child-path blocked the epoll
+ *         loop ~200 ms → ENOBUFS netlink drops → tight spin → watchdog.
+ *         Fixed: SIGCHLD via signalfd, children reaped asynchronously.
+ *
+ *  BUG-E  On ENOBUFS the netlink fd was left in epoll → recv returned
+ *         -1 on every wakeup → infinite tight spin → 100% CPU.
+ *
+ *  BUG-F  No foreground verification → Meta background service COMM
+ *         events (adj ≥ 200) indistinguishable from foreground launches.
+ *
+ *  BUG-G  time(NULL) used for pending TTL → vulnerable to system clock
+ *         changes.  Fixed: CLOCK_MONOTONIC via clock_gettime().
+ *
+ *  BUG-H  pidfd_open(pid, 0) does not set FD_CLOEXEC on kernels < 5.10.
+ *         Fixed: explicit fcntl(F_SETFD, FD_CLOEXEC) after every open.
+ *
+ *  BUG-I  proc_scan eviction only checked pidfd==-1 games; epoll-tracked
+ *         games could get stuck if the epoll event was missed.
+ *         Fixed: evict ALL active games whose /proc entry has vanished.
+ *
+ *  BUG-J  Pending table expired only inside pending_add(); under low
+ *         fork rate it could fill with stale entries and drop new ones.
+ *         Fixed: pending_expire() called on every 500 ms timer tick.
+ *
+ *  BUG-K  NL_BUF_SIZE 8192 too small for burst of events at boot.
+ *         Fixed: raised to 16384 (≈ 200 CN_PROC events per recv).
+ *
+ * USAGE:  adreno_ged <restore-mode> [MODDIR]
+ *         restore-mode: skiavk | skiavk_all | skiavkthreaded | skiagl
+ *         MODDIR: module directory path (for game_exclusion_list.sh)
  */
 
 #define _GNU_SOURCE
+
+#include <ctype.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <fnmatch.h>
+#include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <fnmatch.h>
-#include <dirent.h>
-#include <ctype.h>
-#include <stdarg.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <sys/epoll.h>
 #include <sys/signalfd.h>
-#include <sys/syscall.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/timerfd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <sys/socket.h>
 
-#include <linux/netlink.h>
-#include <linux/connector.h>
 #include <linux/cn_proc.h>
-#include <sys/system_properties.h>   /* __system_property_get, PROP_VALUE_MAX */
+#include <linux/connector.h>
+#include <linux/netlink.h>
 
-/* pidfd_open syscall — not in all bionic versions */
+#include <sys/system_properties.h>
+
+/* ── pidfd_open syscall number ──────────────────────────────────────── */
 #ifndef __NR_pidfd_open
-#  define __NR_pidfd_open 434
+#  define __NR_pidfd_open 434   /* arm64 and arm both use 434 */
 #endif
-static inline int sys_pidfd_open(pid_t pid, unsigned int flags) {
-    return (int)syscall(__NR_pidfd_open, (long)pid, (long)(unsigned long)flags);
+static inline int sys_pidfd_open(pid_t pid, unsigned int flags)
+{
+    return (int)syscall((long)__NR_pidfd_open, (long)pid,
+                        (long)(unsigned long)flags);
 }
 
-/* ── Limits ──────────────────────────────────────────────────────────────── */
-#define MAX_PKGS          256   /* was 128; increased for large user-custom lists */
-#define MAX_PKG_LEN       256
-#define MAX_ACTIVE        64
-#define MAX_PENDING       128
-#define MAX_EPOLL_EVENTS  32
-#define NL_BUF_SIZE       8192
-#define PENDING_TIMEOUT_S 20
+/* ════════════════════════════════════════════════════════════════════════
+ * Constants
+ * ════════════════════════════════════════════════════════════════════════ */
 
-#define PID_FILE   "/data/local/tmp/adreno_ged_pid"
-#define STATE_FILE "/data/local/tmp/adreno_ged_active"
-#define KMSG       "/dev/kmsg"
+#define MAX_PKGS      256
+#define MAX_PKG_LEN   256
+#define MAX_ACTIVE     64
+#define MAX_ZYGOTES     4
+#define MAX_PENDING   256
 
-/* ── Package list ────────────────────────────────────────────────────────── */
+/*
+ * oom_score_adj threshold.  Values from AOSP ProcessList.java (stable
+ * since Android 5.0):
+ *   FOREGROUND_APP_ADJ  =   0
+ *   VISIBLE_APP_ADJ     = 100
+ *   PERCEPTIBLE_APP_ADJ = 200   ← first background tier
+ * Threshold 100 captures exactly the processes the user can see.
+ */
+#define FOREGROUND_ADJ_THRESHOLD 100
+
+/* NL_BUF_SIZE: BUG-K fix — 16384 holds ≈200 CN_PROC events per recv. */
+#define NL_BUF_SIZE     16384
+#define MAX_EPOLL_EVENTS 64
+
+/* timerfd: fires every 500 ms */
+#define TIMER_INTERVAL_MS 500
+
+/* /proc scan every PROC_SCAN_TICKS × 500 ms = 1 s */
+#define PROC_SCAN_TICKS   2
+
+/* GOS re-enforcement every ENFORCE_TICKS × 500 ms = 5 s */
+#define ENFORCE_TICKS    10
+
+/* Pending TTL in seconds (BUG-G: CLOCK_MONOTONIC milliseconds) */
+#define PENDING_TTL_MS  (20 * 1000LL)
+
+#define PID_FILE    "/data/local/tmp/adreno_ged_pid"
+#define STATE_FILE  "/data/local/tmp/adreno_ged_active"
+#define KMSG_PATH   "/dev/kmsg"
+
+/* ════════════════════════════════════════════════════════════════════════
+ * Package list
+ * ════════════════════════════════════════════════════════════════════════ */
+
 static char g_pkgs[MAX_PKGS][MAX_PKG_LEN];
 static int  g_npkgs = 0;
 
-static const char *LIST_PATHS[] = {
+#define LIST_PATHS_MAX 4
+static const char *g_list_paths[LIST_PATHS_MAX] = {
     "/sdcard/Adreno_Driver/Config/game_exclusion_list.sh",
     "/data/local/tmp/adreno_game_exclusion_list.sh",
-    NULL
+    NULL, /* filled from MODDIR at startup */
+    NULL  /* sentinel */
 };
+
 static const char *DEFAULT_PKGS[] = {
-    "com.tencent.ig", "com.pubg.krmobile", "com.pubg.imobile", "com.pubg.newstate",
+    /* GROUP 1 — UE4 / native-Vulkan (dual-VkDevice crash) */
+    "com.tencent.ig",
+    "com.pubg.krmobile", "com.pubg.imobile", "com.pubg.newstate",
     "com.vng.pubgmobile", "com.rekoo.pubgm", "com.tencent.tmgp.pubgmhd",
     "com.epicgames.*",
-    "com.activision.callofduty.shooter", "com.garena.game.codm",
-    "com.tencent.tmgp.cod", "com.vng.codmvn",
+    "com.activision.callofduty.shooter",
+    "com.garena.game.codm", "com.tencent.tmgp.cod", "com.vng.codmvn",
     "com.miHoYo.GenshinImpact", "com.cognosphere.GenshinImpact",
     "com.miHoYo.enterprise.HSRPrism", "com.HoYoverse.hkrpgoversea",
     "com.levelinfinite.hotta", "com.proximabeta.mfh",
     "com.HoYoverse.Nap", "com.miHoYo.ZZZ",
+    /* GROUP 2 — Meta apps (UBWC green-line artefact) */
     "com.facebook.katana", "com.facebook.orca",
-    "com.facebook.lite", "com.facebook.mlite",
+    "com.facebook.lite",   "com.facebook.mlite",
     "com.instagram.android", "com.instagram.lite", "com.instagram.barcelona",
     "com.whatsapp", "com.whatsapp.w4b",
     NULL
 };
 
-/* ── Zygote PIDs ─────────────────────────────────────────────────────────── */
-#define MAX_ZYGOTES 4
-static pid_t g_zygote_pids[MAX_ZYGOTES];
-static int   g_nzygotes = 0;
+/* ════════════════════════════════════════════════════════════════════════
+ * Global event-loop fds
+ * ════════════════════════════════════════════════════════════════════════ */
 
-/* ── Pending fork table ──────────────────────────────────────────────────── */
-typedef struct { pid_t pid; time_t born; } Pending;
-static Pending g_pending[MAX_PENDING];
-static int     g_npending = 0;
+static int g_epoll_fd  = -1;
+static int g_nl_sock   = -1;
+static int g_sig_fd    = -1;
+static int g_timer_fd  = -1;
+static int g_kmsg_fd   = -1;
+static int g_nl_failed = 0;
 
-/* ── Active games ────────────────────────────────────────────────────────── */
+static char g_restore_hwui[32] = "skiavk";
+static char g_moddir[512]      = {0};
+
+/* ── Active game table ──────────────────────────────────────────────── */
 typedef struct {
-    int   pidfd;
     pid_t pid;
+    int   pidfd;          /* ≥ 0: epoll-tracked; -1: /proc fallback */
     char  pkg[MAX_PKG_LEN];
-    int   use_poll;
 } ActiveGame;
+
 static ActiveGame g_active[MAX_ACTIVE];
 static int        g_nactive    = 0;
 static int        g_active_cnt = 0;
 
-/* ── Globals ─────────────────────────────────────────────────────────────── */
-static int  g_epoll_fd  = -1;
-static int  g_nl_sock   = -1;
-static int  g_signal_fd = -1;
-static int  g_kmsg_fd   = -1;
-static char g_restore_mode[32] = "skiavk";  /* configured mode (argv[1]) */
-static char g_restore_hwui[32] = "skiavk";  /* actual hwui.renderer to restore after game exits */
+/* ── Zygote PID set ─────────────────────────────────────────────────── */
+static pid_t g_zygote_pids[MAX_ZYGOTES];
+static int   g_nzygotes = 0;
 
-/* GOS/OEM re-enforcement: counts 1-second epoll ticks that fire while at
- * least one listed game is active.  Every GOS_ENFORCE_INTERVAL ticks we
- * read debug.hwui.renderer and re-apply "skiagl" if it was reset externally.
- * Samsung GOS and some OEM perf daemons can reset the property mid-session;
- * without this check the game gets a dual-VkDevice crash on the next
- * vkCreateDevice call.  getprop is a tiny binder call (~0.5 ms); running it
- * every 5 s adds no meaningful CPU overhead. */
-#define GOS_ENFORCE_INTERVAL 5   /* re-enforce every 5 one-second ticks */
-static int  g_enforce_ticks = 0;
-static char g_moddir[512]      = {0};
-static int  g_nl_failed        = 0;
-static int  g_sdk_ver          = 0;          /* ro.build.version.sdk — read once at startup */
+/* ── Pending-fork table ─────────────────────────────────────────────── */
+typedef struct {
+    pid_t    pid;
+    long long born_ms;   /* CLOCK_MONOTONIC milliseconds — BUG-G fix */
+} Pending;
 
-/* ═══════════════════════════════════════════════════════════════════════════
+static Pending g_pending[MAX_PENDING];
+static int     g_npending = 0;
+
+/* ── Timer counter ──────────────────────────────────────────────────── */
+static int g_timer_ticks = 0;
+
+/* ════════════════════════════════════════════════════════════════════════
+ * Monotonic clock (BUG-G fix: immune to system clock changes)
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static long long monotonic_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + (long long)(ts.tv_nsec / 1000000);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
  * Logging
- * ═══════════════════════════════════════════════════════════════════════════ */
-static void klog(const char *fmt, ...) {
-    char buf[512];
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void klog(const char *fmt, ...)
+{
+    if (g_kmsg_fd < 0) return;
+    char body[480];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
+    vsnprintf(body, sizeof(body), fmt, ap);
     va_end(ap);
-    if (g_kmsg_fd >= 0) {
-        char msg[540];
-        int n = snprintf(msg, sizeof(msg), "[ADRENO-GED] %s\n", buf);
-        (void)write(g_kmsg_fd, msg, (size_t)n);
-    }
+    char msg[512];
+    int n = snprintf(msg, sizeof(msg), "[ADRENO-GED] %s\n", body);
+    if (n > 0) (void)write(g_kmsg_fd, msg, (size_t)n);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * SDK version detection
- *
- * Called once at startup to resolve the correct hwui.renderer restore value
- * for skiavkthreaded mode.  Uses /proc/cmdline's androidboot.revision first
- * (available in kernel cmdline, no fork needed), then falls back to reading
- * the build prop file directly.  No exec() — no child process overhead.
- * ═══════════════════════════════════════════════════════════════════════════ */
-static int read_sdk_ver(void) {
-    /* Try build.prop locations in order — no exec, just file reads */
-    const char *paths[] = {
-        "/system/build.prop",
-        "/system/system/build.prop",
-        "/vendor/build.prop",
-        NULL
-    };
-    for (int i = 0; paths[i]; i++) {
-        FILE *f = fopen(paths[i], "r");
-        if (!f) continue;
-        char line[128];
-        while (fgets(line, (int)sizeof(line), f)) {
-            if (strncmp(line, "ro.build.version.sdk=", 21) == 0) {
-                int sdk = atoi(line + 21);
-                fclose(f);
-                if (sdk > 0) return sdk;
-            }
-        }
-        fclose(f);
-    }
-    return 0;
-}
+/* ════════════════════════════════════════════════════════════════════════
+ * /proc helpers
+ * ════════════════════════════════════════════════════════════════════════ */
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Package list
- * ═══════════════════════════════════════════════════════════════════════════ */
-static void load_pkg_list_from_file(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (!f) return;
-    int  inside = 0, loaded = 0;
-    char line[MAX_PKG_LEN + 32];
-    while (fgets(line, (int)sizeof(line), f)) {
-        size_t len = strlen(line);
-        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
-            line[--len] = '\0';
-        if (!inside) {
-            if (strstr(line, "GAME_EXCLUSION_PKGS=")) {
-                inside = 1;
-                char *q = strchr(line, '"');
-                if (q && *(++q) && *q != '"' && isalpha((unsigned char)*q) && loaded < MAX_PKGS) {
-                    strncpy(g_pkgs[loaded], q, MAX_PKG_LEN - 1);
-                    g_pkgs[loaded++][MAX_PKG_LEN - 1] = '\0';
-                }
-            }
-            continue;
-        }
-        if (strchr(line, '"')) break;
-        const char *p = line;
-        while (*p == ' ' || *p == '\t') p++;
-        if (!*p || *p == '#' || !isalpha((unsigned char)*p)) continue;
-        if (loaded < MAX_PKGS) {
-            strncpy(g_pkgs[loaded], p, MAX_PKG_LEN - 1);
-            g_pkgs[loaded++][MAX_PKG_LEN - 1] = '\0';
-        } else {
-            /* Silently truncated entries beyond MAX_PKGS.
-             * Log once when the limit is first hit so the user knows. */
-            static int _warned = 0;
-            if (!_warned) {
-                klog("WARNING: pkg list exceeds MAX_PKGS=%d — extra entries ignored. "
-                     "Increase MAX_PKGS and rebuild if needed.", MAX_PKGS);
-                _warned = 1;
-            }
-        }
-    }
-    fclose(f);
-    if (loaded > 0) { g_npkgs = loaded; klog("pkg list: %s (%d)", path, loaded); }
-}
-
-static void load_pkg_list(void) {
-    g_npkgs = 0;
-    for (int i = 0; LIST_PATHS[i]; i++) {
-        load_pkg_list_from_file(LIST_PATHS[i]);
-        if (g_npkgs > 0) return;
-    }
-    if (g_moddir[0]) {
-        char p[544]; snprintf(p, sizeof(p), "%s/game_exclusion_list.sh", g_moddir);
-        load_pkg_list_from_file(p);
-        if (g_npkgs > 0) return;
-    }
-    klog("pkg list not found -- using built-in defaults");
-    for (int i = 0; DEFAULT_PKGS[i] && g_npkgs < MAX_PKGS; i++) {
-        strncpy(g_pkgs[g_npkgs], DEFAULT_PKGS[i], MAX_PKG_LEN - 1);
-        g_pkgs[g_npkgs++][MAX_PKG_LEN - 1] = '\0';
-    }
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Helpers
- * ═══════════════════════════════════════════════════════════════════════════ */
-static int pkg_matches(const char *pkg) {
-    for (int i = 0; i < g_npkgs; i++)
-        if (fnmatch(g_pkgs[i], pkg, 0) == 0) return 1;
-    return 0;
-}
-
-static int read_cmdline(pid_t pid, char *out, size_t outsz) {
+/*
+ * Read argv[0] from /proc/[pid]/cmdline into @out.
+ * Strips ":processname" suffix:  "com.foo:worker" → "com.foo"
+ * Returns 1 on success, 0 if the entry is missing or a kernel thread.
+ */
+static int read_cmdline(pid_t pid, char *out, size_t sz)
+{
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/cmdline", (int)pid);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return 0;
-    ssize_t n = read(fd, out, (ssize_t)outsz - 1);
+    ssize_t n = read(fd, out, (ssize_t)sz - 1);
     close(fd);
     if (n <= 0) return 0;
     out[n] = '\0';
-    /*
-     * /proc/$PID/cmdline is NUL-separated argv.  argv[0] is the process name.
-     * The first embedded NUL is the separator between argv[0] and argv[1].
-     * strlen() stops there naturally, but make it explicit so downstream
-     * string functions see only argv[0] even if the buffer has more bytes.
-     */
-    size_t arglen = strlen(out);   /* stops at first embedded NUL */
-    out[arglen] = '\0';
-    /* Strip ':processname' suffix (e.g. "com.tencent.ig:remote" → "com.tencent.ig").
-     * Android sub-processes set argv[0] to "pkg:procname". */
+    out[strlen(out)] = '\0';   /* truncate at first embedded NUL (argv[0] end) */
     char *colon = strchr(out, ':');
     if (colon) *colon = '\0';
-    /* Reject kernel threads ([kworker/...], [migration/...]) and empty names. */
-    if (!out[0] || out[0] == '[') return 0;
-    return 1;
+    return (out[0] != '\0' && out[0] != '[');
 }
 
-static int comm_could_be_app(const char *comm) {
-    /* reject kernel threads, native daemons, etc. */
-    if (!isalpha((unsigned char)comm[0])) return 0;
-    if (strchr(comm, '.')) return 1;       /* has a dot → likely Java package */
-    if (strlen(comm) >= 15) return 1;      /* 16-char truncated package name */
+/*
+ * Read /proc/[pid]/oom_score_adj.
+ * Returns INT_MAX on any error (treat as background or already gone).
+ */
+static int read_oom_adj(pid_t pid)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/oom_score_adj", (int)pid);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0x7fffffff;
+    int adj = 0x7fffffff;
+    (void)fscanf(f, "%d", &adj);
+    fclose(f);
+    return adj;
+}
+
+/* Returns 1 if /proc/[pid] exists (process alive). */
+static int pid_alive(pid_t pid)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d", (int)pid);
+    struct stat st;
+    return (stat(path, &st) == 0);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * Package matching
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static int pkg_matches(const char *pkg)
+{
+    int i;
+    for (i = 0; i < g_npkgs; i++)
+        if (fnmatch(g_pkgs[i], pkg, 0) == 0)
+            return 1;
     return 0;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Renderer control — NON-BLOCKING
- *
- * FIX: Previous version called waitpid() which BLOCKED the event loop
- * for ~200ms. This caused netlink buffer overflows (ENOBUFS) and in turn
- * a tight epoll spin → 100% CPU → watchdog → reboot.
- *
- * Fix: SIGCHLD is routed through signalfd. Children are reaped when
- * SIGCHLD fires in the main epoll loop (see handle_signal). fork()
- * failure falls back to setprop (no child → nothing to reap).
- * ═══════════════════════════════════════════════════════════════════════════ */
-static void set_renderer(const char *mode) {
-    pid_t child = fork();
-    if (child == 0) {
-        /* child: close all fds except stderr, then exec resetprop */
-        for (int fd = 3; fd < 256; fd++) close(fd);
-        char *argv[] = { "resetprop", "debug.hwui.renderer", (char *)mode, NULL };
-        execv("/data/adb/magisk/resetprop", argv);
-        execv("/data/adb/ksu/bin/resetprop",  argv);
-        execv("/data/adb/ap/bin/resetprop",   argv);
-        /* Some ROMs (MIUI GKI, custom builds) ship resetprop at /system/bin/
-         * as a standalone binary separate from the root manager's bundle. */
-        execv("/system/bin/resetprop",        argv);
-        execvp("resetprop", argv);
-        /* resetprop not found: fall back to setprop */
-        char *sargv[] = { "setprop", "debug.hwui.renderer", (char *)mode, NULL };
-        execvp("setprop", sargv);
-        /* Both exec paths failed — log to kmsg before exiting so the failure
-         * is visible. g_kmsg_fd is inherited across fork. */
-        if (g_kmsg_fd >= 0) {
-            char _msg[128];
-            int _n = snprintf(_msg, sizeof(_msg),
-                "[ADRENO-GED] set_renderer: neither resetprop nor setprop found\n");
-            (void)write(g_kmsg_fd, _msg, (size_t)_n);
-        }
-        _exit(1);
-    } else if (child < 0) {
-        /* fork failed: try setprop directly (no child to reap) */
-        char *argv[] = { "setprop", "debug.hwui.renderer", (char *)mode, NULL };
-        pid_t fb = fork();
-        if (fb == 0) { execvp("setprop", argv); _exit(1); }
-        /* if this fork also fails, just log and continue — never crash */
-    }
-    /* Parent returns immediately. Child is reaped on SIGCHLD via signalfd. */
-    klog("renderer -> %s", mode);
+/*
+ * Heuristic pre-filter on a 15-char COMM string to avoid the more
+ * expensive read_cmdline() for every rename event.
+ * Returns 1 if the comm could plausibly be an Android package name.
+ */
+static int comm_could_be_app(const char *comm)
+{
+    if (!isalpha((unsigned char)comm[0])) return 0;
+    if (strchr(comm, '.'))               return 1;   /* has a dot */
+    return (strlen(comm) >= 14);                     /* likely truncated */
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * State files + duplicate guard
- * ═══════════════════════════════════════════════════════════════════════════ */
-static void write_state(int active) {
-    int fd = open(STATE_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    if (fd < 0) return;
-    (void)write(fd, active ? "1\n" : "0\n", 2);
-    close(fd);
-}
-static void write_pid(void) {
+/* ════════════════════════════════════════════════════════════════════════
+ * PID file / state file
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void write_pid_file(void)
+{
     char buf[32];
     int n = snprintf(buf, sizeof(buf), "%d\n", (int)getpid());
     int fd = open(PID_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
@@ -423,7 +379,17 @@ static void write_pid(void) {
     (void)write(fd, buf, (size_t)n);
     close(fd);
 }
-static int already_running(void) {
+
+static void write_state(int active)
+{
+    int fd = open(STATE_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    (void)write(fd, active ? "1\n" : "0\n", 2);
+    close(fd);
+}
+
+static int daemon_already_running(void)
+{
     int fd = open(PID_FILE, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return 0;
     char buf[32] = {0};
@@ -431,637 +397,874 @@ static int already_running(void) {
     close(fd);
     pid_t existing = (pid_t)atoi(buf);
     if (existing <= 0 || existing == getpid()) return 0;
-    if (kill(existing, 0) == 0) { klog("already running PID %d", (int)existing); return 1; }
-    return 0;
+    return (kill(existing, 0) == 0);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Zygote tracking
- * ═══════════════════════════════════════════════════════════════════════════ */
-static int is_zygote_pid(pid_t pid) {
-    for (int i = 0; i < g_nzygotes; i++)
-        if (g_zygote_pids[i] == pid) return 1;
-    return 0;
-}
-static void add_zygote_pid(pid_t pid) {
-    if (g_nzygotes >= MAX_ZYGOTES) return;
-    for (int i = 0; i < g_nzygotes; i++) if (g_zygote_pids[i] == pid) return;
-    g_zygote_pids[g_nzygotes++] = pid;
-}
-static void find_zygote_pids(void) {
-    g_nzygotes = 0;
-    DIR *d = opendir("/proc");
-    if (!d) return;
-    struct dirent *de;
-    while ((de = readdir(d))) {
-        if (!isdigit((unsigned char)de->d_name[0])) continue;
-        int ok = 1; const char *p = de->d_name;
-        while (*p) if (!isdigit((unsigned char)*p++)) { ok=0; break; }
-        if (!ok) continue;
-        pid_t pid = (pid_t)atoi(de->d_name);
-        char cmd[64];
-        if (!read_cmdline(pid, cmd, sizeof(cmd))) continue;
-        if (strcmp(cmd,"zygote64")==0 || strcmp(cmd,"zygote")==0 || strcmp(cmd,"zygote32")==0) {
-            add_zygote_pid(pid);
-            klog("zygote: %s PID=%d", cmd, (int)pid);
+/* ════════════════════════════════════════════════════════════════════════
+ * Renderer control — non-blocking (BUG-D fix)
+ *
+ * fork() + exec resetprop/setprop.  All parent fds carry O_CLOEXEC so
+ * they close automatically on exec — no manual close loop.  The child
+ * is reaped asynchronously via SIGCHLD through signalfd; the event loop
+ * is never blocked.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void set_renderer(const char *mode)
+{
+    pid_t child = fork();
+    if (child == 0) {
+        /* O_CLOEXEC on all parent fds means they close on exec automatically. */
+        char *argv[] = { "resetprop", "debug.hwui.renderer", (char *)mode, NULL };
+        execv("/data/adb/magisk/resetprop",  argv);
+        execv("/data/adb/ksu/bin/resetprop", argv);
+        execv("/data/adb/ap/bin/resetprop",  argv);
+        execv("/system/bin/resetprop",       argv);
+        execvp("resetprop", argv);
+        /* resetprop not available: fall back to setprop */
+        char *sargv[] = { "setprop", "debug.hwui.renderer", (char *)mode, NULL };
+        execvp("setprop", sargv);
+        _exit(1);
+    } else if (child < 0) {
+        /* fork failed: try setprop via a second fork */
+        pid_t fb = fork();
+        if (fb == 0) {
+            char *sargv[] = { "setprop", "debug.hwui.renderer", (char *)mode, NULL };
+            execvp("setprop", sargv);
+            _exit(1);
         }
     }
-    closedir(d);
-    if (g_nzygotes == 0) klog("WARNING: zygote not found, tracking all forks");
+    /* Parent returns immediately; child reaped on SIGCHLD. */
+    klog("renderer -> %s", mode);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Pending table
- * ═══════════════════════════════════════════════════════════════════════════ */
-static void pending_add(pid_t child) {
-    /* evict timed-out entries */
-    time_t now = time(NULL);
-    int w = 0;
-    for (int i = 0; i < g_npending; i++)
-        if (now - g_pending[i].born < PENDING_TIMEOUT_S) g_pending[w++] = g_pending[i];
-    g_npending = w;
-    if (g_npending >= MAX_PENDING) return;
-    g_pending[g_npending].pid  = child;
-    g_pending[g_npending].born = now;
-    g_npending++;
-}
-static int pending_remove(pid_t pid) {
-    for (int i = 0; i < g_npending; i++) {
-        if (g_pending[i].pid == pid) { g_pending[i] = g_pending[--g_npending]; return 1; }
-    }
-    return 0;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
+/* ════════════════════════════════════════════════════════════════════════
  * Game open / close
- * ═══════════════════════════════════════════════════════════════════════════ */
-static void game_open(const char *pkg, pid_t pid) {
-    if (g_nactive >= MAX_ACTIVE) return;
-    for (int i = 0; i < g_nactive; i++) if (g_active[i].pid == pid) return;
+ * ════════════════════════════════════════════════════════════════════════ */
 
+static void game_open(const char *pkg, pid_t pid)
+{
+    int i;
+    /* Reject duplicate PID */
+    for (i = 0; i < g_nactive; i++)
+        if (g_active[i].pid == pid) return;
+
+    if (g_nactive >= MAX_ACTIVE) {
+        klog("WARN: active table full, dropping %s PID=%d", pkg, (int)pid);
+        return;
+    }
+
+    /*
+     * Open a pidfd for instant zero-overhead exit detection.
+     * This is identical to Encore's PIDTracker mechanism:
+     *   pidfd + epoll wakes the instant the process dies.
+     *
+     * BUG-H fix: pidfd_open(pid, 0) does not set FD_CLOEXEC on kernels
+     * earlier than 5.10 (where PIDFD_CLOEXEC was introduced).  Set it
+     * explicitly so the fd does not leak into the resetprop child.
+     */
     int pfd = sys_pidfd_open(pid, 0);
+    if (pfd >= 0) {
+        if (fcntl(pfd, F_SETFD, FD_CLOEXEC) < 0) {
+            close(pfd);
+            pfd = -1;
+        }
+    }
+
     ActiveGame *ag = &g_active[g_nactive];
-    ag->pidfd    = pfd;
-    ag->pid      = pid;
-    ag->use_poll = (pfd < 0) ? 1 : 0;
+    ag->pid   = pid;
+    ag->pidfd = pfd;
     strncpy(ag->pkg, pkg, MAX_PKG_LEN - 1);
     ag->pkg[MAX_PKG_LEN - 1] = '\0';
     g_nactive++;
-    g_active_cnt++;
-
-    if (g_active_cnt == 1) { set_renderer("skiagl"); write_state(1); }
-    klog("OPEN: %s PID=%d active=%d", pkg, (int)pid, g_active_cnt);
 
     if (pfd >= 0) {
-        struct epoll_event ev; ev.events = EPOLLIN; ev.data.fd = pfd;
+        struct epoll_event ev;
+        ev.events  = EPOLLIN;
+        ev.data.fd = pfd;
         if (epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, pfd, &ev) < 0) {
-            close(pfd); g_active[g_nactive-1].pidfd = -1; g_active[g_nactive-1].use_poll = 1;
+            close(pfd);
+            ag->pidfd = -1;   /* fall back to /proc poll */
         }
     }
+
+    g_active_cnt++;
+    if (g_active_cnt == 1) {
+        set_renderer("skiagl");
+        write_state(1);
+    }
+
+    klog("OPEN  %s  PID=%d  adj=%d  active=%d  pidfd=%s",
+         pkg, (int)pid, read_oom_adj(pid), g_active_cnt,
+         (ag->pidfd >= 0) ? "yes" : "no(fallback)");
 }
-static void close_game_at(int idx) {
-    char pkg[MAX_PKG_LEN];
+
+/* Remove the entry at index @idx and update active count / renderer. */
+static void close_game_at(int idx)
+{
+    char  pkg[MAX_PKG_LEN];
     pid_t pid = g_active[idx].pid;
+
     strncpy(pkg, g_active[idx].pkg, MAX_PKG_LEN - 1);
     pkg[MAX_PKG_LEN - 1] = '\0';
+
     if (g_active[idx].pidfd >= 0) {
         epoll_ctl(g_epoll_fd, EPOLL_CTL_DEL, g_active[idx].pidfd, NULL);
         close(g_active[idx].pidfd);
     }
+
+    /* Swap-remove to avoid shifting */
     g_active[idx] = g_active[--g_nactive];
+
     if (g_active_cnt > 0) g_active_cnt--;
-    if (g_active_cnt == 0) { set_renderer(g_restore_hwui); write_state(0); }
-    klog("CLOSED: %s PID=%d active=%d", pkg, (int)pid, g_active_cnt);
-}
-static void game_closed_by_pidfd(int pidfd) {
-    for (int i = 0; i < g_nactive; i++) if (g_active[i].pidfd == pidfd) { close_game_at(i); return; }
-}
-static void game_closed_by_pid(pid_t pid) {
-    for (int i = 0; i < g_nactive; i++) if (g_active[i].pid == pid) { close_game_at(i); return; }
+    if (g_active_cnt == 0) {
+        set_renderer(g_restore_hwui);
+        write_state(0);
+    }
+
+    klog("CLOSE %s  PID=%d  active=%d", pkg, (int)pid, g_active_cnt);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * /proc poll fallback
- * ═══════════════════════════════════════════════════════════════════════════ */
-static void poll_active_games(void) {
-    struct stat st;
-    for (int i = g_nactive-1; i >= 0; i--) {
-        if (!g_active[i].use_poll) continue;
-        char path[64]; snprintf(path, sizeof(path), "/proc/%d", (int)g_active[i].pid);
-        if (stat(path, &st) == 0) continue;
-        game_closed_by_pid(g_active[i].pid);
+static void game_closed_by_pidfd(int pidfd)
+{
+    int i;
+    for (i = 0; i < g_nactive; i++)
+        if (g_active[i].pidfd == pidfd) { close_game_at(i); return; }
+}
+
+static void game_closed_by_pid(pid_t pid)
+{
+    int i;
+    for (i = 0; i < g_nactive; i++)
+        if (g_active[i].pid == pid) { close_game_at(i); return; }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * Zygote tracking
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void add_zygote(pid_t pid)
+{
+    int i;
+    for (i = 0; i < g_nzygotes; i++)
+        if (g_zygote_pids[i] == pid) return;
+    if (g_nzygotes < MAX_ZYGOTES)
+        g_zygote_pids[g_nzygotes++] = pid;
+}
+
+static int is_zygote(pid_t pid)
+{
+    int i;
+    for (i = 0; i < g_nzygotes; i++)
+        if (g_zygote_pids[i] == pid) return 1;
+    return 0;
+}
+
+static void discover_zygotes(void)
+{
+    DIR *d;
+    struct dirent *de;
+
+    g_nzygotes = 0;
+    d = opendir("/proc");
+    if (!d) return;
+
+    while ((de = readdir(d)) != NULL) {
+        int ok = 1;
+        const char *p = de->d_name;
+        char cmd[32];
+        pid_t pid;
+
+        if (!isdigit((unsigned char)*p)) continue;
+        while (*p) { if (!isdigit((unsigned char)*p++)) { ok = 0; break; } }
+        if (!ok) continue;
+
+        pid = (pid_t)atoi(de->d_name);
+        if (!read_cmdline(pid, cmd, sizeof(cmd))) continue;
+        if (!strcmp(cmd, "zygote64") || !strcmp(cmd, "zygote") ||
+            !strcmp(cmd, "zygote32")) {
+            add_zygote(pid);
+            klog("zygote: %s PID=%d", cmd, (int)pid);
+        }
+    }
+    closedir(d);
+
+    if (g_nzygotes == 0)
+        klog("WARN: no zygote found; tracking all forks as candidates");
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * Pending-fork table
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * Evict entries older than PENDING_TTL_MS milliseconds.
+ * Called from both pending_add() and the 500 ms timer tick (BUG-J fix).
+ */
+static void pending_expire(void)
+{
+    long long now = monotonic_ms();
+    int i, w = 0;
+    for (i = 0; i < g_npending; i++) {
+        if ((now - g_pending[i].born_ms) < PENDING_TTL_MS)
+            g_pending[w++] = g_pending[i];
+    }
+    g_npending = w;
+}
+
+static void pending_add(pid_t pid)
+{
+    pending_expire();
+    if (g_npending < MAX_PENDING) {
+        g_pending[g_npending].pid     = pid;
+        g_pending[g_npending].born_ms = monotonic_ms();
+        g_npending++;
     }
 }
-static void proc_scan_for_games(void) {
-    DIR *d = opendir("/proc"); if (!d) return;
+
+/* Returns 1 and removes the entry if pid is found; 0 otherwise. */
+static int pending_remove(pid_t pid)
+{
+    int i;
+    for (i = 0; i < g_npending; i++) {
+        if (g_pending[i].pid == pid) {
+            g_pending[i] = g_pending[--g_npending];
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * Package list loading (defined before handle_signals so SIGHUP can call
+ * load_pkg_list() directly without a forward declaration)
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void load_from_file(const char *path)
+{
+    FILE *f;
+    int inside = 0, loaded = 0;
+    char line[MAX_PKG_LEN + 64];
+
+    f = fopen(path, "r");
+    if (!f) return;
+
+    while (fgets(line, (int)sizeof(line), f)) {
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
+            line[--len] = '\0';
+
+        if (!inside) {
+            if (strstr(line, "GAME_EXCLUSION_PKGS=")) {
+                inside = 1;
+                /* Single-line form: GAME_EXCLUSION_PKGS="pkg1 pkg2" */
+                char *q = strchr(line, '"');
+                if (q && *(++q) && *q != '"' &&
+                    isalpha((unsigned char)*q) && loaded < MAX_PKGS) {
+                    strncpy(g_pkgs[loaded], q, MAX_PKG_LEN - 1);
+                    g_pkgs[loaded++][MAX_PKG_LEN - 1] = '\0';
+                }
+            }
+            continue;
+        }
+
+        /* Multi-line heredoc ends at the closing quote */
+        if (strchr(line, '"')) break;
+
+        {
+            const char *p = line;
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p || *p == '#' || !isalpha((unsigned char)*p)) continue;
+            if (loaded < MAX_PKGS) {
+                strncpy(g_pkgs[loaded], p, MAX_PKG_LEN - 1);
+                g_pkgs[loaded++][MAX_PKG_LEN - 1] = '\0';
+            }
+        }
+    }
+
+    fclose(f);
+    if (loaded > 0) {
+        g_npkgs = loaded;
+        klog("pkg list: %s  (%d packages)", path, loaded);
+    }
+}
+
+static void load_pkg_list(void)
+{
+    int i;
+    g_npkgs = 0;
+    for (i = 0; g_list_paths[i] != NULL; i++) {
+        load_from_file(g_list_paths[i]);
+        if (g_npkgs > 0) return;
+    }
+    klog("no list file found — using built-in defaults");
+    for (i = 0; DEFAULT_PKGS[i] != NULL && g_npkgs < MAX_PKGS; i++) {
+        strncpy(g_pkgs[g_npkgs], DEFAULT_PKGS[i], MAX_PKG_LEN - 1);
+        g_pkgs[g_npkgs++][MAX_PKG_LEN - 1] = '\0';
+    }
+    klog("built-in defaults loaded (%d packages)", g_npkgs);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * /proc scan — primary "focused-app" detection
+ *
+ * Structurally equivalent to Encore reading its inotify-fed system_status
+ * cache populated by the Java ActivityManager companion.  We achieve the
+ * same result by directly reading oom_score_adj from procfs.
+ *
+ * BUG-I fix: evict ALL active games whose /proc entry has vanished, not
+ * only the pidfd==-1 (fallback) subset.  pidfd-tracked games with a lost
+ * epoll event would otherwise stay in the table forever.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void proc_scan(void)
+{
+    DIR *d;
     struct dirent *de;
-    while ((de = readdir(d))) {
-        if (!isdigit((unsigned char)de->d_name[0])) continue;
-        int ok=1; const char *p=de->d_name;
-        while(*p) if(!isdigit((unsigned char)*p++)){ok=0;break;}
-        if(!ok) continue;
-        pid_t pid=(pid_t)atoi(de->d_name); if(pid<=1) continue;
-        int found=0;
-        for(int i=0;i<g_nactive;i++) if(g_active[i].pid==pid){found=1;break;}
-        if(found) continue;
+    int i;
+
+    /* Step 1: evict all active games that are no longer alive (BUG-I fix) */
+    for (i = g_nactive - 1; i >= 0; i--) {
+        if (!pid_alive(g_active[i].pid)) {
+            klog("scan-evict: %s PID=%d gone",
+                 g_active[i].pkg, (int)g_active[i].pid);
+            close_game_at(i);
+        }
+    }
+
+    /* Step 2: scan /proc for foreground matching processes */
+    d = opendir("/proc");
+    if (!d) return;
+
+    while ((de = readdir(d)) != NULL) {
+        int ok = 1, tracked = 0;
+        const char *p = de->d_name;
+        pid_t pid;
+        int adj;
         char pkg[MAX_PKG_LEN];
-        if(!read_cmdline(pid,pkg,sizeof(pkg))) continue;
-        if(!pkg_matches(pkg)) continue;
-        /* BUG2 FIX: skip Meta background services in /proc fallback scan too.
-         * Same rationale as startup_scan and COMM handler. */
-        if (strncmp(pkg, "com.facebook.", 13) == 0 ||
-            strncmp(pkg, "com.instagram.", 14) == 0 ||
-            strcmp(pkg,  "com.whatsapp") == 0 ||
-            strcmp(pkg,  "com.whatsapp.w4b") == 0) continue;
-        game_open(pkg,pid);
+
+        if (!isdigit((unsigned char)*p)) continue;
+        while (*p) { if (!isdigit((unsigned char)*p++)) { ok = 0; break; } }
+        if (!ok) continue;
+
+        pid = (pid_t)atoi(de->d_name);
+        if (pid <= 1) continue;
+
+        for (i = 0; i < g_nactive; i++) {
+            if (g_active[i].pid == pid) { tracked = 1; break; }
+        }
+        if (tracked) continue;
+
+        /*
+         * Foreground check BEFORE reading cmdline — oom_score_adj is a
+         * single integer read vs cmdline which requires opening and reading
+         * a file.  Reject background processes cheaply.
+         *
+         * This is the Encore-inspired detection: adj ≤ 100 ≡ "focused_app"
+         * as set by ActivityManagerService.
+         */
+        adj = read_oom_adj(pid);
+        if (adj > FOREGROUND_ADJ_THRESHOLD) continue;
+
+        if (!read_cmdline(pid, pkg, sizeof(pkg))) continue;
+        if (!pkg_matches(pkg)) continue;
+
+        klog("scan: foreground match  %s  PID=%d  adj=%d", pkg, (int)pid, adj);
+        game_open(pkg, pid);
     }
     closedir(d);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Netlink setup
- * ═══════════════════════════════════════════════════════════════════════════ */
-/* Send PROC_CN_MCAST_IGNORE before closing the netlink socket on clean exit.
- * The kernel's proc_event_num_listeners counter is NOT decremented when the
- * socket is closed — only PROC_CN_MCAST_IGNORE decrements it.  Without this,
- * a daemon restart loop (OOM-kill + relaunch) accumulates the counter upward.
- * While this causes no functional problem for our single listener (events still
- * flow as long as count > 0), sending IGNORE is correct kernel-citizen behavior
- * and keeps the counter accurate for any other proc-connector users on the device.
- * Not called on SIGKILL (cannot run cleanup code); only on SIGTERM/SIGINT. */
-static void nl_send_ignore(void) {
-    if (g_nl_sock < 0) return;
-    unsigned char buf[NLMSG_SPACE(sizeof(struct cn_msg) + sizeof(enum proc_cn_mcast_op))];
+/* ════════════════════════════════════════════════════════════════════════
+ * PROC_EVENT_COMM handler
+ *
+ * All three COMM bugs (A, B, C) fixed here.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void handle_comm(pid_t pid, pid_t tgid, const char *comm)
+{
+    char pkg[MAX_PKG_LEN];
+    int adj;
+
+    /*
+     * BUG-A fix: reject worker-thread COMM events.
+     *
+     * Kernel cn_proc.h documents:
+     *   process_pid  = task->pid   (TID of the calling thread)
+     *   process_tgid = task->tgid  (userspace process PID)
+     *
+     * Worker threads (RenderThread, FinalizerDaemon, HeapTaskDaemon, …)
+     * have pid != tgid.  Only the main thread sets the process's visible
+     * name.  Rejecting pid != tgid prevents worker-thread renames from
+     * consuming pending entries before the main thread's package-name COMM.
+     */
+    if (pid != tgid) return;
+
+    /*
+     * BUG-C fix: detect zygote restart BEFORE the app-name filter.
+     *
+     * "zygote64" has no '.' and length < 14, so it would be discarded by
+     * comm_could_be_app().  The old code placed this check after that
+     * filter — dead code for every genuine zygote restart.
+     */
+    if (!strcmp(comm, "zygote64") || !strcmp(comm, "zygote") ||
+        !strcmp(comm, "zygote32")) {
+        if (pending_remove(tgid)) {
+            add_zygote(tgid);
+            klog("new zygote PID=%d", (int)tgid);
+        }
+        return;
+    }
+
+    /*
+     * BUG-B fix: pre-filter comm BEFORE consuming the pending entry.
+     *
+     * ActivityThread.main() calls Process.setArgV0("<pre-initialized>")
+     * immediately after fork.  This fires PROC_EVENT_COMM on the main
+     * thread (pid == tgid) with comm = "<pre-initialized>", which fails
+     * isalpha at comm[0].
+     *
+     * OLD order: pending_remove() → comm_could_be_app() → return
+     *   The entry was consumed on "<pre-initialized>"; the real package-
+     *   name COMM arrived 1–15 s later to find an empty pending table.
+     *
+     * NEW order: filter first; pending_remove() is non-gating cleanup.
+     * The pending entry is preserved for the real package-name COMM.
+     */
+    if (!comm_could_be_app(comm)) return;
+
+    /*
+     * Non-gating cleanup.  USAP-pool processes may have been pre-forked
+     * minutes ago; their pending entries may already have expired.
+     * The absence of a pending entry must NOT block game detection.
+     */
+    pending_remove(tgid);
+
+    if (!read_cmdline(tgid, pkg, sizeof(pkg))) return;
+    if (!pkg_matches(pkg)) return;
+
+    /*
+     * BUG-F fix: foreground verification via oom_score_adj.
+     *
+     * When a game is freshly launched, AMS sets adj = 0 within a few ms.
+     * When a Meta :service process renames itself (OS background restart),
+     * adj is typically ≥ 200 — the user has not opened the app.
+     *
+     *   adj ≤ threshold → open immediately (minimum detection latency)
+     *   adj > threshold → defer; proc_scan() opens it at next 500 ms tick
+     *                     once AMS sets adj ≤ 100 (real foreground)
+     *
+     * This gives correctness (no false positives from background services)
+     * AND low latency (typically ≤ first COMM event for game launches).
+     */
+    adj = read_oom_adj(tgid);
+    if (adj <= FOREGROUND_ADJ_THRESHOLD) {
+        klog("COMM: immediate  %s  PID=%d  adj=%d", pkg, (int)tgid, adj);
+        game_open(pkg, tgid);
+    } else {
+        klog("COMM: deferred(adj=%d)  %s  PID=%d", adj, pkg, (int)tgid);
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * Netlink socket setup and teardown
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void nl_send_mcast_op(int sock, enum proc_cn_mcast_op op)
+{
+    unsigned char buf[NLMSG_SPACE(sizeof(struct cn_msg) +
+                                  sizeof(enum proc_cn_mcast_op))];
+    struct nlmsghdr *nlh;
+    struct cn_msg *cn;
+    struct sockaddr_nl dst;
+
     memset(buf, 0, sizeof(buf));
-    struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
+    nlh = (struct nlmsghdr *)buf;
     nlh->nlmsg_len  = sizeof(buf);
     nlh->nlmsg_type = NLMSG_DONE;
     nlh->nlmsg_pid  = (unsigned int)getpid();
-    struct cn_msg *cn = (struct cn_msg *)NLMSG_DATA(nlh);
-    cn->id.idx = CN_IDX_PROC; cn->id.val = CN_VAL_PROC;
+
+    cn = (struct cn_msg *)NLMSG_DATA(nlh);
+    cn->id.idx = CN_IDX_PROC;
+    cn->id.val = CN_VAL_PROC;
     cn->len    = sizeof(enum proc_cn_mcast_op);
-    *((enum proc_cn_mcast_op *)cn->data) = PROC_CN_MCAST_IGNORE;
-    struct sockaddr_nl dest;
-    memset(&dest, 0, sizeof(dest));
-    dest.nl_family = AF_NETLINK; dest.nl_pid = 0; dest.nl_groups = CN_IDX_PROC;
-    (void)sendto(g_nl_sock, buf, sizeof(buf), 0,
-                 (struct sockaddr *)&dest, sizeof(dest));
+    *((enum proc_cn_mcast_op *)cn->data) = op;
+
+    memset(&dst, 0, sizeof(dst));
+    dst.nl_family = AF_NETLINK;
+    dst.nl_pid    = 0;
+    dst.nl_groups = CN_IDX_PROC;
+
+    (void)sendto(sock, buf, sizeof(buf), 0,
+                 (struct sockaddr *)&dst, sizeof(dst));
 }
 
-static int netlink_open(void) {
-    int sock = socket(PF_NETLINK, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, NETLINK_CONNECTOR);
-    if (sock < 0) { klog("nl socket: %s", strerror(errno)); return -1; }
-
+static int netlink_open(void)
+{
+    int sock;
     struct sockaddr_nl sa;
+
+    sock = socket(PF_NETLINK,
+                  SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
+                  NETLINK_CONNECTOR);
+    if (sock < 0) {
+        klog("netlink socket: %s", strerror(errno));
+        return -1;
+    }
+
     memset(&sa, 0, sizeof(sa));
     sa.nl_family = AF_NETLINK;
     sa.nl_groups = CN_IDX_PROC;
     sa.nl_pid    = (unsigned int)getpid();
+
     if (bind(sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        klog("nl bind: %s", strerror(errno)); close(sock); return -1;
+        klog("netlink bind: %s", strerror(errno));
+        close(sock);
+        return -1;
     }
 
-    /* send PROC_CN_MCAST_LISTEN using flat buffer (avoids FAM warning) */
-    unsigned char buf[NLMSG_SPACE(sizeof(struct cn_msg) + sizeof(enum proc_cn_mcast_op))];
-    memset(buf, 0, sizeof(buf));
-    struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
-    nlh->nlmsg_len  = sizeof(buf);
-    nlh->nlmsg_type = NLMSG_DONE;
-    nlh->nlmsg_pid  = (unsigned int)getpid();
-    struct cn_msg *cn = (struct cn_msg *)NLMSG_DATA(nlh);
-    cn->id.idx = CN_IDX_PROC; cn->id.val = CN_VAL_PROC;
-    cn->len    = sizeof(enum proc_cn_mcast_op);
-    *((enum proc_cn_mcast_op *)cn->data) = PROC_CN_MCAST_LISTEN;
-
-    struct sockaddr_nl dest;
-    memset(&dest, 0, sizeof(dest));
-    dest.nl_family = AF_NETLINK; dest.nl_pid = 0; dest.nl_groups = CN_IDX_PROC;
-    if (sendto(sock, buf, sizeof(buf), 0, (struct sockaddr *)&dest, sizeof(dest)) < 0) {
-        klog("nl subscribe: %s", strerror(errno)); close(sock); return -1;
-    }
-    klog("netlink: ready (FORK+COMM+EXIT)");
+    nl_send_mcast_op(sock, PROC_CN_MCAST_LISTEN);
+    klog("netlink ready (FORK + COMM + EXIT)");
     return sock;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Netlink event handler
- *
- * FIX: On recv error (including ENOBUFS = kernel dropped events under load),
- * we remove the socket from epoll and fall back to /proc polling.
- * Previously: logged and returned, but socket stayed in epoll → kept waking
- * → recv kept returning -1 → tight spin → 100% CPU → watchdog → reboot.
- * ═══════════════════════════════════════════════════════════════════════════ */
-static void handle_netlink(void) {
-    char buf[NL_BUF_SIZE] __attribute__((aligned(__alignof__(struct nlmsghdr))));
+/*
+ * Send PROC_CN_MCAST_IGNORE before closing so the kernel decrements
+ * proc_event_num_listeners correctly.  Without this, a daemon crash-
+ * restart loop accumulates the counter (harmless functionally, but wrong).
+ */
+static void netlink_close_gracefully(void)
+{
+    if (g_nl_sock < 0) return;
+    nl_send_mcast_op(g_nl_sock, PROC_CN_MCAST_IGNORE);
+    close(g_nl_sock);
+    g_nl_sock = -1;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * Netlink event dispatch
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void handle_netlink(void)
+{
+    /* BUG-K fix: 16384-byte buffer holds ≈200 CN_PROC events per recv */
+    char buf[NL_BUF_SIZE] __attribute__((aligned(NLMSG_ALIGNTO)));
     ssize_t len = recv(g_nl_sock, buf, sizeof(buf), 0);
+
     if (len < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return;
-        /* Any other error (including ENOBUFS): disable netlink, use /proc poll */
-        klog("nl recv error %d (%s) -- falling back to /proc poll", errno, strerror(errno));
+        /*
+         * BUG-E fix: any persistent recv error (ENOBUFS under burst load,
+         * ECONNRESET, etc.) must remove the fd from epoll.
+         * Previously the fd was left in epoll after the error, causing
+         * recv() to return -1 on every wakeup → infinite spin → watchdog.
+         */
+        klog("netlink recv: %s — disabling, /proc scan is now primary",
+             strerror(errno));
         epoll_ctl(g_epoll_fd, EPOLL_CTL_DEL, g_nl_sock, NULL);
-        close(g_nl_sock);
+        netlink_close_gracefully();
         g_nl_sock   = -1;
         g_nl_failed = 1;
         return;
     }
-    if (len == 0) return;
 
-    struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
-    for (; NLMSG_OK(nlh, (unsigned int)len); nlh = NLMSG_NEXT(nlh, len)) {
-        if (nlh->nlmsg_type != NLMSG_DONE) continue;
-        struct cn_msg *cn = (struct cn_msg *)NLMSG_DATA(nlh);
-        if (cn->id.idx != CN_IDX_PROC || cn->id.val != CN_VAL_PROC) continue;
-        const struct proc_event *ev = (const struct proc_event *)cn->data;
+    {
+        struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
+        for (; NLMSG_OK(nlh, (unsigned int)len); nlh = NLMSG_NEXT(nlh, len)) {
+            const struct proc_event *ev;
+            struct cn_msg *cn;
 
-        switch (ev->what) {
-        case PROC_EVENT_FORK: {
-            pid_t parent = ev->event_data.fork.parent_tgid;
-            pid_t child  = ev->event_data.fork.child_tgid;
-            if (g_nzygotes == 0 || is_zygote_pid(parent) || parent == 1)
-                pending_add(child);
-            break;
-        }
-        case PROC_EVENT_COMM: {
-            pid_t pid  = ev->event_data.comm.process_pid;   /* TID of renaming thread */
-            pid_t tgid = ev->event_data.comm.process_tgid;  /* process PID (thread group) */
+            if (nlh->nlmsg_type != NLMSG_DONE) continue;
 
-            /*
-             * BUG FIX 1 — worker-thread COMM events must not consume pending entries.
-             *
-             * PROC_EVENT_COMM fires for every prctl(PR_SET_NAME) call, from any
-             * thread.  Kernel source (drivers/connector/cn_proc.c):
-             *     ev->event_data.comm.process_pid  = task->pid;   // caller's TID
-             *     ev->event_data.comm.process_tgid = task->tgid;  // thread group PID
-             *
-             * Worker threads (RenderThread, FinalizerDaemon, HeapTaskDaemon,
-             * ReferenceQueueDaemon, AsyncTask, …) share the main thread's tgid but
-             * have their own TIDs, so process_pid != process_tgid for them.
-             *
-             * OLD CODE:  pid_t pid = ev->event_data.comm.process_tgid;
-             *            if (!pending_remove(pid)) break;
-             *            if (!comm_could_be_app(comm)) break;
-             *
-             * What happened on a real launch (PUBG / Genshin):
-             *   1. Zygote forks  → FORK event → pending_add(child_tgid)
-             *   2. ActivityThread.main() runs:
-             *        Process.setArgV0("<pre-initialized>")  → COMM: pid==tgid,
-             *        comm = "<pre-initialized>" (starts with '<', fails isalpha)
-             *        OLD CODE: pending_remove(tgid) → SUCCESS → ENTRY CONSUMED
-             *                  comm_could_be_app("<pre-initialized>") → 0 → break
-             *        → pending entry gone, game MISSED PERMANENTLY
-             *   3. handleBindApplication() runs (1–15 s later):
-             *        Process.setArgV0("com.tencent.ig") → COMM: pid==tgid,
-             *        comm = "com.tencent.i" (15-char truncation)
-             *        OLD CODE: pending_remove(tgid) → 0 (already gone) → break
-             *
-             * FIX A: reject worker threads immediately (process_pid != process_tgid).
-             * FIX B: check comm_could_be_app() BEFORE pending_remove() so that
-             *        intermediate names like "<pre-initialized>" do not consume the
-             *        entry — it is preserved until the real package-name COMM fires.
-             */
-            if (pid != tgid) break;   /* worker thread rename — preserve pending entry */
+            cn = (struct cn_msg *)NLMSG_DATA(nlh);
+            if (cn->id.idx != CN_IDX_PROC || cn->id.val != CN_VAL_PROC)
+                continue;
 
-            const char *comm_str = ev->event_data.comm.comm;
+            ev = (const struct proc_event *)cn->data;
+            switch (ev->what) {
 
-            /*
-             * Zygote restart detection — MUST come before comm_could_be_app().
-             * "zygote64", "zygote", "zygote32" have no '.' and length < 15, so they
-             * fail comm_could_be_app().  When init restarts a crashed zygote its
-             * child enters pending via the parent==1 path in PROC_EVENT_FORK.
-             * Detect it here before the app-name filter so we can track the new PID.
-             * Note: the old code placed this check AFTER comm_could_be_app(), making
-             * it dead code — zygote names never pass that filter.
-             */
-            if (strcmp(comm_str, "zygote64") == 0 ||
-                strcmp(comm_str, "zygote")   == 0 ||
-                strcmp(comm_str, "zygote32") == 0) {
-                if (pending_remove(tgid)) {
-                    add_zygote_pid(tgid);
-                    klog("new zygote PID=%d", (int)tgid);
-                }
+            case PROC_EVENT_FORK: {
+                pid_t parent = ev->event_data.fork.parent_tgid;
+                pid_t child  = ev->event_data.fork.child_tgid;
+                /*
+                 * Track children of zygote.  When zygote is unknown
+                 * (discover_zygotes() ran before any zygote was up),
+                 * fall back to tracking all forks from init (parent==1)
+                 * and from any process.
+                 */
+                if (g_nzygotes == 0 || is_zygote(parent) || parent == 1)
+                    pending_add(child);
                 break;
             }
 
-            /* comm_could_be_app: pre-filter. Rejects usap64/usap32, <pre-initialized>,
-             * kernel threads, native daemons. Only names with '.' or ≥15 chars pass. */
-            if (!comm_could_be_app(comm_str)) break;
+            case PROC_EVENT_COMM:
+                /*
+                 * process_pid  = TID of the renaming thread (task->pid)
+                 * process_tgid = process PID as seen in userspace (task->tgid)
+                 * comm         = char[TASK_COMM_LEN=16], NUL-terminated
+                 */
+                handle_comm(ev->event_data.comm.process_pid,
+                            ev->event_data.comm.process_tgid,
+                            ev->event_data.comm.comm);
+                break;
 
-            /* USAP FIX: pending_remove is cleanup only, not a detection gate.
-             * Android Q+ USAP pool pre-forks processes minutes before specialization.
-             * With PENDING_TIMEOUT_S=20 the entry expires before the package-name COMM
-             * fires. Old gate: "if (!pending_remove(tgid)) break" missed all USAP games.
-             * Fix: always read_cmdline + pkg_matches after comm_could_be_app passes.
-             * game_open() guards against double-registration (pid already in g_active). */
-            (void)pending_remove(tgid);
+            case PROC_EVENT_EXIT:
+                game_closed_by_pid(ev->event_data.exit.process_tgid);
+                break;
 
-            char pkg[MAX_PKG_LEN];
-            if (!read_cmdline(tgid, pkg, sizeof(pkg))) break;
-
-            /* BUG2 FIX: skip Meta background services in COMM detection.
-             * Meta apps are on the exclusion list for UBWC artifact on active HWUI
-             * surfaces. Their background processes rename themselves via prctl at
-             * service bind — this COMM event is NOT a foreground launch. Treating it
-             * as one would set skiagl and never restore (background services live forever).
-             * am_proc_start (shell daemon) and PROC_EVENT_FORK+real-package-COMM (here)
-             * handle the actual foreground open correctly via read_cmdline at that point.
-             * Skip Meta in COMM handler; they are correctly detected at FORK+COMM
-             * for genuine user-initiated foreground launches only. */
-            {
-                const char *_skip = NULL;
-                if (strncmp(pkg, "com.facebook.", 13) == 0 ||
-                    strncmp(pkg, "com.instagram.", 14) == 0 ||
-                    strcmp(pkg,  "com.whatsapp") == 0 ||
-                    strcmp(pkg,  "com.whatsapp.w4b") == 0)
-                    _skip = pkg;
-                if (_skip) {
-                    /* Only act if this was a genuine fresh fork from zygote — i.e.,
-                     * the pending entry existed (process was just created, not a
-                     * background service rename). Since we already called pending_remove
-                     * above (cleanup), re-check by asking if /proc/$tgid/cmdline
-                     * was JUST created (process age < 5s). */
-                    struct stat _st;
-                    char _ppath[64];
-                    snprintf(_ppath, sizeof(_ppath), "/proc/%d", (int)tgid);
-                    time_t _now = time(NULL);
-                    if (stat(_ppath, &_st) == 0 && (_now - _st.st_ctime) > 5) {
-                        /* Process is older than 5s — background service rename, not fresh launch */
-                        klog("COMM: skip Meta background rename %s PID=%d (age>5s)", pkg, (int)tgid);
-                        break;
-                    }
-                    /* Fresh process (<5s old) — genuine foreground open → fall through */
-                }
+            default:
+                break;
             }
-
-            if (pkg_matches(pkg)) game_open(pkg, tgid);
-            break;
-        }
-        case PROC_EVENT_EXIT:
-            game_closed_by_pid(ev->event_data.exit.process_tgid);
-            break;
-        default:
-            break;
         }
     }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Signal handler (via signalfd)
- *
- * FIX: SIGCHLD is now routed through signalfd so we can reap resetprop
- * children without blocking the event loop. waitpid(-1, WNOHANG) reaps
- * all children that have exited since the last check.
- * ═══════════════════════════════════════════════════════════════════════════ */
-static void handle_signal(void) {
+/* ════════════════════════════════════════════════════════════════════════
+ * Timer handler — fires every 500 ms
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void handle_timer(void)
+{
+    uint64_t expirations;
+    (void)read(g_timer_fd, &expirations, sizeof(expirations));
+    g_timer_ticks++;
+
+    /* BUG-J fix: expire stale pending entries on every tick, not only on
+     * pending_add().  Under low fork rate the table could fill otherwise. */
+    pending_expire();
+
+    /*
+     * /proc scan.
+     * Every tick in netlink-failed mode; every PROC_SCAN_TICKS ticks (1 s)
+     * otherwise.  The scan is the primary GROUP-2 Meta detection mechanism:
+     * persistent Meta processes don't generate new COMM events when they
+     * come to the foreground — only their oom_score_adj changes, exactly
+     * like how Encore detects focused_app changes via its inotify cache.
+     */
+    if (g_nl_failed || (g_timer_ticks % PROC_SCAN_TICKS == 0))
+        proc_scan();
+
+    /*
+     * GOS / OEM re-enforcement every ENFORCE_TICKS × 500 ms = 5 s.
+     * Samsung GOS and some OEM perf daemons reset debug.hwui.renderer
+     * mid-session; re-read and correct if needed.
+     */
+    if (g_active_cnt > 0 && (g_timer_ticks % ENFORCE_TICKS == 0)) {
+        char cur[PROP_VALUE_MAX] = "";
+        __system_property_get("debug.hwui.renderer", cur);
+        if (strcmp(cur, "skiagl") != 0) {
+            klog("GOS-ENFORCE: was '%s', re-applying skiagl", cur);
+            set_renderer("skiagl");
+        }
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * Cleanup — called on shutdown
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void do_cleanup(void)
+{
+    int i;
+
+    if (g_active_cnt > 0) {
+        set_renderer(g_restore_hwui);
+        write_state(0);
+    }
+
+    /* Reap outstanding resetprop/setprop children (BUG-D) */
+    while (waitpid(-1, NULL, WNOHANG) > 0) {}
+
+    for (i = 0; i < g_nactive; i++)
+        if (g_active[i].pidfd >= 0)
+            close(g_active[i].pidfd);
+
+    netlink_close_gracefully();
+    unlink(PID_FILE);
+
+    if (g_timer_fd  >= 0) { close(g_timer_fd);  g_timer_fd  = -1; }
+    if (g_sig_fd    >= 0) { close(g_sig_fd);    g_sig_fd    = -1; }
+    if (g_epoll_fd  >= 0) { close(g_epoll_fd);  g_epoll_fd  = -1; }
+    if (g_kmsg_fd   >= 0) { close(g_kmsg_fd);   g_kmsg_fd   = -1; }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * Signal handler — runs in event loop via signalfd, never in signal context
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void handle_signals(void)
+{
     struct signalfd_siginfo si;
-    while (read(g_signal_fd, &si, sizeof(si)) == (ssize_t)sizeof(si)) {
+    while (read(g_sig_fd, &si, sizeof(si)) == (ssize_t)sizeof(si)) {
         switch (si.ssi_signo) {
+
         case SIGCHLD:
-            /* Reap all exited children (resetprop processes) */
+            /* BUG-D fix: reap children asynchronously, never block */
             while (waitpid(-1, NULL, WNOHANG) > 0) {}
             break;
+
         case SIGHUP:
-            klog("SIGHUP: reloading pkg list");
-            load_pkg_list();
-            klog("reloaded (%d entries)", g_npkgs);
+            /* Reload package list from disk (e.g. after WebUI edit) */
+            klog("SIGHUP: reloading package list");
+            load_pkg_list();   /* defined above — no forward declaration needed */
+            klog("reload done (%d packages)", g_npkgs);
             break;
+
         case SIGTERM:
         case SIGINT:
             klog("signal %u: shutting down", si.ssi_signo);
-            /* restore renderer if a game was active */
-            if (g_active_cnt > 0) { set_renderer(g_restore_hwui); write_state(0); }
-            /* reap pending children before exit */
-            while (waitpid(-1, NULL, WNOHANG) > 0) {}
-            for (int i = 0; i < g_nactive; i++)
-                if (g_active[i].pidfd >= 0) close(g_active[i].pidfd);
-            /* Send PROC_CN_MCAST_IGNORE so the kernel decrements its listener
-             * count for this socket before we close it.  Keeps proc_event_num_listeners
-             * accurate across daemon restarts (OOM-kill cannot do this cleanup). */
-            nl_send_ignore();
-            unlink(PID_FILE);
-            if (g_nl_sock   >= 0) close(g_nl_sock);
-            if (g_epoll_fd  >= 0) close(g_epoll_fd);
-            if (g_signal_fd >= 0) close(g_signal_fd);
-            if (g_kmsg_fd   >= 0) close(g_kmsg_fd);
+            do_cleanup();
             _exit(0);
+
         default:
             break;
         }
     }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Startup scan
- * ═══════════════════════════════════════════════════════════════════════════ */
-static void startup_scan(void) {
-    klog("startup scan...");
-    DIR *d = opendir("/proc"); if (!d) return;
-    struct dirent *de;
-    while ((de = readdir(d))) {
-        if (!isdigit((unsigned char)de->d_name[0])) continue;
-        int ok=1; const char *p=de->d_name;
-        while(*p) if(!isdigit((unsigned char)*p++)){ok=0;break;}
-        if(!ok) continue;
-        pid_t pid=(pid_t)atoi(de->d_name); if(pid<=1) continue;
-        char pkg[MAX_PKG_LEN];
-        if(!read_cmdline(pid,pkg,sizeof(pkg))) continue;
-        if(!pkg_matches(pkg)) continue;
-        /*
-         * BUG FIX: skip Meta background services in startup_scan.
-         *
-         * Meta apps (Facebook/Messenger/Instagram/WhatsApp) are on the exclusion
-         * list for GROUP 2 (UBWC green-line artifact). Their background service
-         * processes live in /proc permanently and never exit. If the daemon crashes
-         * and restarts while a Meta service is alive, startup_scan would register
-         * it as an active game, call set_renderer("skiagl"), and g_active_cnt
-         * would never reach 0 — the renderer stays at skiagl permanently until
-         * reboot.
-         *
-         * proc_scan_for_games() already has this skip. startup_scan() was the
-         * only path missing it. The COMM handler detects genuine foreground
-         * Meta launches via the process-age guard (st_ctime < 5s).
-         */
-        if (strncmp(pkg, "com.facebook.",  13) == 0 ||
-            strncmp(pkg, "com.instagram.", 14) == 0 ||
-            strcmp(pkg,  "com.whatsapp")       == 0 ||
-            strcmp(pkg,  "com.whatsapp.w4b")   == 0) {
-            klog("startup: skip Meta background service %s PID=%d", pkg, (int)pid);
-            continue;
-        }
-        klog("startup: found %s PID=%d", pkg,(int)pid);
-        game_open(pkg,pid);
-    }
-    closedir(d);
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
+/* ════════════════════════════════════════════════════════════════════════
  * main
- * ═══════════════════════════════════════════════════════════════════════════ */
-int main(int argc, char *argv[]) {
-    /* ── Resolve configured mode and compute the hwui.renderer restore value ──
-     *
-     * g_restore_mode : the mode string as passed by service.sh (informational)
-     * g_restore_hwui : the actual debug.hwui.renderer value to resetprop when
-     *                  the last excluded game exits.  This must be a value that
-     *                  HWUI recognises; "skiavk_all" and "skiaglthreaded" are
-     *                  NOT valid hwui.renderer strings.
-     *
-     * Mode → g_restore_hwui mapping:
-     *   skiavk        → "skiavk"
-     *   skiavk_all    → "skiavk"         (skiavk_all is not a hwui.renderer value)
-     *   skiavkthreaded→ "skiavk"         (skiavkthreaded is not a hwui.renderer value;
-     *                                    HWUI only accepts "skiavk"/"skiagl")
-     *   skiaglthreaded→ "skiagl"         (skiaglthreaded is only for renderengine.backend)
-     *   anything else → "skiavk"         (safe default)
-     */
+ * ════════════════════════════════════════════════════════════════════════ */
+
+int main(int argc, char *argv[])
+{
+    sigset_t mask;
+    static char moddir_path[520];
+    struct epoll_event ev;
+    struct itimerspec its;
+
+    /* ── Parse arguments ────────────────────────────────────────────── */
     if (argc >= 2) {
-        strncpy(g_restore_mode, argv[1], sizeof(g_restore_mode) - 1);
-        g_restore_mode[sizeof(g_restore_mode) - 1] = '\0';
+        const char *m = argv[1];
+        if (!strcmp(m, "skiavk") || !strcmp(m, "skiavk_all") ||
+            !strcmp(m, "skiavkthreaded"))
+            strncpy(g_restore_hwui, "skiavk", sizeof(g_restore_hwui) - 1);
+        else if (!strcmp(m, "skiagl") || !strcmp(m, "skiaglthreaded"))
+            strncpy(g_restore_hwui, "skiagl", sizeof(g_restore_hwui) - 1);
+        else
+            strncpy(g_restore_hwui, "skiavk", sizeof(g_restore_hwui) - 1);
+        g_restore_hwui[sizeof(g_restore_hwui) - 1] = '\0';
     }
     if (argc >= 3) {
         strncpy(g_moddir, argv[2], sizeof(g_moddir) - 1);
         g_moddir[sizeof(g_moddir) - 1] = '\0';
     }
 
-    /* Read SDK version once — logged at startup */
-    g_sdk_ver = read_sdk_ver();
+    /* ── /dev/kmsg first so we can log from here on ─────────────────── */
+    g_kmsg_fd = open(KMSG_PATH, O_WRONLY | O_CLOEXEC);
 
-    /* Compute hwui.renderer restore value */
-    if (strcmp(g_restore_mode, "skiavk") == 0 ||
-        strcmp(g_restore_mode, "skiavk_all") == 0) {
-        strncpy(g_restore_hwui, "skiavk", sizeof(g_restore_hwui) - 1);
-    } else if (strcmp(g_restore_mode, "skiavkthreaded") == 0) {
-        /* "skiavkthreaded" is only a valid value for
-         * debug.renderengine.backend (SurfaceFlinger compositor), NOT for
-         * debug.hwui.renderer (per-process HWUI app renderer).
-         * HWUI only recognises "skiavk" and "skiagl" as renderer strings.
-         * Setting "skiavkthreaded" via resetprop debug.hwui.renderer is silently
-         * ignored — HWUI stays at skiagl after game exit forever.
-         * Map to "skiavk" unconditionally. */
-        strncpy(g_restore_hwui, "skiavk", sizeof(g_restore_hwui) - 1);
-    } else if (strcmp(g_restore_mode, "skiaglthreaded") == 0) {
-        /* "skiaglthreaded" is a debug.renderengine.backend value, not a valid
-         * debug.hwui.renderer value.  For HWUI we use "skiagl". */
-        strncpy(g_restore_hwui, "skiagl", sizeof(g_restore_hwui) - 1);
-    } else {
-        /* Unknown / normal mode: fall back to skiavk (daemon shouldn't run
-         * in normal mode, but be safe if service.sh passes wrong arg). */
-        strncpy(g_restore_hwui, "skiavk", sizeof(g_restore_hwui) - 1);
+    /* ── Singleton guard ─────────────────────────────────────────────── */
+    if (daemon_already_running()) {
+        klog("already running — exiting duplicate");
+        return 0;
     }
-    g_restore_hwui[sizeof(g_restore_hwui) - 1] = '\0';
 
-    g_kmsg_fd = open(KMSG, O_WRONLY|O_CLOEXEC);
-    if (already_running()) return 0;
-
+    /* ── Package list ────────────────────────────────────────────────── */
+    if (g_moddir[0]) {
+        snprintf(moddir_path, sizeof(moddir_path),
+                 "%s/game_exclusion_list.sh", g_moddir);
+        g_list_paths[2] = moddir_path;
+    }
     load_pkg_list();
     if (g_npkgs == 0) { klog("FATAL: empty package list"); return 1; }
 
-    write_pid();
-    klog("started PID=%d mode=%s hwui_restore=%s sdk=%d pkgs=%d",
-         (int)getpid(), g_restore_mode, g_restore_hwui, g_sdk_ver, g_npkgs);
+    /* ── PID file and initial state ──────────────────────────────────── */
+    write_pid_file();
+    write_state(0);
+    klog("started  PID=%d  restore=%s  packages=%d  moddir=%s",
+         (int)getpid(), g_restore_hwui, g_npkgs,
+         g_moddir[0] ? g_moddir : "(none)");
 
     /*
-     * Block ALL signals we handle before creating signalfd.
-     * SIGCHLD MUST be blocked here — otherwise a resetprop child
-     * could exit between fork() and waitpid() causing SIGCHLD to be
-     * delivered as a regular signal, killing the daemon.
+     * Block all handled signals before creating signalfd so no signal
+     * is delivered between sigprocmask and signalfd creation.
+     * SIGCHLD must be blocked so exiting children don't kill the daemon.
      */
-    sigset_t mask;
     sigemptyset(&mask);
     sigaddset(&mask, SIGTERM);
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGHUP);
-    sigaddset(&mask, SIGCHLD);   /* ← FIX: was missing, caused zombie accumulation */
+    sigaddset(&mask, SIGCHLD);
     sigprocmask(SIG_BLOCK, &mask, NULL);
-
-    /* Also ignore SIGPIPE — write to broken /dev/kmsg fd must not kill us */
     signal(SIGPIPE, SIG_IGN);
 
+    /* ── epoll ────────────────────────────────────────────────────────── */
     g_epoll_fd = epoll_create1(EPOLL_CLOEXEC);
-    if (g_epoll_fd < 0) { klog("epoll: %s", strerror(errno)); return 1; }
+    if (g_epoll_fd < 0) {
+        klog("epoll_create1: %s", strerror(errno));
+        return 1;
+    }
 
-    g_signal_fd = signalfd(-1, &mask, SFD_CLOEXEC|SFD_NONBLOCK);
-    if (g_signal_fd < 0) { klog("signalfd: %s", strerror(errno)); return 1; }
-    { struct epoll_event ev; ev.events=EPOLLIN; ev.data.fd=g_signal_fd;
-      epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, g_signal_fd, &ev); }
+    /* ── signalfd ─────────────────────────────────────────────────────── */
+    g_sig_fd = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
+    if (g_sig_fd < 0) {
+        klog("signalfd: %s", strerror(errno));
+        return 1;
+    }
+    ev.events  = EPOLLIN;
+    ev.data.fd = g_sig_fd;
+    epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, g_sig_fd, &ev);
 
-    find_zygote_pids();
+    /* ── timerfd 500 ms, CLOCK_MONOTONIC ─────────────────────────────── */
+    g_timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+    if (g_timer_fd < 0) {
+        klog("timerfd_create: %s", strerror(errno));
+        return 1;
+    }
+    its.it_value.tv_sec  = 0;
+    its.it_value.tv_nsec = (long)TIMER_INTERVAL_MS * 1000000L;
+    its.it_interval      = its.it_value;
+    timerfd_settime(g_timer_fd, 0, &its, NULL);
+    ev.events  = EPOLLIN;
+    ev.data.fd = g_timer_fd;
+    epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, g_timer_fd, &ev);
 
+    /* ── Discover zygote PIDs before subscribing to proc events ──────── */
+    discover_zygotes();
+
+    /* ── Netlink CN_PROC ─────────────────────────────────────────────── */
     g_nl_sock = netlink_open();
     if (g_nl_sock >= 0) {
-        struct epoll_event ev; ev.events=EPOLLIN; ev.data.fd=g_nl_sock;
+        ev.events  = EPOLLIN;
+        ev.data.fd = g_nl_sock;
         epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, g_nl_sock, &ev);
         g_nl_failed = 0;
     } else {
-        klog("WARNING: netlink failed -- /proc poll 1s fallback");
+        klog("netlink unavailable — /proc scan is primary detection");
         g_nl_failed = 1;
     }
 
-    startup_scan();
-    /* BUG B FIX: write_state(0) after startup_scan completes.
-     * If startup_scan found no games, g_active_cnt=0 but write_state() is
-     * only called from game_open/close_game_at — never from startup_scan
-     * itself. A stale state file (value "1") from a previous crash/OOM-kill
-     * would leave the GOS watchdog in service.sh enforcing skiagl forever.
-     * Write state=0 now unless startup_scan actually found active games.
-     * If it did find games, g_active_cnt>0 and write_state(1) was already
-     * called from game_open() — writing 0 here would be wrong, so guard it.
-     */
-    if (g_active_cnt == 0) write_state(0);
-    klog("loop: %s", g_nl_failed ? "proc-poll 1s" : "netlink+pidfd (zero overhead)");
+    /* ── Startup scan: pick up games already running ─────────────────── */
+    klog("startup scan...");
+    proc_scan();
 
-    struct epoll_event events[MAX_EPOLL_EVENTS];
-    for (;;) {
-        int timeout = -1;
-        if (g_nl_failed) {
-            timeout = 1000;
-        } else {
-            for (int i = 0; i < g_nactive; i++)
-                if (g_active[i].use_poll) { timeout = 1000; break; }
-        }
-        /* If any game is active, cap timeout at 1000ms so the nev==0 branch
-         * fires every ~1 s and can run the GOS_ENFORCE_INTERVAL check.
-         * Without this, pure netlink+pidfd mode would sleep indefinitely
-         * (timeout == -1) and never re-enforce the renderer while games run. */
-        if (g_active_cnt > 0 && timeout < 0) timeout = 1000;
+    /* ── Main event loop ─────────────────────────────────────────────── */
+    klog("loop: netlink=%s  scan=%dms  enforce=%dms",
+         g_nl_failed ? "off" : "on",
+         PROC_SCAN_TICKS  * TIMER_INTERVAL_MS,
+         ENFORCE_TICKS    * TIMER_INTERVAL_MS);
 
-        int nev = epoll_wait(g_epoll_fd, events, MAX_EPOLL_EVENTS, timeout);
-        if (nev < 0) { if (errno==EINTR) continue; klog("epoll_wait: %s",strerror(errno)); break; }
-
-        if (nev == 0) {
-            if (g_nl_failed) proc_scan_for_games();
-            poll_active_games();
-
-            /* GOS/OEM re-enforcement: every GOS_ENFORCE_INTERVAL 1-second
-             * ticks while at least one listed game is running, read the live
-             * value of debug.hwui.renderer and re-apply "skiagl" if anything
-             * (Samsung GOS, OEM perf daemon, another root module) reset it. */
-            if (g_active_cnt > 0) {
-                g_enforce_ticks++;
-                if (g_enforce_ticks >= GOS_ENFORCE_INTERVAL) {
-                    g_enforce_ticks = 0;
-                    char cur[PROP_VALUE_MAX] = "";
-                    __system_property_get("debug.hwui.renderer", cur);
-                    if (strcmp(cur, "skiagl") != 0) {
-                        klog("GOS-ENFORCE: renderer was '%s', re-applying skiagl", cur);
-                        set_renderer("skiagl");
-                    }
-                }
-            } else {
-                g_enforce_ticks = 0;  /* reset counter when no games active */
+    {
+        struct epoll_event events[MAX_EPOLL_EVENTS];
+        for (;;) {
+            int nev = epoll_wait(g_epoll_fd, events, MAX_EPOLL_EVENTS, -1);
+            int i;
+            if (nev < 0) {
+                if (errno == EINTR) continue;
+                klog("epoll_wait: %s", strerror(errno));
+                break;
             }
-            continue;
-        }
-
-        for (int i = 0; i < nev; i++) {
-            int fd = events[i].data.fd;
-            if (fd == g_signal_fd)  { handle_signal();  continue; }
-            if (fd == g_nl_sock)    { handle_netlink();  continue; }
-            if (events[i].events & EPOLLIN) game_closed_by_pidfd(fd);
+            for (i = 0; i < nev; i++) {
+                int fd = events[i].data.fd;
+                if      (fd == g_sig_fd)                    handle_signals();
+                else if (fd == g_timer_fd)                  handle_timer();
+                else if (g_nl_sock >= 0 && fd == g_nl_sock) handle_netlink();
+                else if (events[i].events & EPOLLIN)
+                    /* pidfd event: tracked game process exited */
+                    game_closed_by_pidfd(fd);
+            }
         }
     }
 
-    /* Should never reach here, but clean up anyway */
-    if (g_active_cnt > 0) { set_renderer(g_restore_hwui); write_state(0); }
-    unlink(PID_FILE);
+    do_cleanup();
     return 0;
 }

@@ -205,12 +205,10 @@ else
   echo "✓ No daemon PID file found (daemon was not active)"
 fi
 
-# Kill any lingering sub-daemons (they inherit the daemon's process group).
-# Sub-daemons are plain sh processes in their own sub-shells; kill by matching
-# the adreno_ged marker in their cmdline is not reliable from uninstall.sh.
-# Instead, we rely on the SIGTERM handler in game_excl_daemon.sh to have cleaned
-# up its children. If the daemon was killed hard (SIGKILL), any orphaned
-# sub-daemons will exit on their own when /proc/$GAME_PID disappears naturally.
+# The native adreno_ged binary handles its own cleanup on SIGTERM:
+# it restores the renderer if a game was active and removes the PID file.
+# If the binary was killed hard (SIGKILL) with a game open, the renderer
+# stays at skiagl; the module is being uninstalled so any mode is acceptable.
 
 # Restore renderer if daemon left it in skiagl state.
 #
@@ -247,7 +245,6 @@ rm -f "$_GED_PID_FILE"   2>/dev/null || true
 rm -f "$_GED_COUNT_FILE" 2>/dev/null || true
 rm -f "$_GED_ACTIVE_FILE" 2>/dev/null || true
 rmdir "$_GED_LOCK_DIR"   2>/dev/null || true
-rm -f "/data/local/tmp/adreno_game_excl_daemon.sh" 2>/dev/null || true
 
 unset _GED_PID_FILE _GED_COUNT_FILE _GED_ACTIVE_FILE _GED_LOCK_DIR _ged_pid _ged_active
 echo "✓ Game exclusion daemon state files removed"
