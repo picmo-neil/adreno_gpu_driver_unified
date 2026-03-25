@@ -1,413 +1,306 @@
-name: Build and Release Module
+name: Build Adreno GPU Driver Module
 
 on:
-  push:
-    branches: [ main ]
-    tags:     [ 'v*.*.*' ]
   workflow_dispatch:
-    inputs:
-      create_release:
-        description: 'Create a GitHub Release'
-        required: false
-        default: 'false'
-        type: boolean
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build.yml'
+      - 'src/ged.c'
+      - 'Android.mk'
+      - 'Application.mk'
+      - 'module/**'
+      - 'post-fs-data.sh'
+      - 'service.sh'
+      - 'boot-completed.sh'
+      - 'uninstall.sh'
+      - 'common.sh'
+      - 'customize.sh'
+      - 'system.prop'
+      - 'sepolicy.rule'
+      - 'module.prop'
+      - 'adreno_config.txt'
+      - 'qgl_config.txt'
+      - 'game_exclusion_list.sh'
 
-# Cancel any in-progress run on the same ref so pushes don't queue up
+# Only one concurrent build at a time
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: build
   cancel-in-progress: true
 
-permissions:
-  contents: write   # needed for release creation
-  actions:  read
-
 jobs:
-  build:
-    name: Build Native Daemon + Package Module
+  # ──────────────────────────────────────────────────────────────────────
+  # Job 1: Build system_monitor.apk (Java companion daemon)
+  # Mirrors the SystemMonitor repo's own build.yml exactly, but we do it
+  # here so the APK version is always pinned to what we build.
+  # ──────────────────────────────────────────────────────────────────────
+  build-sysmon:
+    name: Build system_monitor.apk
+    runs-on: ubuntu-latest
+    outputs:
+      apk-path: ${{ steps.find-apk.outputs.apk_path }}
+
+    steps:
+      - name: Checkout SystemMonitor source
+        uses: actions/checkout@v4
+        with:
+          repository: rem01gaming/systemmonitor
+          ref: master
+          fetch-depth: 0
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      # Build a debug (unsigned) APK — we don't need Play Store signing.
+      # app_process loads the APK directly from the filesystem; signing is
+      # irrelevant for this use-case.
+      - name: Build release APK (no signing required for app_process)
+        run: ./gradlew assembleRelease -x lintRelease
+        continue-on-error: false
+
+      # If Gradle produced an unsigned APK (normal when no signing config
+      # is supplied), rename it to a predictable name.
+      - name: Locate APK
+        id: find-apk
+        run: |
+          APK=$(find app/build/outputs/apk -name "*.apk" | head -1)
+          if [ -z "$APK" ]; then
+            echo "ERROR: No APK found after Gradle build" >&2
+            exit 1
+          fi
+          echo "Found APK: $APK"
+          cp "$APK" system_monitor.apk
+          echo "apk_path=system_monitor.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Upload system_monitor.apk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: system_monitor_apk
+          path: system_monitor.apk
+          retention-days: 1
+          if-no-files-found: error
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Job 2: Build adreno_ged C binary via Android NDK
+  # ──────────────────────────────────────────────────────────────────────
+  build-ged:
+    name: Build adreno_ged (NDK)
     runs-on: ubuntu-latest
 
     steps:
-      # ── 1. Checkout ────────────────────────────────────────────────────────
-      - name: Checkout
+      - name: Checkout module repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ── 2. Version ─────────────────────────────────────────────────────────
-      - name: Determine version
-        id: version
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/}"
-          else
-            VERSION="dev-$(git rev-parse --short HEAD)"
-          fi
-          ZIPNAME="adreno_gpu_driver_${VERSION}.zip"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "zipname=${ZIPNAME}" >> "$GITHUB_OUTPUT"
-          echo "Version : ${VERSION}"
-          echo "Zip name: ${ZIPNAME}"
-
-      # ── 3. Resolve latest stable non-LTS NDK ───────────────────────────────
-      #
-      # WHY THIS IS NON-TRIVIAL:
-      #   Google maintains two NDK tracks simultaneously:
-      #     • Current  — latest features, highest major number (e.g. r28b)
-      #     • LTS      — older stable, longer support window (e.g. r27c LTS)
-      #   The GitHub releases API returns both tracks interleaved, sorted by
-      #   publish date — so r27c (LTS) can appear AFTER r28b because it was
-      #   patched more recently. Simply taking .releases[0] gives you LTS, not
-      #   current.
-      #
-      # HOW WE IDENTIFY LTS:
-      #   Google marks LTS releases in the release NAME with "(LTS)" —
-      #   e.g. "Android NDK r27c (LTS)". The tag itself (r27c) has no marker.
-      #   We filter on .name | ascii_downcase | contains("lts") | not.
-      #
-      # HOW WE PICK THE HIGHEST VERSION:
-      #   After excluding LTS and pre-releases we sort by:
-      #     1. Major number  (r28 > r27)        — numeric descending
-      #     2. Letter suffix (b > a > "")        — lexicographic descending
-      #   Then take first.
-      #
-      # FILTERS APPLIED:
-      #   • prerelease == false        — GitHub flag: rejects rc/beta/canary
-      #   • tag ~ ^r[0-9]+[a-z]?$     — rejects r28-rc2, r29-beta1, r29-canary1
-      #   • name !~ /lts/i             — rejects LTS track releases
-      #
-      # FALLBACK:
-      #   If the API call fails (network issue, outage, rate-limit) or jq
-      #   finds no match, the job falls back to a hardcoded minimum version
-      #   and emits a ::warning:: annotation — never a hard failure.
-      #
-      # RATE LIMIT:
-      #   Uses the built-in GITHUB_TOKEN (authenticated = 5000 req/hr).
-      #   The anonymous limit is 60 req/hr which CI can trip on busy repos.
-      - name: Resolve latest stable non-LTS NDK version
-        id: ndk-version
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          FALLBACK_NDK="r28b"
-
-          echo "Querying GitHub API for NDK releases..."
-          API_RESPONSE=$(curl -sf \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/android/ndk/releases?per_page=50" \
-            2>/dev/null) || true
-
-          if [ -z "$API_RESPONSE" ]; then
-            echo "::warning::GitHub API call failed — falling back to ${FALLBACK_NDK}"
-            echo "ndk-version=${FALLBACK_NDK}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          NDK_VER=$(echo "$API_RESPONSE" | jq -r '
-            [ .[]
-              | select(
-                  .prerelease == false
-                  and (.tag_name | test("^r[0-9]+[a-z]?$"))
-                  and (.name | ascii_downcase | contains("lts") | not)
-                )
-              | .tag_name as $tag
-              | ($tag | ltrimstr("r"))                           as $rest
-              | ($rest | gsub("[a-z]+$"; "") | tonumber)         as $major
-              | ($rest | (match("[a-z]+$").string // ""))        as $letter
-              | { tag: $tag, major: $major, letter: $letter }
-            ]
-            | sort_by([-.major, -.letter])
-            | first
-            | .tag
-          ' 2>/dev/null || true)
-
-          if [ -z "$NDK_VER" ] || [ "$NDK_VER" = "null" ]; then
-            echo "::warning::Could not determine NDK version from API — falling back to ${FALLBACK_NDK}"
-            NDK_VER="${FALLBACK_NDK}"
-          fi
-
-          echo "ndk-version=${NDK_VER}" >> "$GITHUB_OUTPUT"
-          echo "Resolved NDK: ${NDK_VER}"
-
-          echo "### NDK Resolution" >> "$GITHUB_STEP_SUMMARY"
-          echo "| | |"             >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|"         >> "$GITHUB_STEP_SUMMARY"
-          echo "| Resolved | \`${NDK_VER}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Fallback | \`${FALLBACK_NDK}\` |" >> "$GITHUB_STEP_SUMMARY"
-
-      # ── 4. Cache NDK ───────────────────────────────────────────────────────
-      - name: Cache NDK ${{ steps.ndk-version.outputs.ndk-version }}
-        uses: actions/cache@v4
-        with:
-          path: /opt/hostedtoolcache/ndk/${{ steps.ndk-version.outputs.ndk-version }}
-          key: ndk-${{ steps.ndk-version.outputs.ndk-version }}-${{ runner.os }}
-
-      # ── 5. Install NDK ─────────────────────────────────────────────────────
-      - name: Set up Android NDK ${{ steps.ndk-version.outputs.ndk-version }}
-        id: setup-ndk
+      - name: Setup NDK r29
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: ${{ steps.ndk-version.outputs.ndk-version }}
+          ndk-version: r29
           add-to-path: true
-          local-cache: true
 
-      # ── 6. Verify NDK toolchain ────────────────────────────────────────────
-      - name: Verify NDK toolchain
+      # ndk-build reads Android.mk and Application.mk from the working dir.
+      # Output goes to libs/<abi>/adreno_ged
+      - name: Build adreno_ged with ndk-build
         run: |
-          NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
-          CLANG="${NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
-          echo "NDK path : ${NDK}"
-          echo "NDK ver  : ${{ steps.ndk-version.outputs.ndk-version }}"
-          "${NDK}/ndk-build" --version
-          echo "Clang    : $(${CLANG} --version | head -1)"
+          ndk-build -j$(nproc) \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=./Android.mk \
+            NDK_APPLICATION_MK=./Application.mk \
+            NDK_OUT=./obj \
+            NDK_LIBS_OUT=./libs
+          echo "Built binaries:"
+          find libs -name "adreno_ged" -exec ls -lh {} \;
 
-      # ── 7. Build adreno_ged (arm64-v8a + armeabi-v7a) ─────────────────────
-      #
-      # Source layout (standard ndk-build jni/ convention):
-      #   jni/Android.mk          — module build script
-      #   jni/Application.mk      — ABI / platform settings
-      #   jni/src/ged.c           — daemon source
-      #
-      # Architecture:
-      #   Netlink CN_PROC FORK+COMM+EXIT  → zero-overhead reactive detection
-      #   oom_score_adj ≤ 100             → foreground verification (Encore approach)
-      #   periodic /proc scan (1 s)       → catch already-running foreground apps
-      #   pidfd_open + epoll              → zero-latency exit detection
-      #   timerfd 500 ms                  → GOS enforcement every 5 s
-      #   signalfd                        → non-blocking signal handling
-      #
-      # Outputs:
-      #   build/libs/arm64-v8a/adreno_ged
-      #   build/libs/armeabi-v7a/adreno_ged
-      - name: Build adreno_ged
-        run: |
-          NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
-
-          "${NDK}/ndk-build"                      \
-            NDK_PROJECT_PATH=.                    \
-            APP_BUILD_SCRIPT=jni/Android.mk       \
-            NDK_APPLICATION_MK=jni/Application.mk \
-            NDK_OUT=build/obj                     \
-            NDK_LIBS_OUT=build/libs               \
-            -j$(nproc)
-
-          echo "=== Built binaries ==="
-          find build/libs -type f -name "adreno_ged" -exec ls -lh {} \;
-
-      # ── 8. Strip + verify binaries ─────────────────────────────────────────
-      - name: Strip and verify binaries
-        run: |
-          NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
-          STRIP="${NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
-
-          FAILED=0
-          for abi in arm64-v8a armeabi-v7a; do
-            bin="build/libs/${abi}/adreno_ged"
-
-            if [ ! -f "$bin" ]; then
-              echo "::error::Missing binary: ${bin}"
-              FAILED=1
-              continue
-            fi
-
-            "${STRIP}" --strip-unneeded "$bin" 2>/dev/null || true
-
-            FILE_OUT="$(file "$bin")"
-            SIZE=$(stat -c%s "$bin")
-            echo "=== ${abi} ==="
-            echo "  Size : ${SIZE} bytes"
-            echo "  file : ${FILE_OUT}"
-
-            case "$abi" in
-              arm64-v8a)
-                echo "$FILE_OUT" | grep -qi "aarch64\|arm64\|ARM aarch64" || {
-                  echo "::error::${abi} binary is not AArch64: ${FILE_OUT}"
-                  FAILED=1
-                }
-                ;;
-              armeabi-v7a)
-                echo "$FILE_OUT" | grep -qi "ARM,\|32-bit\|EABI" || {
-                  echo "::error::${abi} binary is not 32-bit ARM: ${FILE_OUT}"
-                  FAILED=1
-                }
-                ;;
-            esac
-
-            if [ "$SIZE" -lt 1024 ]; then
-              echo "::error::${abi} binary suspiciously small (${SIZE} bytes) — link may have failed"
-              FAILED=1
-            fi
-            if [ "$SIZE" -gt 5242880 ]; then
-              echo "::warning::${abi} binary is large (${SIZE} bytes) — debug symbols still present?"
-            fi
-          done
-
-          [ "$FAILED" -eq 0 ] || exit 1
-          echo "All binaries verified OK"
-
-      # ── 9. Assemble staging directory ──────────────────────────────────────
-      #
-      # The staging directory IS the module zip layout. We copy everything
-      # into staging/ then:
-      #   a) zip staging/ → module zip for the GitHub Release asset
-      #   b) upload staging/ directly as the workflow artifact
-      #
-      # Uploading the directory (not the pre-built zip) avoids the double-zip
-      # problem: upload-artifact wraps whatever path you give it — if you
-      # give it a .zip it produces artifact.zip → module.zip (nested).
-      # Giving it a directory means the downloaded artifact IS the module zip.
-      - name: Assemble staging directory
-        id: assemble
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          ZIPNAME="${{ steps.version.outputs.zipname }}"
-          NDK_VER="${{ steps.ndk-version.outputs.ndk-version }}"
-          S="staging"
-
-          # ── Scaffold ───────────────────────────────────────────────────────
-          mkdir -p "${S}/META-INF/com/google/android"
-          mkdir -p "${S}/bin/arm64-v8a"
-          mkdir -p "${S}/bin/armeabi-v7a"
-
-          # ── META-INF ───────────────────────────────────────────────────────
-          if [ ! -f "META-INF/com/google/android/update-binary" ]; then
-            echo "::error::META-INF/com/google/android/update-binary not found in repo"
-            exit 1
-          fi
-          cp "META-INF/com/google/android/update-binary" \
-             "${S}/META-INF/com/google/android/update-binary"
-          echo "  + update-binary ($(wc -c < META-INF/com/google/android/update-binary) bytes)"
-
-          if [ -f "META-INF/com/google/android/updater-script" ]; then
-            cp "META-INF/com/google/android/updater-script" \
-               "${S}/META-INF/com/google/android/updater-script"
-          else
-            echo "#MAGISK" > "${S}/META-INF/com/google/android/updater-script"
-          fi
-
-          # ── Required root files (hard fail if missing) ─────────────────────
-          for f in module.prop customize.sh; do
-            if [ ! -f "$f" ]; then
-              echo "::error::Required file missing from repo: ${f}"
-              exit 1
-            fi
-          done
-
-          # ── Module shell scripts and config files ──────────────────────────
-          # NOTE: game_excl_daemon.sh intentionally omitted — replaced by the
-          # native adreno_ged binary which uses the Encore-inspired approach:
-          # oom_score_adj foreground detection + periodic /proc scan.
-          for f in \
-            module.prop system.prop \
-            customize.sh post-fs-data.sh service.sh uninstall.sh \
-            boot-completed.sh \
-            common.sh game_exclusion_list.sh \
-            adreno_config.txt qgl_config.txt sepolicy.rule \
-            files.sh action.sh banner; do
-            [ -f "$f" ] && cp "$f" "${S}/" && echo "  + $f"
-          done
-
-          # Root image/asset files (banner.webp, icons, etc.)
-          shopt -s nullglob
-          for f in *.webp *.png *.jpg *.jpeg *.gif *.svg *.ico; do
-            cp "$f" "${S}/" && echo "  + $f"
-          done
-          shopt -u nullglob
-
-          # ── Directories ────────────────────────────────────────────────────
-          if [ -d "system" ]; then
-            cp -r system "${S}/system"
-            echo "  + system/ ($(find system -type f | wc -l) files)"
-          else
-            echo "::warning::system/ not found in repo — driver .so files will be missing"
-          fi
-
-          for dir in webroot Documentation common; do
-            if [ -d "$dir" ]; then
-              cp -r "$dir" "${S}/${dir}"
-              echo "  + ${dir}/ ($(find "$dir" -type f | wc -l) files)"
-            fi
-          done
-
-          # ── Native daemon binaries ─────────────────────────────────────────
-          for abi in arm64-v8a armeabi-v7a; do
-            src="build/libs/${abi}/adreno_ged"
-            dst="${S}/bin/${abi}/adreno_ged"
-            cp "$src" "$dst"
-            chmod 0755 "$dst"
-            echo "  + bin/${abi}/adreno_ged ($(ls -lh "$src" | awk '{print $5}'))"
-          done
-
-          # ── Staging manifest ───────────────────────────────────────────────
-          echo ""
-          echo "=== Staging contents ==="
-          find "${S}" -type f | sort | sed "s|^${S}/|  |"
-          echo ""
-          echo "Total files: $(find "${S}" -type f | wc -l)"
-
-          # ── Build release zip (for GitHub Release asset only) ──────────────
-          (cd "${S}" && zip -r9 "../${ZIPNAME}" . \
-            --exclude "*/.DS_Store" \
-            --exclude "*/__MACOSX*")
-
-          echo ""
-          echo "=== Release zip ==="
-          ls -lh "${ZIPNAME}"
-          unzip -l "${ZIPNAME}"
-
-          echo "zippath=./${ZIPNAME}" >> "$GITHUB_OUTPUT"
-
-          # Job summary
-          echo "### Build Summary"                               >> "$GITHUB_STEP_SUMMARY"
-          echo "| | |"                                           >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|"                                        >> "$GITHUB_STEP_SUMMARY"
-          echo "| Version | \`${VERSION}\` |"                   >> "$GITHUB_STEP_SUMMARY"
-          echo "| NDK | \`${NDK_VER}\` |"                       >> "$GITHUB_STEP_SUMMARY"
-          echo "| Zip | \`${ZIPNAME}\` |"                       >> "$GITHUB_STEP_SUMMARY"
-          echo "| Files | $(find "${S}" -type f | wc -l) |"     >> "$GITHUB_STEP_SUMMARY"
-
-      # ── 10. Upload artifact ────────────────────────────────────────────────
-      - name: Upload artifact
+      - name: Upload GED binaries artifact
         uses: actions/upload-artifact@v4
         with:
-          name: adreno-gpu-driver-${{ steps.version.outputs.version }}
-          path: staging/
+          name: ged_binaries
+          path: libs/
+          retention-days: 1
           if-no-files-found: error
-          retention-days: 30
-          compression-level: 9
 
-      # ── 11. GitHub Release (version tags + manual trigger only) ───────────
+  # ──────────────────────────────────────────────────────────────────────
+  # Job 3: Assemble the final flashable zip
+  # Depends on both build jobs above.
+  # ──────────────────────────────────────────────────────────────────────
+  assemble-zip:
+    name: Assemble Module Zip
+    runs-on: ubuntu-latest
+    needs: [build-sysmon, build-ged]
+
+    steps:
+      - name: Checkout module repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Download build artifacts ──────────────────────────────────────
+      - name: Download system_monitor.apk
+        uses: actions/download-artifact@v4
+        with:
+          name: system_monitor_apk
+          path: artifacts/
+
+      - name: Download GED binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: ged_binaries
+          path: artifacts/libs/
+
+      # ── Verify downloads ──────────────────────────────────────────────
+      - name: Verify artifacts
+        run: |
+          echo "=== system_monitor.apk ==="
+          ls -lh artifacts/system_monitor.apk
+          echo ""
+          echo "=== GED binaries ==="
+          find artifacts/libs -name "adreno_ged" -exec ls -lh {} \;
+
+      # ── Create module layout ──────────────────────────────────────────
+      - name: Assemble module directory
+        run: |
+          set -e
+          MODULE_DIR="module_build"
+          mkdir -p "$MODULE_DIR"
+
+          # ── Version info ────────────────────────────────────────────────
+          VERSION_CODE=$(git rev-list HEAD --count)
+          VERSION_NAME=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          RELEASE_TAG="${VERSION_CODE}-${SHORT_SHA}"
+
+          echo "Version: $VERSION_NAME ($RELEASE_TAG)"
+
+          # Patch module.prop with current version
+          sed "s/versionCode=.*/versionCode=${VERSION_CODE}/" module.prop \
+            | sed "s/version=.*/version=${VERSION_NAME} (${RELEASE_TAG})/" \
+            > "$MODULE_DIR/module.prop"
+
+          # ── Root module scripts ─────────────────────────────────────────
+          # These run directly from $MODDIR at boot — must be at module root.
+          for f in post-fs-data.sh service.sh boot-completed.sh uninstall.sh \
+                   common.sh customize.sh files.sh game_exclusion_list.sh \
+                   system.prop sepolicy.rule adreno_config.txt qgl_config.txt \
+                   banner; do
+            [ -f "$f" ] && cp "$f" "$MODULE_DIR/"
+          done
+
+          # ── META-INF for Magisk/KSU/APatch recovery flasher ────────────
+          mkdir -p "$MODULE_DIR/META-INF/com/google/android"
+          cat > "$MODULE_DIR/META-INF/com/google/android/update-binary" << 'UPDATEBIN'
+          #!/sbin/sh
+          SKIPUNZIP=1
+          unzip -o "$ZIPFILE" 'customize.sh' -d "$TMPDIR"
+          . "$TMPDIR/customize.sh"
+          UPDATEBIN
+          echo "#MAGISK" > "$MODULE_DIR/META-INF/com/google/android/updater-script"
+          chmod +x "$MODULE_DIR/META-INF/com/google/android/update-binary"
+
+          # ── system_monitor.apk ─────────────────────────────────────────
+          # Placed at module root so post-fs-data.sh / service.sh find it
+          # at $MODDIR/system_monitor.apk without any extra path logic.
+          cp artifacts/system_monitor.apk "$MODULE_DIR/system_monitor.apk"
+          echo "system_monitor.apk: $(stat -c%s "$MODULE_DIR/system_monitor.apk") bytes"
+
+          # ── GED binaries ───────────────────────────────────────────────
+          # Layout:  $MODDIR/bin/arm64-v8a/adreno_ged
+          #          $MODDIR/bin/armeabi-v7a/adreno_ged
+          # service.sh selects the correct ABI at runtime via ro.product.cpu.abi.
+          for ABI in arm64-v8a armeabi-v7a; do
+            SRC="artifacts/libs/$ABI/adreno_ged"
+            if [ -f "$SRC" ]; then
+              DST_DIR="$MODULE_DIR/bin/$ABI"
+              mkdir -p "$DST_DIR"
+              cp "$SRC" "$DST_DIR/adreno_ged"
+              chmod 0755 "$DST_DIR/adreno_ged"
+              echo "  Installed: bin/$ABI/adreno_ged  ($(stat -c%s "$DST_DIR/adreno_ged") bytes)"
+            else
+              echo "  WARNING: $SRC not found — skipping ABI $ABI"
+            fi
+          done
+
+          # ── system/vendor driver libraries (placeholder dir) ───────────
+          # Actual .so files are added outside CI via the module's own
+          # vendor lib directories. Create the placeholder so the zip
+          # structure is valid even for driver-only builds.
+          mkdir -p "$MODULE_DIR/system/vendor/lib64"
+          mkdir -p "$MODULE_DIR/system/vendor/lib"
+          touch "$MODULE_DIR/system/vendor/lib64/.placeholder"
+          touch "$MODULE_DIR/system/vendor/lib/.placeholder"
+
+          # ── Permissions ────────────────────────────────────────────────
+          chmod 0755 "$MODULE_DIR/post-fs-data.sh" \
+                     "$MODULE_DIR/service.sh" \
+                     "$MODULE_DIR/boot-completed.sh" \
+                     "$MODULE_DIR/uninstall.sh" \
+                     "$MODULE_DIR/common.sh" \
+                     "$MODULE_DIR/customize.sh" \
+                     "$MODULE_DIR/files.sh" \
+                     "$MODULE_DIR/game_exclusion_list.sh" 2>/dev/null || true
+
+          echo ""
+          echo "=== Final module layout ==="
+          find "$MODULE_DIR" -not -path "*/.git/*" | sort
+          echo ""
+
+          # ── Create flashable zip ───────────────────────────────────────
+          ZIP_NAME="adreno-gpu-driver-${VERSION_NAME}-${RELEASE_TAG}.zip"
+          cd "$MODULE_DIR"
+          zip -r9 "../$ZIP_NAME" . \
+            -x "*.placeholder" \
+            -x ".git*" \
+            -x "__MACOSX*" \
+            -x "*.DS_Store"
+          cd ..
+
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+          echo "ZIP_PATH=$ZIP_NAME"  >> "$GITHUB_ENV"
+
+          echo ""
+          echo "=== Build complete ==="
+          echo "Output: $ZIP_NAME  ($(stat -c%s "$ZIP_NAME") bytes)"
+
+      # ── Upload final zip ──────────────────────────────────────────────
+      - name: Upload module zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: adreno-gpu-driver-module
+          path: ${{ env.ZIP_NAME }}
+          retention-days: 30
+          if-no-files-found: error
+
+      # ── Create GitHub Release on tag push ─────────────────────────────
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.version }}
-          name: "Adreno GPU Driver ${{ steps.version.outputs.version }}"
+          files: ${{ env.ZIP_NAME }}
+          generate_release_notes: true
           body: |
-            ## Adreno GPU Driver ${{ steps.version.outputs.version }}
+            ## Adreno GPU Driver Module
 
-            Flash via Magisk / KernelSU / APatch.
+            ### Game Exclusion Daemon (Encore-style architecture)
+            - **Java companion** (`system_monitor.apk` via `app_process`):
+              Uses `IActivityTaskManager.getFocusedRootTaskInfo()` — the same
+              internal API Android uses — to get the focused app every 500ms.
+            - **C daemon** (`adreno_ged`): Watches the status file via `inotify`
+              (zero CPU between writes). Uses `pidfd_open` + `epoll` for instant
+              process-death detection. 5s timer re-enforces `skiagl` against GOS.
+            - **Why this replaces CN_PROC netlink**: No `CAP_NET_ADMIN` requirement,
+              no fork-storm during boot, accurate ActivityManager-level detection.
 
-            ### Native game exclusion daemon — redesigned (Encore-inspired)
-
-            The `adreno_ged` binary now uses the same **focused-app detection**
-            strategy as Encore Tweaks, implemented in pure C without a Java companion:
-
-            | Mechanism | Purpose | CPU when idle |
-            |---|---|---|
-            | Netlink PROC_EVENT_FORK+COMM | Detect new game processes instantly | Zero |
-            | `oom_score_adj` ≤ 100 check | Verify foreground status (replaces Encore's ActivityManager) | Zero |
-            | 500 ms `/proc` scan | Catch already-running Meta apps coming to foreground | < 0.1 % |
-            | pidfd + epoll | Instant zero-latency exit detection (identical to Encore PIDTracker) | Zero |
-            | timerfd 500 ms | GOS / OEM renderer re-enforcement every 5 s | Zero |
-            | signalfd | Non-blocking signal handling (no waitpid in event loop) | Zero |
-
-            **Shell fallback (`game_excl_daemon.sh`) removed** — native binary only.
-
-            Built with NDK `${{ steps.ndk-version.outputs.ndk-version }}` · `${{ github.sha }}`
-          files: ${{ steps.assemble.outputs.zippath }}
-          draft: false
-          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-          fail_on_unmatched_files: true
+            ### Contents
+            - `system_monitor.apk`: Java companion daemon
+            - `bin/arm64-v8a/adreno_ged`: C daemon (64-bit)
+            - `bin/armeabi-v7a/adreno_ged`: C daemon (32-bit fallback)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

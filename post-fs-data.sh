@@ -2690,58 +2690,16 @@ case "$RENDER_MODE" in
     ) >/dev/null 2>&1 &
     log_boot "[OK] skiavk: renderer re-enforced after boot_completed (no force-stops — LYB approach)"
 
-    # ── GAME EXCLUSION DAEMON LAUNCH ──────────────────────────────────────────
-    # Launches the native adreno_ged binary (zero overhead).
-    #
-    # Native binary architecture (truly zero overhead):
-    #   NETLINK_CONNECTOR PROC_EVENT_FORK+COMM: kernel delivers fork/comm events
-    #   via netlink socket — zero CPU between events. No polling, no logcat pipe.
-    #   pidfd per game (kernel 5.3+): epoll wakes on game exit. Fallback: 1s
-    #   /proc/$PID stat poll for kernels < 5.3. No shell interpreter overhead.
-    #
-    # Shell fallback architecture (low overhead):
-    #   logcat -b events: blocks in kernel between am_proc_start events.
-    #   sleep 1 loop per active game: ~1 µs/sec CPU per game.
+    # ── GAME EXCLUSION DAEMON ──────────────────────────────────────────────
+    # GED is now launched exclusively from service.sh (Encore-style architecture):
+    #   • Java companion (system_monitor.apk via app_process) monitors foreground app
+    #   • C daemon (adreno_ged) watches status file via inotify — zero CPU overhead
+    # Launching from post-fs-data.sh (init domain, before boot_completed) is
+    # removed: the old CN_PROC netlink approach required CAP_NET_ADMIN and caused
+    # watchdog reboots. service.sh launches both after boot_completed naturally.
     if [ "$GAME_EXCLUSION_DAEMON" = "y" ]; then
-      (
-        # Wait for boot_completed before launching daemon.
-        _GED_WAIT=0
-        while [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ] && [ $_GED_WAIT -lt 90 ]; do
-          sleep 3
-          _GED_WAIT=$((_GED_WAIT + 3))
-        done
-        [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ] && exit 0
-
-        # Give ActivityManager 2 extra seconds to fully initialize.
-        sleep 2
-
-        # ── Launch native binary ─────────────────────────────────────────────
-        # Detect CPU ABI to select the correct pre-compiled binary.
-        _GED_ABI="$(getprop ro.product.cpu.abi 2>/dev/null || echo '')"
-        _GED_BIN=""
-        case "$_GED_ABI" in
-          arm64*|aarch64*)
-            [ -x "${MODDIR}/bin/arm64-v8a/adreno_ged" ]   && _GED_BIN="${MODDIR}/bin/arm64-v8a/adreno_ged"
-            ;;
-          arm*|armeabi*)
-            [ -x "${MODDIR}/bin/armeabi-v7a/adreno_ged" ] && _GED_BIN="${MODDIR}/bin/armeabi-v7a/adreno_ged"
-            ;;
-        esac
-
-        if [ -n "$_GED_BIN" ]; then
-          # argv[1] = restore mode; argv[2] = MODDIR so binary can find
-          # game_exclusion_list.sh without a hard-coded path.
-          "$_GED_BIN" "$RENDER_MODE" "$MODDIR" &
-          echo "[ADRENO] Game exclusion daemon launched PID=$! binary=$_GED_BIN mode=$RENDER_MODE" \
-            > /dev/kmsg 2>/dev/null || true
-        else
-          echo "[ADRENO] GAME_EXCLUSION_DAEMON=y but adreno_ged binary not found for ABI=$_GED_ABI" \
-            > /dev/kmsg 2>/dev/null || true
-        fi
-        unset _GED_ABI _GED_BIN
-      ) &
-      log_boot "[OK] Game exclusion daemon: scheduled for boot_completed+2s (GAME_EXCLUSION_DAEMON=y, mode=$RENDER_MODE)"
-    elif [ "$GAME_EXCLUSION_DAEMON" = "n" ]; then
+      log_boot "[OK] Game exclusion daemon: will be launched by service.sh (inotify/Java-companion)"
+    else
       log_boot "[SKIP] Game exclusion daemon: disabled (GAME_EXCLUSION_DAEMON=n)"
     fi
     ;;

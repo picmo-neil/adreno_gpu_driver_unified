@@ -809,27 +809,121 @@ esac
 #   "0" = no listed games running, renderer = restore target
 # ========================================
 
-if [ "$RENDER_MODE" = "skiavk" ]; then
+if [ "$RENDER_MODE" = "skiavk" ] && [ "$GAME_EXCLUSION_DAEMON" = "y" ]; then
 # ========================================
-# GAME EXCLUSION DAEMON STATUS CHECK
+# GAME EXCLUSION DAEMON LAUNCH (Encore-style inotify + Java companion)
 # ========================================
-# The GED is launched exclusively from post-fs-data.sh background subshell
-# (waits for boot_completed internally before starting).
-# service.sh only logs its liveness — the GED manages skiagl↔skiavk switching
-# and GOS/OEM prop re-enforcement entirely on its own.
+# Architecture (identical to Encore Tweaks):
+#   1. system_monitor.apk (Java companion via app_process) polls Android's
+#      IActivityTaskManager.getFocusedRootTaskInfo() every 500ms and writes
+#      focused_app/pid/uid to a status file.
+#   2. adreno_ged (C daemon) watches the status file via inotify — zero CPU
+#      between writes. On game open: set renderer=skiagl + track PID via
+#      pidfd_open. On game exit: restore renderer. 5s timerfd re-enforces
+#      skiagl against GOS/OEM resets while a game is active.
 #
-# Log whether the daemon is alive so the boot log confirms state.
-  _ged_pid=""
-  [ -f "/data/local/tmp/adreno_ged_pid" ] && \
-    { IFS= read -r _ged_pid; } < "/data/local/tmp/adreno_ged_pid" 2>/dev/null || _ged_pid=""
-  if [ -n "$_ged_pid" ] && kill -0 "$_ged_pid" 2>/dev/null; then
-    log_service "[OK] Game exclusion daemon running (PID=$_ged_pid) — launched by post-fs-data.sh"
-    log_service "     GOS re-enforcement: ACTIVE inside GED (~5s interval per active game)"
+# Why this replaces the old CN_PROC netlink approach:
+#   - No CAP_NET_ADMIN requirement (netlink CN_PROC was failing/crashing)
+#   - No /proc scanning (was causing false positive bootloops)
+#   - Accurate foreground detection via the same AM API Android uses
+#   - Zero CPU overhead: inotify blocks in kernel between file changes
+
+  log_service "========================================"
+  log_service "GAME EXCLUSION DAEMON LAUNCH (inotify/Java companion)"
+  log_service "========================================"
+
+  # ── Kill any stale instances from a previous boot ────────────────────
+  for _stale_file in "/data/local/tmp/adreno_ged_pid" \
+                     "/data/local/tmp/adreno_ged_sysmon_pid"; do
+    if [ -f "$_stale_file" ]; then
+      _stale_pid=""
+      { IFS= read -r _stale_pid; } < "$_stale_file" 2>/dev/null || true
+      if [ -n "$_stale_pid" ] && kill -0 "$_stale_pid" 2>/dev/null; then
+        kill -TERM "$_stale_pid" 2>/dev/null || true
+        sleep 1
+        kill -0 "$_stale_pid" 2>/dev/null && \
+          kill -KILL "$_stale_pid" 2>/dev/null || true
+      fi
+      rm -f "$_stale_file" 2>/dev/null || true
+    fi
+  done
+  unset _stale_file _stale_pid
+
+  # ── Detect GED binary for this ABI ────────────────────────────────────
+  _GED_ABI="$(getprop ro.product.cpu.abi 2>/dev/null || echo '')"
+  _GED_BIN=""
+  case "$_GED_ABI" in
+    arm64*|aarch64*)
+      [ -x "${MODDIR}/bin/arm64-v8a/adreno_ged" ] && \
+        _GED_BIN="${MODDIR}/bin/arm64-v8a/adreno_ged" ;;
+    arm*|armeabi*)
+      [ -x "${MODDIR}/bin/armeabi-v7a/adreno_ged" ] && \
+        _GED_BIN="${MODDIR}/bin/armeabi-v7a/adreno_ged" ;;
+  esac
+  unset _GED_ABI
+
+  if [ -z "$_GED_BIN" ]; then
+    log_service "[!] GED binary not found — game exclusion daemon not started"
+    log_service "    Check bin/arm64-v8a/adreno_ged or bin/armeabi-v7a/adreno_ged"
+  elif [ ! -f "$MODDIR/system_monitor.apk" ]; then
+    log_service "[!] system_monitor.apk not found in $MODDIR — cannot start Java companion"
+    log_service "    Reinstall the module to restore system_monitor.apk"
   else
-    log_service "[!] Game exclusion daemon not detected. Check post-fs-data.sh log."
-    log_service "    If GAME_EXCLUSION_DAEMON is disabled in config, this is expected."
+    # ── Prepare status dir ─────────────────────────────────────────────
+    _GED_DIR="/data/local/tmp/adreno_ged"
+    _GED_STATUS="$_GED_DIR/system_status"
+    _GED_SYSMON_LOG="$_GED_DIR/sysmon.log"
+    mkdir -p "$_GED_DIR" 2>/dev/null || true
+
+    # ── Find app_process binary (64-bit preferred) ─────────────────────
+    _AP_BIN=""
+    for _ap in /system/bin/app_process64 /system/bin/app_process \
+               /system/bin/app_process32; do
+      [ -x "$_ap" ] && { _AP_BIN="$_ap"; break; }
+    done
+    unset _ap
+
+    if [ -z "$_AP_BIN" ]; then
+      log_service "[!] app_process not found — Java companion cannot start"
+      log_service "    This is unexpected; every Android device has app_process"
+    else
+      # ── Launch Java companion (system_monitor.apk via app_process) ────
+      # Mirrors Encore Tweaks service.sh exactly:
+      #   app_process -Djava.class.path=<apk> / --nice-name=<name> <class> <args>
+      "$_AP_BIN" \
+        -Djava.class.path="$MODDIR/system_monitor.apk" \
+        / \
+        --nice-name=AdrenoSysMon \
+        com.rem01gaming.systemmonitor.MainKt \
+        "$_GED_STATUS" \
+        > "$_GED_SYSMON_LOG" 2>&1 &
+      _SYSMON_PID=$!
+      echo "$_SYSMON_PID" > /data/local/tmp/adreno_ged_sysmon_pid
+      log_service "[OK] Java companion launched PID=$_SYSMON_PID"
+      log_service "     APK: $MODDIR/system_monitor.apk"
+      log_service "     Status file: $_GED_STATUS"
+      log_service "     Log: $_GED_SYSMON_LOG"
+      unset _SYSMON_PID
+
+      # Give sysmon ~2s to start and write the first status snapshot
+      sleep 2
+
+      # ── Launch C daemon (adreno_ged) ─────────────────────────────────
+      # Args: <restore_mode> <moddir> <status_file>
+      "$_GED_BIN" "$RENDER_MODE" "$MODDIR" "$_GED_STATUS" &
+      _GED_PID=$!
+      echo "$_GED_PID" > /data/local/tmp/adreno_ged_pid
+      log_service "[OK] Game exclusion daemon launched PID=$_GED_PID"
+      log_service "     Binary: $_GED_BIN"
+      log_service "     Mode: restore to $RENDER_MODE when games exit"
+      log_service "     GOS re-enforcement: every 5s while game is active"
+      printf '[ADRENO-GED] launched PID=%d sysmon=%s mode=%s\n' \
+        "$_GED_PID" "$_AP_BIN" "$RENDER_MODE" > /dev/kmsg 2>/dev/null || true
+      unset _GED_PID
+    fi
+    unset _AP_BIN _GED_DIR _GED_STATUS _GED_SYSMON_LOG
   fi
-  unset _ged_pid
+  unset _GED_BIN
 fi
 
 

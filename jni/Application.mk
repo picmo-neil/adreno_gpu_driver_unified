@@ -9,6 +9,7 @@ APP_ABI := arm64-v8a armeabi-v7a
 #   - pidfd_open is a Linux 5.3 kernel feature accessed via syscall;
 #     the daemon falls back to /proc poll when pidfd is unavailable
 #   - __system_property_get available since Android 2.2
+#   - inotify_init1, eventfd available since API 21; stable from API 28
 APP_PLATFORM := android-28
 
 # Pure C — no C++ STL overhead
