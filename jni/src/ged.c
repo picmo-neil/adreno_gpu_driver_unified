@@ -49,10 +49,11 @@
  *   Both groups use the same policy: skiagl for the LIFETIME of the process,
  *   not just while it is focused.  Process death (pidfd epoll) triggers restore.
  *
- * Usage: adreno_ged <restore_mode> <moddir> <status_file>
+ * Usage: adreno_ged <restore_mode> <moddir> <status_file> [lock_file]
  *   restore_mode: skiavk | skiagl
  *   moddir:       module directory (game_exclusion_list.sh is here)
  *   status_file:  full path written by system_monitor.apk
+ *   lock_file:    java.lock held by system_monitor.apk (optional)
  */
 
 #define _GNU_SOURCE
@@ -76,6 +77,7 @@
 #include <sys/timerfd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <dirent.h>
 
 #include <sys/system_properties.h>   /* __system_property_get / PROP_VALUE_MAX */
 
@@ -117,6 +119,7 @@ static char  g_moddir[512]        = "";
 static char  g_status_file[512]   = "";
 static char  g_status_dir[512]    = "";   /* parent dir of status file  */
 static char  g_status_fname[256]  = "";   /* just the filename          */
+static char  g_lock_file[512]     = "";   /* java.lock held by sysmon   */
 
 /* ── Event-loop fds ─────────────────────────────────────────────────── */
 static int   g_epoll_fd   = -1;
@@ -256,7 +259,7 @@ static void load_from_file(const char *path) {
 }
 
 static void load_pkg_list(void) {
-    char paths[4][512];
+    char paths[4][640];  /* 640 > max(g_moddir=511) + len("/game_exclusion_list.sh"=23) + NUL */
     snprintf(paths[0], sizeof(paths[0]),
              "/sdcard/Adreno_Driver/Config/game_exclusion_list.sh");
     snprintf(paths[1], sizeof(paths[1]),
@@ -487,6 +490,102 @@ static int read_status(const char *path, StatusInfo *out) {
     return parsed;
 }
 
+
+/* ════════════════════════════════════════════════════════════════════════
+ * java.lock liveness check
+ *
+ * system_monitor.apk holds an fcntl F_WRLCK on the lock file for its
+ * entire lifetime (mirrors Encore's LockFile::acquire + watch).
+ *
+ * is_java_lock_held() probes with F_GETLK:
+ *   - returns 1 if someone holds a write lock (companion alive)
+ *   - returns 0 if the lock is free (companion dead/not started yet)
+ *   - returns 1 on any open() error (fail-safe: don't exit on transient errors)
+ *
+ * wait_for_java_lock() spins up to max_secs waiting for the companion to
+ * start and acquire its lock. Mirrors Encore's 120-iteration startup loop.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static int is_java_lock_held(void) {
+    if (g_lock_file[0] == '\0') return 1; /* no lock file configured — skip check */
+    int fd = open(g_lock_file, O_RDWR|O_CREAT|O_CLOEXEC, 0600);
+    if (fd < 0) return 1; /* fail-safe */
+    struct flock fl;
+    fl.l_type   = F_WRLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start  = 0;
+    fl.l_len    = 0;
+    int r = fcntl(fd, F_GETLK, &fl);
+    close(fd);
+    if (r != 0) return 1; /* fcntl error — fail-safe */
+    return fl.l_type != F_UNLCK;
+}
+
+static int wait_for_java_lock(int max_secs) {
+    int i;
+    for (i = 0; i < max_secs; i++) {
+        if (is_java_lock_held()) {
+            klog("java.lock acquired by companion after %ds", i);
+            return 1;
+        }
+        klog("java.lock not held, waiting... (%d/%d)", i+1, max_secs);
+        sleep(1);
+    }
+    return 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * pid=0 fallback — /proc scan for a package by cmdline
+ *
+ * system_monitor.apk may write pid=0 transiently on the very first write
+ * when an app is starting up.  Since we only trigger on IN_CLOSE_WRITE,
+ * if the game stays focused without another write the second event never
+ * arrives and the game is never detected.
+ *
+ * Walk /proc/<n>/cmdline; return the first PID whose cmdline starts with
+ * the package name (Android zygote-forked apps use the package name as
+ * their process name / cmdline[0]).
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static pid_t find_pid_by_cmdline(const char *pkg) {
+    DIR *proc_dir = opendir("/proc");
+    if (!proc_dir) return 0;
+
+    pid_t found = 0;
+    size_t pkglen = strlen(pkg);
+    struct dirent *de;
+
+    while ((de = readdir(proc_dir)) != NULL && found == 0) {
+        /* Only numeric entries are PIDs */
+        if (de->d_type != DT_DIR && de->d_type != DT_UNKNOWN) continue;
+        const char *nm = de->d_name;
+        if (!nm[0] || nm[0] < '1' || nm[0] > '9') continue;
+        int all_digit = 1;
+        for (int k = 0; nm[k]; k++)
+            if (nm[k] < '0' || nm[k] > '9') { all_digit = 0; break; }
+        if (!all_digit) continue;
+
+        pid_t pid = (pid_t)atoi(nm);
+        char cmdline_path[64];
+        snprintf(cmdline_path, sizeof(cmdline_path), "/proc/%d/cmdline", (int)pid);
+
+        int fd = open(cmdline_path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue;
+        char cmdline[MAX_PKG_LEN + 4];
+        ssize_t n = read(fd, cmdline, sizeof(cmdline) - 1);
+        close(fd);
+        if (n <= 0) continue;
+        cmdline[n] = '\0';
+        /* cmdline is NUL-separated; first token is the process name */
+        if (strncmp(cmdline, pkg, pkglen) == 0 &&
+            (cmdline[pkglen] == '\0' || cmdline[pkglen] == ':')) {
+            found = pid;
+        }
+    }
+    closedir(proc_dir);
+    return found;
+}
+
 /* ════════════════════════════════════════════════════════════════════════
  * Status change handler — called on every IN_CLOSE_WRITE event
  * ════════════════════════════════════════════════════════════════════════ */
@@ -506,9 +605,26 @@ static void handle_status_change(void) {
 
     klog("focus: %s  pid=%d", si.focused_app, (int)si.focused_pid);
 
+    /* pid=0 race: sysmon may write pid=0 transiently on the first write
+     * while the process is starting.  inotify fires only on IN_CLOSE_WRITE
+     * so if the game stays focused without another write, a second event
+     * never arrives and the game is never detected.
+     * FIX: when pid==0 and app matches the exclusion list, do a /proc
+     * scan NOW rather than hoping for a future write.                  */
+    if (si.focused_pid == 0 && pkg_matches(si.focused_app)) {
+        pid_t real_pid = find_pid_by_cmdline(si.focused_app);
+        if (real_pid > 0) {
+            klog("pid=0 fallback: %s -> pid=%d via /proc scan",
+                 si.focused_app, (int)real_pid);
+            si.focused_pid = real_pid;
+        } else {
+            klog("pid=0 fallback: %s not found in /proc yet (will retry on next write)",
+                 si.focused_app);
+        }
+    }
+
     /* Open a new game session if the focused app matches the list
-     * and has a valid PID (sysmon may temporarily write pid=0 during
-     * process startup; we'll catch it on the next 500ms write).    */
+     * and has a resolved PID > 0.                                  */
     if (si.focused_pid > 0 && pkg_matches(si.focused_app)) {
         /* Check whether this exact PID is already tracked. */
         int already = 0, i;
@@ -551,6 +667,11 @@ static void handle_inotify(void) {
     }
 }
 
+/* Forward declaration — do_cleanup is defined after handle_timer but called
+ * from within it (companion crash path). Required to avoid implicit-decl
+ * warning/error where GCC would treat it as extern vs our static def.  */
+static void do_cleanup(void);
+
 /* ════════════════════════════════════════════════════════════════════════
  * Timer handler — fires every ENFORCE_SECS seconds
  * ════════════════════════════════════════════════════════════════════════ */
@@ -558,6 +679,16 @@ static void handle_inotify(void) {
 static void handle_timer(void) {
     uint64_t expirations;
     (void)read(g_timer_fd, &expirations, sizeof(expirations));
+
+    /* Java companion liveness check — mirrors Encore watch_java_lock().
+     * If the companion has released its fcntl lock (crashed/exited),
+     * no more status updates will arrive. Clean up and exit so service.sh
+     * can restart both daemons on next boot rather than running dead.   */
+    if (g_lock_file[0] != '\0' && !is_java_lock_held()) {
+        klog("FATAL: java companion lock released — companion crashed; shutting down");
+        do_cleanup();
+        _exit(1);
+    }
 
     if (g_active_cnt <= 0) return;
 
@@ -655,10 +786,11 @@ int main(int argc, char *argv[]) {
     /* ── Parse arguments ──────────────────────────────────────────── */
     if (argc < 4) {
         fprintf(stderr,
-                "Usage: %s <restore_mode> <moddir> <status_file>\n"
+                "Usage: %s <restore_mode> <moddir> <status_file> [lock_file]\n"
                 "  restore_mode: skiavk | skiagl\n"
                 "  moddir:       module directory (for game_exclusion_list.sh)\n"
-                "  status_file:  path written by system_monitor.apk\n",
+                "  status_file:  path written by system_monitor.apk\n"
+                "  lock_file:    java.lock held by system_monitor.apk (optional)\n",
                 argv[0]);
         return 1;
     }
@@ -671,11 +803,25 @@ int main(int argc, char *argv[]) {
         strncpy(g_restore_mode, "skiavk", sizeof(g_restore_mode)-1);
     if (strcmp(g_restore_mode, "skiaglthreaded") == 0)
         strncpy(g_restore_mode, "skiagl", sizeof(g_restore_mode)-1);
+    /* FIX: "normal" is not a valid debug.hwui.renderer value (only skiavk
+     * and skiagl are valid).  When RENDER_MODE=normal (the default, meaning
+     * no special renderer was requested by the user), default the restore
+     * target to skiavk so the Vulkan path is preserved after a game exits.
+     * Without this fix, game_close calls set_renderer("normal") which resets
+     * debug.hwui.renderer to the invalid value "normal" and HWUI may fall
+     * back to an unintended renderer or leave the property set to garbage.  */
+    if (g_restore_mode[0] == '\0' ||
+        strcmp(g_restore_mode, "normal") == 0)
+        strncpy(g_restore_mode, "skiavk", sizeof(g_restore_mode)-1);
 
     strncpy(g_moddir,      argv[2], sizeof(g_moddir)-1);
     g_moddir[sizeof(g_moddir)-1] = '\0';
     strncpy(g_status_file, argv[3], sizeof(g_status_file)-1);
     g_status_file[sizeof(g_status_file)-1] = '\0';
+    if (argc >= 5) {
+        strncpy(g_lock_file, argv[4], sizeof(g_lock_file)-1);
+        g_lock_file[sizeof(g_lock_file)-1] = '\0';
+    }
 
     /* ── Open /dev/kmsg for logging ───────────────────────────────── */
     g_kmsg_fd = open(KMSG_PATH, O_WRONLY|O_CLOEXEC);
@@ -684,6 +830,20 @@ int main(int argc, char *argv[]) {
     if (already_running()) {
         klog("already running — exiting duplicate");
         return 0;
+    }
+
+    /* ── Wait for Java companion to acquire its lock ─────────────── */
+    /* Mirrors Encore's 120-iteration (120s) startup wait loop.
+     * We use 30s (generous for any OEM boot speed) so the daemon
+     * doesn't linger if the APK never starts.                       */
+    if (g_lock_file[0] != '\0') {
+        klog("waiting for java companion lock: %s", g_lock_file);
+        if (!wait_for_java_lock(30)) {
+            klog("FATAL: java companion lock not held after 30s — exiting");
+            klog("       Check: system_monitor.apk launched with correct args?");
+            return 1;
+        }
+        klog("java companion alive — proceeding");
     }
 
     /* ── Package list ─────────────────────────────────────────────── */

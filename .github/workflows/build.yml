@@ -445,10 +445,17 @@ jobs:
           echo "Total files: $(find "${S}" -type f | wc -l)"
 
           # ── Build release zip (for GitHub Release asset only) ────────────────
+          # NOTE: .gitkeep files are intentionally NOT excluded.
+          # Each system/ leaf dir contains exactly one .gitkeep (0 bytes).
+          # Excluding them would leave empty dirs that zip drops silently on
+          # some versions of info-zip (glob "*/.gitkeep" only matches one
+          # level deep — nested paths like system/vendor/lib/egl/.gitkeep are
+          # silently unmatched, so behaviour was inconsistent).
+          # .gitkeep files are harmless during flashing: Magisk/KSU magic-mount
+          # ignores them, and the user's driver .so files go in the same dirs.
           (cd "${S}" && zip -r9 "../${ZIPNAME}" . \
             --exclude "*/.DS_Store" \
-            --exclude "*/__MACOSX*" \
-            --exclude "*/.gitkeep")
+            --exclude "*/__MACOSX*")
 
           echo ""
           echo "=== Release zip ==="

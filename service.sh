@@ -113,6 +113,18 @@ RENDER_MODE=$(printf '%s' "$RENDER_MODE" | tr '[:upper:]' '[:lower:]')
 [ "$RENDER_MODE" = "skiavkthreaded" ] && RENDER_MODE="skiavk"
 [ "$RENDER_MODE" = "skiaglthreaded" ] && RENDER_MODE="skiagl"
 [ "$FORCE_SKIAVKTHREADED_BACKEND" != "y" ] && FORCE_SKIAVKTHREADED_BACKEND="n"
+# AUTO-ENABLE GED — exact mirror of post-fs-data.sh lines 277+303-304.
+# post-fs-data.sh flow:
+#   line 277: [ "$GAME_EXCLUSION_DAEMON" != "y" ] && GAME_EXCLUSION_DAEMON="n"
+#   line 303: if [ "$GAME_EXCLUSION_DAEMON" = "n" ]; then GAME_EXCLUSION_DAEMON="y"
+# After line 277, GAME_EXCLUSION_DAEMON is always "n" for any default/fresh install
+# (config default is "n"). service.sh reads adreno_config.txt independently and
+# gets the same "n". Without mirroring line 303 here, the GED guard at line ~825
+# [ "$RENDER_MODE" = "skiavk" ] && [ "$GAME_EXCLUSION_DAEMON" = "y" ]
+# is NEVER satisfied on a default install -> daemon stack never launches.
+# Condition "= n" (not "!= n"): only auto-enable when value is "n", which is the
+# normalised form of any non-"y" value. This matches post-fs-data line 303 exactly.
+[ "$RENDER_MODE" = "skiavk" ] && [ "$GAME_EXCLUSION_DAEMON" = "n" ] && GAME_EXCLUSION_DAEMON="y"
 
 # ========================================
 # LOGGING SYSTEM
@@ -890,18 +902,22 @@ if [ "$RENDER_MODE" = "skiavk" ] && [ "$GAME_EXCLUSION_DAEMON" = "y" ]; then
       # ── Launch Java companion (system_monitor.apk via app_process) ────
       # Mirrors Encore Tweaks service.sh exactly:
       #   app_process -Djava.class.path=<apk> / --nice-name=<name> <class> <args>
-      "$_AP_BIN" \
+      # nohup: prevents SIGHUP from the parent Magisk shell killing the companion
+      # when the shell session tears down on some OEM ROMs (Encore does the same).
+      nohup "$_AP_BIN" \
         -Djava.class.path="$MODDIR/system_monitor.apk" \
         / \
         --nice-name=AdrenoSysMon \
         com.rem01gaming.systemmonitor.MainKt \
         "$_GED_STATUS" \
+        "$_GED_DIR/java.lock" \
         > "$_GED_SYSMON_LOG" 2>&1 &
       _SYSMON_PID=$!
       echo "$_SYSMON_PID" > /data/local/tmp/adreno_ged_sysmon_pid
       log_service "[OK] Java companion launched PID=$_SYSMON_PID"
       log_service "     APK: $MODDIR/system_monitor.apk"
       log_service "     Status file: $_GED_STATUS"
+      log_service "     Lock file: $_GED_DIR/java.lock"
       log_service "     Log: $_GED_SYSMON_LOG"
       unset _SYSMON_PID
 
@@ -909,8 +925,15 @@ if [ "$RENDER_MODE" = "skiavk" ] && [ "$GAME_EXCLUSION_DAEMON" = "y" ]; then
       sleep 2
 
       # ── Launch C daemon (adreno_ged) ─────────────────────────────────
-      # Args: <restore_mode> <moddir> <status_file>
-      "$_GED_BIN" "$RENDER_MODE" "$MODDIR" "$_GED_STATUS" &
+      # Args: <restore_mode> <moddir> <status_file> <lock_file>
+      # lock_file: path to the java.lock held by system_monitor.apk.
+      # ged.c checks this lock at startup and monitors it in the timer
+      # loop to detect companion death (mirrors Encore's watch_java_lock).
+      # nohup: same protection as for sysmon above.
+      # ged.c is backgrounded with & but not in its own session.
+      # If the Magisk service.sh shell receives SIGHUP during teardown,
+      # the process group gets the signal. nohup prevents ged from dying.
+      nohup "$_GED_BIN" "$RENDER_MODE" "$MODDIR" "$_GED_STATUS" "$_GED_DIR/java.lock" >/dev/null 2>&1 &
       _GED_PID=$!
       echo "$_GED_PID" > /data/local/tmp/adreno_ged_pid
       log_service "[OK] Game exclusion daemon launched PID=$_GED_PID"
