@@ -53,42 +53,6 @@ VERBOSE=n
 RENDER_MODE=normal
 
 # ========================================
-# Game Exclusion Daemon
-# ========================================
-# Automatically switches debug.hwui.renderer between skiavk and skiagl
-# depending on whether a game from the exclusion list is currently running.
-#
-# ONLY effective when RENDER_MODE=skiavk.
-# Has no effect in normal or skiagl modes (ignored silently).
-#
-# WHY THIS EXISTS:
-#   games create their
-#   own VkDevice from a native thread. If HWUI also holds a VkDevice (skiavk),
-#   the custom Adreno driver cannot handle two concurrent vkCreateDevice calls
-#   in the same process → SIGSEGV / GPU fault (dual-VkDevice crash).
-#   This daemon keeps HWUI on skiagl while any such game is running, then
-#   restores skiavk when all listed games have exited.
-#
-# HOW IT WORKS (zero-overhead event-driven architecture):
-#   1. A single main daemon streams logcat -b events, blocking in the kernel
-#      (epoll/read syscall) between events — zero CPU while no apps are opening.
-#   2. On detecting an am_proc_start event matching an excluded package, the
-#      renderer is switched to skiagl and a sub-daemon is spawned for that PID.
-#   3. The sub-daemon checks /proc/$PID once per second (sleep 1 =
-#      TASK_INTERRUPTIBLE kernel state — effectively zero CPU overhead).
-#      When the game closes, /proc/$PID disappears and the sub-daemon wakes
-#      immediately, decrements the active game counter, and restores skiavk
-#      if no other listed games remain open.
-#   4. Between gaming sessions: no sub-daemons exist. Main daemon is asleep
-#      in kernel. Total overhead = zero.
-#
-# Packages monitored: defined in game_exclusion_list.sh (Groups 1 and 2).
-# Edit the list via Adreno Manager WebUI → Config → Game Exclusion List.
-#
-# Recommended: y when RENDER_MODE=skiavk
-GAME_EXCLUSION_DAEMON=n
-
-# ========================================
 # SurfaceFlinger Backend Override
 # ========================================
 

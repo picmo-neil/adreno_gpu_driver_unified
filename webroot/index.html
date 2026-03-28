@@ -408,16 +408,277 @@
             <div class="setting-item ripple-target hover-lift">
                 <div class="text-col">
                     <div class="setting-header">
-                        <div class="setting-title" data-i18n="daemonName">Game Exclusion Daemon</div>
-                        <div class="info-tooltip" data-tooltip="Auto-switches HWUI to skiagl when a native-Vulkan game is detected. Prevents dual-VkDevice crashes in skiavk mode.">
+                        <div class="setting-title" data-i18n="renderName">Rendering Mode</div>
+                        <div class="info-tooltip" data-tooltip="Select graphics rendering backend">
                             <span class="tooltip-icon">ℹ️</span>
                         </div>
                     </div>
-                    <div class="setting-desc" data-i18n="daemonDesc">Auto-switches HWUI to skiagl when a native-Vulkan game is detected</div>
-                    <div class="badge badge-primary" data-i18n="daemonSub">Required for PUBG / Genshin in skiavk</div>
+                    <div class="setting-desc mode-desc-text" data-i18n="renderDesc">Default rendering backend with balanced performance</div>
                 </div>
-                <label class="switch modern-switch" aria-label="Game Exclusion Daemon Toggle">
-                    <input type="checkbox" id="GAME_EXCLUSION_DAEMON" role="switch">
+                <div class="select-wrapper modern">
+                    <select id="RENDER_MODE" aria-label="Rendering Mode">
+                        <option value="normal" data-i18n="renderNormal">Normal</option>
+                        <option value="skiavk">SkiaVK</option>
+                        <option value="skiagl">SkiaGL</option>
+                    </select>
+                    <span class="arrow">▼</span>
+                </div>
+            </div>
+
+            <!-- Force skiavkthreaded backend toggle — only shown when skiavk is selected -->
+            <div id="forceThreadedRow" class="setting-item ripple-target hover-lift" style="display:none;">
+                <div class="text-col">
+                    <div class="setting-header">
+                        <div class="setting-title" data-i18n="forceThreadedName">Force Skiavkthreaded Backend</div>
+                    </div>
+                    <div class="setting-desc" data-i18n="forceThreadedDesc">Force <code>debug.renderengine.backend=skiavkthreaded</code> even on Android &lt;14 (API 34). Strict OEM ROMs (MIUI/HyperOS, OneUI) may bootloop — only enable if you know your device supports it.</div>
+                    <div class="badge badge-warning" data-i18n="forceThreadedSub">⚠️ Android 14+ recommended</div>
+                </div>
+                <label class="switch modern-switch" aria-label="Force Skiavkthreaded Backend Toggle">
+                    <input type="checkbox" id="FORCE_SKIAVKTHREADED_BACKEND" role="switch">
+                    <span class="slider modern-slider">
+                        <span class="slider-text off">OFF</span>
+                        <span class="slider-text on">ON</span>
+                    </span>
+                </label>
+            </div>
+
+            <div class="divider elegant-divider"></div>
+
+            <div class="apply-now-row">
+                <div class="text-col">
+                    <div class="setting-title" data-i18n="applyNowTitle">Apply Render Mode Now</div>
+                    <div class="setting-desc" data-i18n="applyNowDesc">Apply via resetprop instantly — no reboot needed. Kill &amp; reopen apps to see effect.</div>
+                </div>
+                <button class="btn-apply-now ripple-effect" id="btnApplyRenderNow" aria-label="Apply render mode now without rebooting">
+                    <span class="btn-icon">⚡</span>
+                    <span data-i18n="applyNow">Apply Now</span>
+                </button>
+            </div>
+        </div>
+
+        <div class="card glass-panel animate-in" style="animation-delay: 0.05s;">
+            <div class="info-banner modern-info">
+                <span class="info-icon">ℹ️</span>
+                <p class="info-text" data-i18n="saveRebootInfo">Changes will be applied after saving and rebooting your device. Make sure to backup your current configuration before making changes.</p>
+            </div>
+        </div>
+
+        <div class="card glass-panel animate-in" style="animation-delay: 0.1s;">
+            <div class="card-header">
+                <span class="header-icon gradient-text animate-bounce">📱</span>
+                <div>
+                    <h2 data-i18n="sysInfo">System Overview</h2>
+                    <span class="header-subtitle" data-i18n="sysInfoSub">Device information and status</span>
+                </div>
+            </div>
+            <div class="info-grid">
+                <div class="info-item slide-in">
+                    <label data-i18n="device">Device</label>
+                    <span class="value skeleton-text" id="device"></span>
+                </div>
+                <div class="info-item slide-in" style="animation-delay: 0.05s;">
+                    <label data-i18n="android">Android</label>
+                    <span class="value skeleton-text" id="android"></span>
+                </div>
+                <div class="info-item highlight slide-in" style="animation-delay: 0.1s;">
+                    <label data-i18n="gpu">GPU Model</label>
+                    <span class="value skeleton-text" id="gpu"></span>
+                </div>
+                <div class="info-item slide-in" style="animation-delay: 0.15s;">
+                    <label data-i18n="modVer">Module</label>
+                    <span class="value skeleton-text" id="modVer"></span>
+                </div>
+            </div>
+            <div class="performance-bar">
+                <div class="performance-fill" id="performanceFill"></div>
+            </div>
+        </div>
+
+        <div class="card glass-panel animate-in" style="animation-delay: 0.15s;">
+            <div class="card-header">
+                <span class="header-icon gradient-text">⚙️</span>
+                <div>
+                    <h2 data-i18n="hardwareTitle">Hardware Details</h2>
+                    <span class="header-subtitle" data-i18n="hardwareSub">Processor and GPU information</span>
+                </div>
+            </div>
+            
+            <div class="hardware-section">
+                <h3 class="section-subtitle" data-i18n="processorLabel">Processor</h3>
+                <div class="info-grid">
+                    <div class="info-item highlight">
+                        <label data-i18n="socLabel">SoC</label>
+                        <span class="value skeleton-text" id="soc">Loading...</span>
+                    </div>
+                    <div class="info-item">
+                        <label data-i18n="cpuLabel">CPU</label>
+                        <span class="value skeleton-text" id="cpu">Loading...</span>
+                    </div>
+                    <div class="info-item highlight">
+                        <label data-i18n="socCodenameLabel">SoC Codename</label>
+                        <span class="value skeleton-text" id="socCodename">Loading...</span>
+                    </div>
+                    <div class="info-item">
+                        <label data-i18n="architectureLabel">Architecture</label>
+                        <span class="value skeleton-text" id="architecture">Loading...</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="divider elegant-divider"></div>
+            
+            <div class="hardware-section">
+                <h3 class="section-subtitle" data-i18n="gpuSectionLabel">GPU</h3>
+                <div class="info-grid">
+                    <div class="info-item highlight">
+                        <label data-i18n="gpuModelLabel">GPU Model</label>
+                        <span class="value skeleton-text" id="gpuModel">Loading...</span>
+                    </div>
+                    <div class="info-item">
+                        <label data-i18n="gpuVendorLabel">Vendor</label>
+                        <span class="value skeleton-text" id="gpuVendor">Loading...</span>
+                    </div>
+                    <div class="info-item">
+                        <label data-i18n="rendererLabel">Renderer</label>
+                        <span class="value skeleton-text" id="renderer">Loading...</span>
+                    </div>
+                    <div class="info-item highlight">
+                        <label data-i18n="driverVersionLabel">Driver Version</label>
+                        <span class="value skeleton-text" id="driverVersion">Loading...</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="divider elegant-divider"></div>
+
+            <div class="hardware-section">
+                <h3 class="section-subtitle" data-i18n="renderStatusLabel">Live Render Status</h3>
+                <div class="info-grid">
+                    <div class="info-item highlight">
+                        <label data-i18n="hwuiRendererLabel">HWUI Renderer</label>
+                        <span class="value skeleton-text" id="hwuiRendererStatus">Loading...</span>
+                    </div>
+                    <div class="info-item">
+                        <label data-i18n="renderEngineLabel">Render Engine</label>
+                        <span class="value skeleton-text" id="renderEngineStatus">Loading...</span>
+                    </div>
+                    <div class="info-item">
+                        <label data-i18n="useVulkanLabel">Vulkan Prop</label>
+                        <span class="value skeleton-text" id="useVulkanStatus">Loading...</span>
+                    </div>
+                </div>
+                <p class="render-status-hint" data-i18n="renderStatusHint">Props applied at boot via resetprop — not system.prop</p>
+            </div>
+        </div>
+
+        <div class="card glass-panel animate-in" style="animation-delay: 0.2s;">
+            <div class="row-center">
+                <div class="text-col">
+                    <h3 data-i18n="langName">Language</h3>
+                    <p class="desc-text" data-i18n="langDesc">Choose interface language</p>
+                </div>
+                <div class="select-wrapper elegant">
+                    <select id="LANG_SELECT" aria-label="Language Selection">
+                        <option value="en">🇺🇸 English</option>
+                        <option value="zh-CN">🇨🇳 简体中文</option>
+                        <option value="zh-TW">🇹🇼 繁體中文</option>
+                        <option value="custom" id="optCustom" disabled>🎨 Custom</option>
+                        <option value="system" data-i18n="langSystem">🌐 System</option>
+                    </select>
+                    <span class="arrow">▼</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="tab-config" class="view-section" role="tabpanel" aria-labelledby="nav-config">
+        <h2 class="section-label" data-i18n="config">Driver Settings</h2>
+
+        <div class="card glass-panel animate-in">
+            <div class="setting-item ripple-target hover-lift">
+                <div class="text-col">
+                    <div class="setting-header">
+                        <div class="setting-title" data-i18n="pltName">PLT Patching</div>
+                        <div class="info-tooltip" data-tooltip="Enables procedure linkage table patching for enhanced compatibility">
+                            <span class="tooltip-icon">ℹ️</span>
+                        </div>
+                    </div>
+                    <div class="setting-desc" data-i18n="pltDesc">Zuras Banch++ to work if available in driver</div>
+                    <div class="badge badge-primary" data-i18n="pltSub">Required for Zuras Banch++</div>
+                </div>
+                <label class="switch modern-switch" aria-label="PLT Patching Toggle">
+                    <input type="checkbox" id="PLT" role="switch">
+                    <span class="slider modern-slider">
+                        <span class="slider-text off">OFF</span>
+                        <span class="slider-text on">ON</span>
+                    </span>
+                </label>
+            </div>
+            
+            <div class="divider elegant-divider"></div>
+
+            <div class="setting-item ripple-target hover-lift">
+                <div class="text-col">
+                    <div class="setting-header">
+                        <div class="setting-title" data-i18n="qglName">QGL Config</div>
+                        <div class="info-tooltip" data-tooltip="Qualcomm Graphics Library configuration for A8xx chipsets">
+                            <span class="tooltip-icon">ℹ️</span>
+                        </div>
+                    </div>
+                    <div class="setting-desc" data-i18n="qglDesc">Configure Qualcomm Graphics Library for A8xx GPUs</div>
+                    <div class="badge badge-warning pulse-subtle" data-i18n="qglSub">A8xx Only</div>
+                </div>
+                <div class="row-end">
+                    <button class="btn-small ripple-effect modern-btn" id="btnEditQGL" aria-label="Edit QGL" style="margin-right: 8px;">
+                        <span class="btn-icon">✏️</span>
+                        <span data-i18n="edit">Edit</span>
+                    </button>
+                    <label class="switch modern-switch" aria-label="QGL Toggle">
+                        <input type="checkbox" id="QGL" role="switch">
+                        <span class="slider modern-slider">
+                            <span class="slider-text off">OFF</span>
+                            <span class="slider-text on">ON</span>
+                        </span>
+                    </label>
+                </div>
+            </div>
+            
+            <div class="divider elegant-divider"></div>
+
+            <div class="setting-item ripple-target hover-lift">
+                <div class="text-col">
+                    <div class="setting-header">
+                        <div class="setting-title" data-i18n="armName">ARM64 Optimization</div>
+                        <div class="info-tooltip" data-tooltip="Remove 32-bit libraries to save space on 64-bit devices">
+                            <span class="tooltip-icon">ℹ️</span>
+                        </div>
+                    </div>
+                    <div class="setting-desc" data-i18n="armDesc">Remove 32-bit libraries to reduce storage usage</div>
+                </div>
+                <label class="switch modern-switch" aria-label="ARM64 Optimization Toggle">
+                    <input type="checkbox" id="ARM64_OPT" role="switch">
+                    <span class="slider modern-slider">
+                        <span class="slider-text off">OFF</span>
+                        <span class="slider-text on">ON</span>
+                    </span>
+                </label>
+            </div>
+            
+            <div class="divider elegant-divider"></div>
+
+            <div class="setting-item ripple-target hover-lift">
+                <div class="text-col">
+                    <div class="setting-header">
+                        <div class="setting-title" data-i18n="verboseName">Verbose Logging</div>
+                        <div class="info-tooltip" data-tooltip="Enable detailed boot logs for debugging">
+                            <span class="tooltip-icon">ℹ️</span>
+                        </div>
+                    </div>
+                    <div class="setting-desc" data-i18n="verboseDesc">Enable detailed logs for troubleshooting</div>
+                </div>
+                <label class="switch modern-switch" aria-label="Verbose Logging Toggle">
+                    <input type="checkbox" id="VERBOSE" role="switch">
                     <span class="slider modern-slider">
                         <span class="slider-text off">OFF</span>
                         <span class="slider-text on">ON</span>
@@ -483,70 +744,6 @@
             <div class="info-banner modern-info">
                 <span class="info-icon">ℹ️</span>
                 <p class="info-text" data-i18n="saveRebootInfo">Changes will be applied after saving and rebooting your device. Make sure to backup your current configuration before making changes.</p>
-            </div>
-        </div>
-
-        <!-- ── GAME EXCLUSION LIST ── -->
-        <div class="card glass-panel animate-in" style="animation-delay: 0.08s;">
-            <div class="card-header">
-                <span class="header-icon gradient-text">🎮</span>
-                <div>
-                    <h2 data-i18n="gameExclTitle">Game Exclusion List</h2>
-                    <span class="header-subtitle" data-i18n="gameExclSub">Packages excluded from force-stop during skiavk activation</span>
-                </div>
-            </div>
-
-            <div class="info-banner modern-info" style="margin-bottom:14px;">
-                <span class="info-icon">🔗</span>
-                <p class="info-text" data-i18n="gameExclDesc">Native-Vulkan games listed here are skipped during the boot-time force-stop sequence. The game-compat daemon automatically switches HWUI to skiagl when any listed game is detected running, preventing dual-VkDevice conflicts on custom Adreno drivers.</p>
-            </div>
-
-            <div class="badge badge-primary" style="margin-bottom:14px;" data-i18n="gameExclBadge">Shared · post-fs-data &amp; service</div>
-
-            <!-- Why accordion -->
-            <button class="game-excl-why-btn ripple-effect" id="btnGameExclWhy" aria-expanded="false">
-                <span class="game-excl-why-icon">❓</span>
-                <span data-i18n="gameExclWhyTitle">Why are games excluded?</span>
-                <span class="game-excl-chevron">▾</span>
-            </button>
-            <div id="gameExclWhyBody" class="game-excl-why-body" style="display:none;" data-i18n="gameExclWhyBody">
-                UE4/custom-Vulkan games create their own VkDevice concurrently with HWUI. Custom Adreno drivers cannot handle dual concurrent vkCreateDevice in the same process → SIGSEGV. The game-compat daemon switches HWUI to skiagl within ~1s of detecting a listed game, so HWUI uses GL while the game uses Vulkan — no conflict.
-            </div>
-
-            <!-- Add package row -->
-            <div class="game-excl-add-row">
-                <input type="text"
-                       id="gameExclInput"
-                       class="input-glass premium-input"
-                       data-i18n-placeholder="gameExclPlaceholder"
-                       placeholder="e.g. com.example.game or com.example.*"
-                       autocomplete="off" autocorrect="off" autocapitalize="off"
-                       spellcheck="false"
-                       aria-label="Package name to add">
-                <button class="btn-primary ripple-effect game-excl-add-btn" id="btnGameExclAdd" aria-label="Add package">
-                    <span data-i18n="gameExclAddBtn">Add</span>
-                </button>
-            </div>
-            <p class="game-excl-hint" data-i18n="gameExclWildcard">Wildcards supported (e.g. com.epicgames.*)</p>
-
-            <!-- Package count -->
-            <div class="game-excl-count-row">
-                <span id="gameExclCount" class="game-excl-count">0 packages</span>
-            </div>
-
-            <!-- List -->
-            <div id="gameExclList" class="game-excl-list"></div>
-
-            <!-- Actions -->
-            <div class="button-group" style="margin-top:16px;">
-                <button class="btn-primary full-width ripple-effect modern-btn-large" id="btnGameExclSave">
-                    <span class="btn-icon">💾</span>
-                    <span data-i18n="gameExclSave">Save List</span>
-                </button>
-                <button class="btn-secondary full-width ripple-effect modern-btn-large" id="btnGameExclReset">
-                    <span class="btn-icon">♻️</span>
-                    <span data-i18n="gameExclReset">Reset to Defaults</span>
-                </button>
             </div>
         </div>
 

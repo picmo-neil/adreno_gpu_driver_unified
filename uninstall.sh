@@ -135,19 +135,12 @@ rm -f  /data/local/tmp/adreno_vk_compat_full    2>/dev/null || true
 rm -f  /data/local/tmp/adreno_vk_compat_score   2>/dev/null || true
 rm -f  /data/local/tmp/adreno_skiavk_degraded   2>/dev/null || true
 rm -f  /data/local/tmp/adreno_old_vendor        2>/dev/null || true
-rm -f  /data/local/tmp/adreno_game_exclusion_list.sh 2>/dev/null || true
 # Additional state files not previously removed on uninstall:
 rm -f  /data/local/tmp/adreno_last_render_mode      2>/dev/null || true  # stale mode → reinstall skips cache clear
 rm -f  /data/local/tmp/adreno_last_cleared_state    2>/dev/null || true  # 3-line state file → reinstall forces correct first-boot clear
 rm -f  /data/local/tmp/adreno_skiavk_force_override 2>/dev/null || true  # user-created force-override; previously not removed on uninstall
 rm -f  /data/local/tmp/adreno_vk_compat             2>/dev/null || true  # prop_only/incompatible flag — Vulkan compat state
 rm -f  /data/local/tmp/adreno_config.txt            2>/dev/null || true  # SD mirror read by next post-fs-data boot
-rm -f  /data/local/tmp/adreno_ged_w_*              2>/dev/null || true  # orphaned game-watch marker files (old CN_PROC daemon)
-# New Encore-style daemon temp files:
-rm -f  /data/local/tmp/adreno_ged_pid            2>/dev/null || true  # C daemon PID
-rm -f  /data/local/tmp/adreno_ged_sysmon_pid     2>/dev/null || true  # Java companion PID
-rm -f  /data/local/tmp/adreno_ged_active         2>/dev/null || true  # active game state (0/1)
-rm -rf /data/local/tmp/adreno_ged               2>/dev/null || true  # status dir (system_status + sysmon.log)
 rm -f  /data/local/tmp/adreno_early_log_buffer.*    2>/dev/null || true  # leftover early log buffers
 echo "✓ Temp files removed"
 echo ""
@@ -178,86 +171,6 @@ echo ""
 echo "Removing QGL owner marker..."
 rm -f /data/vendor/gpu/.adreno_qgl_owner 2>/dev/null || true
 echo "✓ QGL owner marker removed"
-echo ""
-
-# ========================================
-# STOP GAME EXCLUSION DAEMON
-# ========================================
-# Kill the main game exclusion daemon and all sub-daemons it spawned.
-# Also restore debug.hwui.renderer to skiavk if it was switched to skiagl
-# by an active daemon session (handles the "uninstall while game running" case).
-
-echo "Stopping game exclusion daemon (inotify/Java-companion architecture)..."
-
-# ── 1. Kill C daemon (adreno_ged) ────────────────────────────────────────
-_GED_PID_FILE="/data/local/tmp/adreno_ged_pid"
-if [ -f "$_GED_PID_FILE" ]; then
-  _ged_pid=$(cat "$_GED_PID_FILE" 2>/dev/null || true)
-  if [ -n "$_ged_pid" ] && kill -0 "$_ged_pid" 2>/dev/null; then
-    # SIGTERM triggers clean shutdown: restores renderer, removes PID file.
-    kill -TERM "$_ged_pid" 2>/dev/null || true
-    sleep 1
-    kill -0 "$_ged_pid" 2>/dev/null && kill -KILL "$_ged_pid" 2>/dev/null || true
-    echo "✓ C daemon (PID=$_ged_pid) terminated"
-  else
-    echo "✓ C daemon was not running"
-  fi
-else
-  echo "✓ No C daemon PID file found"
-fi
-
-# ── 2. Kill Java companion (system_monitor via app_process) ──────────────
-_SYSMON_PID_FILE="/data/local/tmp/adreno_ged_sysmon_pid"
-if [ -f "$_SYSMON_PID_FILE" ]; then
-  _sysmon_pid=$(cat "$_SYSMON_PID_FILE" 2>/dev/null || true)
-  if [ -n "$_sysmon_pid" ] && kill -0 "$_sysmon_pid" 2>/dev/null; then
-    kill -TERM "$_sysmon_pid" 2>/dev/null || true
-    sleep 1
-    kill -0 "$_sysmon_pid" 2>/dev/null && kill -KILL "$_sysmon_pid" 2>/dev/null || true
-    echo "✓ Java companion (PID=$_sysmon_pid) terminated"
-  else
-    echo "✓ Java companion was not running"
-  fi
-else
-  echo "✓ No Java companion PID file found"
-fi
-
-# Also kill by process name as belt-and-suspenders.
-pkill -TERM -f "AdrenoSysMon" 2>/dev/null || true
-pkill -TERM -f "system_monitor.apk" 2>/dev/null || true
-sleep 1
-pkill -KILL -f "AdrenoSysMon" 2>/dev/null || true
-
-# ── 3. Restore renderer if daemon left it in skiagl ───────────────────────
-_GED_ACTIVE_FILE="/data/local/tmp/adreno_ged_active"
-_ged_active=0
-if [ -f "$_GED_ACTIVE_FILE" ]; then
-  { IFS= read -r _ged_active; } < "$_GED_ACTIVE_FILE" 2>/dev/null || _ged_active=0
-  _ged_active="${_ged_active:-0}"
-  case "$_ged_active" in [0-9]*) ;; *) _ged_active=0 ;; esac
-fi
-
-if [ "$_ged_active" -gt 0 ]; then
-  if command -v resetprop >/dev/null 2>&1; then
-    resetprop debug.hwui.renderer skiavk 2>/dev/null || \
-      setprop debug.hwui.renderer skiavk 2>/dev/null || true
-    echo "✓ Renderer restored to skiavk (was skiagl — game was active at uninstall)"
-  fi
-fi
-
-# ── 4. Remove all daemon state files ─────────────────────────────────────
-rm -f "$_GED_PID_FILE"          2>/dev/null || true
-rm -f "$_SYSMON_PID_FILE"       2>/dev/null || true
-rm -f "$_GED_ACTIVE_FILE"       2>/dev/null || true
-# Legacy files from old CN_PROC daemon (safe to remove even if absent)
-rm -f "/data/local/tmp/adreno_ged_count"    2>/dev/null || true
-rm -f "/data/local/tmp/adreno_ged_w_*"     2>/dev/null || true
-rmdir "/data/local/tmp/adreno_ged.lock"    2>/dev/null || true
-# Status file and log directory written by sysmon
-rm -rf "/data/local/tmp/adreno_ged"        2>/dev/null || true
-
-unset _GED_PID_FILE _SYSMON_PID_FILE _GED_ACTIVE_FILE _ged_pid _sysmon_pid _ged_active
-echo "✓ Game exclusion daemon state files removed"
 echo ""
 
 echo "========================================"

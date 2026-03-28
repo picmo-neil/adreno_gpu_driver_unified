@@ -30,7 +30,7 @@ load_config() {
     _v="${_v%"$_CR"}"
     # Normalise boolean keys
     case "$_k" in
-      VERBOSE|ARM64_OPT|QGL|PLT|GAME_EXCLUSION_DAEMON|FORCE_SKIAVKTHREADED_BACKEND)
+      VERBOSE|ARM64_OPT|QGL|PLT|FORCE_SKIAVKTHREADED_BACKEND)
         case "$_v" in
           [Yy]|[Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee]) _v='y' ;;
           *) _v='n' ;;
@@ -56,7 +56,6 @@ load_config() {
       QGL)         QGL="$_v" ;;
       PLT)         PLT="$_v" ;;
       RENDER_MODE) RENDER_MODE="$_v" ;;
-      GAME_EXCLUSION_DAEMON) GAME_EXCLUSION_DAEMON="$_v" ;;
       FORCE_SKIAVKTHREADED_BACKEND) FORCE_SKIAVKTHREADED_BACKEND="$_v" ;;
     esac
   done < "$cfg"

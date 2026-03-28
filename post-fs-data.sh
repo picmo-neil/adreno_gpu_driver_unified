@@ -69,33 +69,6 @@ unset _km _kl
 # ========================================
 BOOT_ATTEMPTS_FILE="/data/local/tmp/adreno_boot_attempts"
 
-# ── SHARED GAME EXCLUSION LIST ────────────────────────────────────────────────
-# Defines GAME_EXCLUSION_PKGS and _game_pkg_excluded() used in game exclusion daemon.
-# Edit via Adreno Manager WebUI (Config → Game Exclusion List) or manually.
-# Stored at SD_CONFIG first, then module path as fallback.
-_GAME_EXCL_SD="/sdcard/Adreno_Driver/Config/game_exclusion_list.sh"
-_GAME_EXCL_MOD="${MODDIR}/game_exclusion_list.sh"
-_GAME_EXCL_DATA="/data/local/tmp/adreno_game_exclusion_list.sh"
-if [ -f "$_GAME_EXCL_SD" ]; then
-  # shellcheck source=/dev/null
-  . "$_GAME_EXCL_SD"
-elif [ -f "$_GAME_EXCL_DATA" ]; then
-  # shellcheck source=/dev/null
-  . "$_GAME_EXCL_DATA"
-elif [ -f "$_GAME_EXCL_MOD" ]; then
-  # shellcheck source=/dev/null
-  . "$_GAME_EXCL_MOD"
-else
-  # Fallback inline definition (matches bundled game_exclusion_list.sh defaults)
-  # NOTE: Meta packages (Facebook/Instagram/WhatsApp) included here to match
-  # service.sh (line ~56) — prevents exclude Meta
-  # apps during boot which causes dangling ANativeWindow handles.
-  GAME_EXCLUSION_PKGS="com.tencent.ig com.pubg.krmobile com.pubg.imobile com.pubg.newstate com.vng.pubgmobile com.rekoo.pubgm com.tencent.tmgp.pubgmhd com.epicgames.* com.activision.callofduty.shooter com.garena.game.codm com.tencent.tmgp.cod com.vng.codmvn com.miHoYo.GenshinImpact com.cognosphere.GenshinImpact com.miHoYo.enterprise.HSRPrism com.HoYoverse.hkrpgoversea com.levelinfinite.hotta com.proximabeta.mfh com.HoYoverse.Nap com.miHoYo.ZZZ com.facebook.katana com.facebook.orca com.facebook.lite com.facebook.mlite com.instagram.android com.instagram.lite com.instagram.barcelona com.whatsapp com.whatsapp.w4b"
-  _game_pkg_excluded() { local _p="$1" _e; for _e in $GAME_EXCLUSION_PKGS; do case "$_p" in $_e) return 0;; esac; done; return 1; }
-fi
-unset _GAME_EXCL_SD _GAME_EXCL_MOD _GAME_EXCL_DATA
-# ─────────────────────────────────────────────────────────────────────────────
-
 # ========================================
 # APATCH MODE DETECTION
 # ========================================
@@ -251,7 +224,6 @@ ARM64_OPT="n"
 QGL="n"
 PLT="n"
 RENDER_MODE="normal"
-GAME_EXCLUSION_DAEMON="n"
 FORCE_SKIAVKTHREADED_BACKEND="n"
 
 CONFIG_FILE="/sdcard/Adreno_Driver/Config/adreno_config.txt"
@@ -274,38 +246,14 @@ fi
 [ "$QGL" != "y" ]       && QGL="n"
 [ "$PLT" != "y" ]       && PLT="n"
 [ -z "$RENDER_MODE" ]   && RENDER_MODE="normal"
-[ "$GAME_EXCLUSION_DAEMON" != "y" ] && GAME_EXCLUSION_DAEMON="n"
 [ "$FORCE_SKIAVKTHREADED_BACKEND" != "y" ] && FORCE_SKIAVKTHREADED_BACKEND="n"
-# BUG A FIX: Normalize RENDER_MODE to lowercase so every case statement matches
+# Normalize RENDER_MODE to lowercase so every case statement matches
 # regardless of how the user typed it (SkiaVK, SKIAVK, SkiaGL, etc.).
-# service.sh already does this. post-fs-data.sh was missing it — any uppercase
-# variant silently fell through all case branches and renderer was never set.
 RENDER_MODE=$(printf '%s' "$RENDER_MODE" | tr '[:upper:]' '[:lower:]')
 # Legacy: skiavkthreaded/skiaglthreaded were removed as standalone RENDER_MODE values.
 # common.sh normalizes them on load, but guard here defensively.
 [ "$RENDER_MODE" = "skiavkthreaded" ] && RENDER_MODE="skiavk"
 [ "$RENDER_MODE" = "skiaglthreaded" ] && RENDER_MODE="skiagl"
-# Auto-enable GED for skiavk mode to prevent dual-VkDevice crash in native-Vulkan games.
-# Without the GED, native-Vulkan games (PUBG, Genshin, CoD, Fortnite) crash on
-# every open in skiavk mode. Root cause: the game engine creates a VkDevice from
-# its RHI/render thread. HWUI in skiavk mode creates a SECOND VkDevice in the same
-# process via vkCreateDevice. Two VkDevices in one process = SIGSEGV in libgsl.so
-# / VK_ERROR_DEVICE_LOST. The GED switches HWUI to skiagl before the game opens,
-# so only the game's VkDevice is created → no race → no crash.
-# Users who explicitly set GAME_EXCLUSION_DAEMON=y are unaffected (already "y").
-# Users who set GAME_EXCLUSION_DAEMON=n have opted out intentionally — respected.
-if [ "$RENDER_MODE" = "skiavk" ]; then
-  # Auto-enable GED for skiavk modes unless the user explicitly opted out.
-  # The sanitization guard above (line 268) normalises any non-"y" value to "n",
-  # so at this point GAME_EXCLUSION_DAEMON is either "y" (user opted in) or
-  # "n" (default or user opted out).  We promote "n" to "y" only here, not in
-  # the general case, so that non-skiavk modes never start the daemon.
-  if [ "$GAME_EXCLUSION_DAEMON" = "n" ]; then
-    GAME_EXCLUSION_DAEMON="y"
-    # Log the auto-enable on the first logging pass (after log init).
-    _GED_AUTO_ENABLED=1
-  fi
-fi
 
 # ========================================
 # LOGGING SETUP
@@ -636,9 +584,7 @@ else
   log_boot "No config found, using defaults"
 fi
 
-log_boot "Configuration: PLT=$PLT, QGL=$QGL, ARM64_OPT=$ARM64_OPT, RENDER=$RENDER_MODE, GAME_EXCLUSION_DAEMON=$GAME_EXCLUSION_DAEMON, FORCE_SKIAVKTHREADED_BACKEND=$FORCE_SKIAVKTHREADED_BACKEND"
-[ "${_GED_AUTO_ENABLED:-0}" = "1" ] && \
-  log_boot "[AUTO] GAME_EXCLUSION_DAEMON auto-enabled for RENDER_MODE=$RENDER_MODE (prevents dual-VkDevice crash in native-Vulkan games). Set GAME_EXCLUSION_DAEMON=n to opt out."
+log_boot "Configuration: PLT=$PLT, QGL=$QGL, ARM64_OPT=$ARM64_OPT, RENDER=$RENDER_MODE, FORCE_SKIAVKTHREADED_BACKEND=$FORCE_SKIAVKTHREADED_BACKEND"
 
 # ========================================
 # SYNC MODULE STATE TO CURRENT CONFIG
@@ -2689,19 +2635,6 @@ case "$RENDER_MODE" in
           > /dev/kmsg 2>/dev/null || true
     ) >/dev/null 2>&1 &
     log_boot "[OK] skiavk: renderer re-enforced after boot_completed (no force-stops — LYB approach)"
-
-    # ── GAME EXCLUSION DAEMON ──────────────────────────────────────────────
-    # GED is now launched exclusively from service.sh (Encore-style architecture):
-    #   • Java companion (system_monitor.apk via app_process) monitors foreground app
-    #   • C daemon (adreno_ged) watches status file via inotify — zero CPU overhead
-    # Launching from post-fs-data.sh (init domain, before boot_completed) is
-    # removed: the old CN_PROC netlink approach required CAP_NET_ADMIN and caused
-    # watchdog reboots. service.sh launches both after boot_completed naturally.
-    if [ "$GAME_EXCLUSION_DAEMON" = "y" ]; then
-      log_boot "[OK] Game exclusion daemon: will be launched by service.sh (inotify/Java-companion)"
-    else
-      log_boot "[SKIP] Game exclusion daemon: disabled (GAME_EXCLUSION_DAEMON=n)"
-    fi
     ;;
 
   skiagl)
@@ -3501,7 +3434,7 @@ done
 
 log_boot "========================================"
 log_boot "post-fs-data.sh completed successfully"
-log_boot "Configuration: PLT=$PLT, QGL=$QGL, RENDER=$RENDER_MODE, GAME_EXCLUSION_DAEMON=$GAME_EXCLUSION_DAEMON, FIRST_BOOT_DEFERRAL=disabled"
+log_boot "Configuration: PLT=$PLT, QGL=$QGL, RENDER=$RENDER_MODE, FIRST_BOOT_DEFERRAL=disabled"
 log_boot "Metamodule active: $METAMODULE_ACTIVE"
 log_boot "SUSFS (root hiding): $SUSFS_ACTIVE"
 log_boot "OEM ROM: $OEM_TYPE"

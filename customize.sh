@@ -49,7 +49,7 @@ command_exists() {
 # BUG-11 NOTE: This function must stay in sync with load_config() in common.sh.
 # Any new config key added to load_config() must be added here too.
 # Keys currently handled: VERBOSE, ARM64_OPT, QGL, PLT, RENDER_MODE,
-# GAME_EXCLUSION_DAEMON, FORCE_SKIAVKTHREADED_BACKEND.
+# FORCE_SKIAVKTHREADED_BACKEND.
 parse_config() {
   local cfg="$1" _k _v
   [ -f "$cfg" ] || return 1
@@ -57,7 +57,7 @@ parse_config() {
     case "$_k" in '#'*|'') continue ;; esac
     _v="${_v%"$(printf '\r')"}"
     case "$_k" in
-      VERBOSE|ARM64_OPT|QGL|PLT|GAME_EXCLUSION_DAEMON|FORCE_SKIAVKTHREADED_BACKEND)
+      VERBOSE|ARM64_OPT|QGL|PLT|FORCE_SKIAVKTHREADED_BACKEND)
         case "$_v" in
           [Yy]|[Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee]) _v='y' ;;
           *) _v='n' ;;
@@ -81,7 +81,6 @@ parse_config() {
       QGL)         QGL="$_v" ;;
       PLT)         PLT="$_v" ;;
       RENDER_MODE) RENDER_MODE="$_v" ;;
-      GAME_EXCLUSION_DAEMON) GAME_EXCLUSION_DAEMON="$_v" ;;
       FORCE_SKIAVKTHREADED_BACKEND) FORCE_SKIAVKTHREADED_BACKEND="$_v" ;;
     esac
   done < "$cfg"
@@ -97,7 +96,6 @@ ARM64_OPT="n"
 QGL="n"
 PLT="n"
 RENDER_MODE="normal"
-GAME_EXCLUSION_DAEMON="n"
 CONFIG_FILE=""
 CONFIG_FOUND=false
 
@@ -971,7 +969,6 @@ RESTORED_CONFIGS="$CONFIG_FOUND"
 [ "$QGL" = "y" ]       || QGL="n"
 [ "$PLT" = "y" ]       || PLT="n"
 [ "$VERBOSE" = "y" ]   || VERBOSE="n"
-[ "$GAME_EXCLUSION_DAEMON" = "y" ] || GAME_EXCLUSION_DAEMON="n"
 [ -n "$RENDER_MODE" ]  || RENDER_MODE="normal"
 
 ui_print "Configuration:"
@@ -981,9 +978,8 @@ if [ "$IS_ARM64" = "true" ]; then
   ui_print "  - ARM64 Opt: $ARM64_OPT"
 fi
 ui_print "  - Render: $RENDER_MODE"
-ui_print "  - Game Exclusion Daemon: $GAME_EXCLUSION_DAEMON"
 
-log_only "Final config: PLT=$PLT, QGL=$QGL, ARM64_OPT=$ARM64_OPT, VERBOSE=$VERBOSE, RENDER_MODE=$RENDER_MODE, GAME_EXCLUSION_DAEMON=$GAME_EXCLUSION_DAEMON"
+log_only "Final config: PLT=$PLT, QGL=$QGL, ARM64_OPT=$ARM64_OPT, VERBOSE=$VERBOSE, RENDER_MODE=$RENDER_MODE"
 
 ui_print " "
 ui_print "========================================"
@@ -1286,7 +1282,7 @@ else
   log_only "WARNING: No system directory found in module package"
 fi
 
-for file in module.prop post-fs-data.sh service.sh uninstall.sh system.prop sepolicy.rule adreno_config.txt qgl_config.txt common.sh game_excl_daemon.sh game_exclusion_list.sh; do
+for file in module.prop post-fs-data.sh service.sh uninstall.sh system.prop sepolicy.rule adreno_config.txt qgl_config.txt common.sh; do
   if [ -f "$TMPDIR/$file" ]; then
     if cp -f "$TMPDIR/$file" "$MODPATH/" 2>/dev/null; then
       FILES_COPIED=$((FILES_COPIED + 1))
@@ -1297,57 +1293,6 @@ for file in module.prop post-fs-data.sh service.sh uninstall.sh system.prop sepo
     fi
   fi
 done
-
-# ── Native GED binary install ──────────────────────────────────────────────
-# Install the pre-compiled adreno_ged binary for the device's ABI.
-# Layout in the zip:   bin/arm64-v8a/adreno_ged
-#                      bin/armeabi-v7a/adreno_ged
-# Installed to:        $MODPATH/bin/<abi>/adreno_ged  (executable 0755)
-#
-# If no binary is found for this ABI, the shell fallback (game_excl_daemon.sh)
-# is used automatically by post-fs-data.sh — no user action needed.
-_GED_ABI="${CPU_ABI:-$(getprop ro.product.cpu.abi 2>/dev/null || echo '')}"
-_GED_ARCH=""
-case "$_GED_ABI" in
-  arm64*|aarch64*) _GED_ARCH="arm64-v8a"   ;;
-  arm*|armeabi*)   _GED_ARCH="armeabi-v7a" ;;
-  *) log_only "INFO: native GED binary: unsupported ABI=$_GED_ABI, will use shell fallback" ;;
-esac
-
-if [ -n "$_GED_ARCH" ]; then
-  _GED_SRC="$TMPDIR/bin/${_GED_ARCH}/adreno_ged"
-  _GED_DST_DIR="$MODPATH/bin/${_GED_ARCH}"
-  _GED_DST="$_GED_DST_DIR/adreno_ged"
-
-  # Some Magisk forks/versions pre-copy all zip contents to MODPATH before
-  # sourcing customize.sh. If the binary is already in MODPATH, skip the copy
-  # and just ensure it's executable.
-  if [ ! -f "$_GED_SRC" ] && [ -f "$_GED_DST" ]; then
-    log_only "Native GED binary already in MODPATH (pre-copied by installer), skipping cp"
-    if chmod 0755 "$_GED_DST" 2>/dev/null; then
-      FILES_COPIED=$((FILES_COPIED + 1))
-      ui_print "[OK] Native GED binary already installed (${_GED_ARCH})"
-      log_only "Native GED binary permissions confirmed: $_GED_DST"
-    fi
-  elif [ -f "$_GED_SRC" ]; then
-    if mkdir -p "$_GED_DST_DIR" 2>/dev/null && \
-       cp -f "$_GED_SRC" "$_GED_DST" 2>/dev/null && \
-       chmod 0755 "$_GED_DST" 2>/dev/null; then
-      FILES_COPIED=$((FILES_COPIED + 1))
-      ui_print "[OK] Native GED binary installed (${_GED_ARCH})"
-      log_only "Native GED binary installed: $_GED_DST"
-    else
-      FILES_FAILED=$((FILES_FAILED + 1))
-      ui_print "[!] Native GED binary copy failed — shell fallback will be used"
-      log_only "ERROR: Failed to install native GED binary to $_GED_DST"
-    fi
-  else
-    ui_print "[!] Native GED binary not found in package for ABI=${_GED_ARCH}"
-    ui_print "    Shell fallback (game_excl_daemon.sh) will be used instead."
-    log_only "INFO: $_GED_SRC not in package — shell fallback active"
-  fi
-fi
-unset _GED_ABI _GED_ARCH _GED_SRC _GED_DST_DIR _GED_DST
 
 if [ $FILES_FAILED -gt 0 ]; then
   ui_print "[!] Module files installed with $FILES_FAILED errors"
@@ -1400,16 +1345,6 @@ for script in post-fs-data.sh service.sh boot-completed.sh uninstall.sh common.s
     fi
   fi
 done
-
-# Ensure native GED binaries are executable
-for _abi_dir in "$MODPATH/bin/arm64-v8a" "$MODPATH/bin/armeabi-v7a"; do
-  if [ -f "$_abi_dir/adreno_ged" ]; then
-    chmod 0755 "$_abi_dir/adreno_ged" 2>/dev/null && \
-      PERMS_SET=$((PERMS_SET + 1)) || PERMS_FAILED=$((PERMS_FAILED + 1))
-    log_only "Executable: $_abi_dir/adreno_ged"
-  fi
-done
-unset _abi_dir
 
 if [ -d "$MODPATH/system/vendor" ]; then
   find "$MODPATH/system/vendor" -type f -name "*.so" -exec chmod 0644 {} + 2>/dev/null && \
@@ -1813,56 +1748,6 @@ if [ -f "$MODPATH/adreno_config.txt" ]; then
       log_only "WARNING: Failed to backup configuration to SD Card"
   fi
 fi
-
-# ── game_exclusion_list.sh backup / restore ───────────────────────────────────
-# The user's custom game exclusion list must survive reinstalls exactly like
-# adreno_config.txt does.  Without this, every fresh install resets the list
-# to the module's bundled default, losing any games the user added via WebUI.
-#
-# Priority (mirrors the source priority in service.sh):
-#   1. SD card backup  → restore to MODPATH (user's saved list wins)
-#   2. No SD backup    → copy the bundled default TO SD (first-run seed)
-#
-# The live WebUI-edited copy lives at:
-#   /data/local/tmp/adreno_game_exclusion_list.sh (written by WebUI Save)
-#   /sdcard/Adreno_Driver/Config/game_exclusion_list.sh (SD backup, written by service.sh)
-#   $MODPATH/game_exclusion_list.sh (module-bundled default / last restored)
-#
-# We prefer the SD backup because it always has the user's latest edits
-# (service.sh syncs it from /data/local/tmp at each successful boot).
-_GE_SD="$SD_CONFIG_DIR/game_exclusion_list.sh"
-_GE_DATA="/data/local/tmp/adreno_game_exclusion_list.sh"
-_GE_MOD="$MODPATH/game_exclusion_list.sh"
-
-if [ -f "$_GE_SD" ]; then
-  # User has a previously saved list on SD — restore it into the module so
-  # service.sh and post-fs-data.sh find it at $MODPATH/game_exclusion_list.sh.
-  cp -f "$_GE_SD" "$_GE_MOD" 2>/dev/null && \
-    log_only "[OK] game_exclusion_list.sh: restored from SD card backup" || \
-    log_only "WARNING: Failed to restore game_exclusion_list.sh from SD"
-  ui_print "[OK] Game exclusion list restored from SD backup"
-elif [ -f "$_GE_DATA" ]; then
-  # Live /data copy exists but no SD backup yet — copy it to both locations.
-  cp -f "$_GE_DATA" "$_GE_MOD" 2>/dev/null && \
-    log_only "[OK] game_exclusion_list.sh: restored from /data live copy" || true
-  if mkdir -p "$SD_CONFIG_DIR" 2>/dev/null; then
-    cp -f "$_GE_DATA" "$_GE_SD" 2>/dev/null && \
-      log_only "[OK] game_exclusion_list.sh: backed up live copy to SD" || true
-  fi
-  ui_print "[OK] Game exclusion list restored from live data copy"
-elif [ -f "$_GE_MOD" ]; then
-  # Only the module-bundled default exists — seed SD backup for future installs.
-  if mkdir -p "$SD_CONFIG_DIR" 2>/dev/null; then
-    cp -f "$_GE_MOD" "$_GE_SD" 2>/dev/null && \
-      log_only "[OK] game_exclusion_list.sh: default seeded to SD card" || \
-      log_only "WARNING: Failed to seed game_exclusion_list.sh to SD"
-  fi
-  ui_print "[OK] Game exclusion list: default seeded to SD"
-else
-  log_only "INFO: No game_exclusion_list.sh found (WebUI will use built-in default on first run)"
-fi
-unset _GE_SD _GE_DATA _GE_MOD
-# ─────────────────────────────────────────────────────────────────────────────
 
 # ========================================
 # SAVE INSTALLATION INFO

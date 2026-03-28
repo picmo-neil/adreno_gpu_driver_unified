@@ -515,31 +515,6 @@ const DEFAULT_EN = {
     useVulkanLabel: "Vulkan Prop",
     renderStatusHint: "Renderer props written to system.prop (persistent) + applied live via resetprop — takes full effect on next reboot",
     // Game Exclusion List
-    gameExclTitle: "Game Exclusion List",
-    gameExclSub: "⚠️ Only add a game if it CRASHES in skiavk mode — remove it if it runs fine",
-    gameExclDesc: "Only add a game here if it crashes immediately when skiavk is active (black screen, instant force-close, GPU fault). If the game works fine in skiavk mode, do NOT add it — adding it unnecessarily keeps the game on the older GL renderer and wastes daemon protection slots. Remove any game that no longer crashes.",
-    gameExclBadge: "Shared · post-fs-data & service",
-    gameExclAdd: "Add Package",
-    gameExclPlaceholder: "e.g. com.example.game or com.example.*",
-    gameExclAddBtn: "Add",
-    gameExclRemove: "Remove",
-    gameExclEmpty: "No packages in exclusion list",
-    gameExclSave: "Save List",
-    gameExclSaved: "Game exclusion list saved",
-    gameExclSaveError: "Failed to save exclusion list",
-    gameExclReset: "Reset to Defaults",
-    gameExclResetConfirm: "Reset game exclusion list to factory defaults?",
-    gameExclCount: "packages",
-    gameExclWildcard: "Wildcards supported (e.g. com.epicgames.*)",
-    gameExclWhyTitle: "When to add / remove a game",
-    gameExclWhyBody: "ADD a game only if it crashes in skiavk mode: the crash is caused by a dual-VkDevice conflict — apps that create their own VkDevice (game engines using Vulkan directly, e.g. UE4, custom Vulkan) conflict with HWUI holding a second one, which custom Adreno drivers cannot handle → SIGSEGV. The compat daemon switches HWUI to skiagl within ~1s of detecting the app, resolving the conflict. REMOVE a game if it runs fine in skiavk — it does not need to be here, and keeping it unnecessarily delays its transition to the Vulkan renderer.",
-    applyNowTitle: "Apply Render Mode Now",
-    applyNowDesc: "Apply via resetprop instantly — no reboot needed. Kill & reopen apps to see effect.",
-    applyNow: "Apply Now",
-    // Game Exclusion Daemon toggle
-    daemonName: "Game Exclusion Daemon",
-    daemonDesc: "Auto-switches HWUI to skiagl when a native-Vulkan game is detected. Prevents dual-VkDevice crashes in skiavk mode.",
-    daemonSub: "Required for apps that have problems in skiavk rendering",
     save: "Save & Reboot",
     saveRebootInfo: "Changes will be applied after saving and rebooting your device. Make sure to backup your current configuration before making changes.",
     resetDefaults: "Reset to Defaults",
@@ -788,31 +763,6 @@ const BUILTIN_ZH_CN = {
     useVulkanLabel: "Vulkan 属性",
     renderStatusHint: "渲染器属性已写入 system.prop（持久化）并通过 resetprop 实时应用 — 重启后完全生效",
     // Game Exclusion List
-    gameExclTitle: "游戏排除列表",
-    gameExclSub: "⚠️ 仅在游戏于 skiavk 模式下崩溃时才添加 — 正常运行则请移除",
-    gameExclDesc: "仅在游戏于 skiavk 模式下立即崩溃时（黑屏、即时强制关闭、GPU 故障）才添加到此列表。如果游戏在 skiavk 模式下运行正常，请勿添加 — 不必要地添加会使该游戏继续使用旧版 GL 渲染器，并浪费守护进程保护槽位。若游戏已不再崩溃，请将其移除。",
-    gameExclBadge: "共享 · post-fs-data 和 service",
-    gameExclAdd: "添加包名",
-    gameExclPlaceholder: "例如 com.example.game 或 com.example.*",
-    gameExclAddBtn: "添加",
-    gameExclRemove: "删除",
-    gameExclEmpty: "排除列表为空",
-    gameExclSave: "保存列表",
-    gameExclSaved: "游戏排除列表已保存",
-    gameExclSaveError: "保存排除列表失败",
-    gameExclReset: "恢复默认",
-    gameExclResetConfirm: "将游戏排除列表重置为出厂默认值？",
-    gameExclCount: "个包",
-    gameExclWildcard: "支持通配符（例如 com.epicgames.*）",
-    gameExclWhyTitle: "何时添加或移除游戏",
-    gameExclWhyBody: "仅在游戏于 skiavk 模式下崩溃时才添加：崩溃由双 VkDevice 冲突引起 — 直接使用 Vulkan 的应用（自定义 Vulkan 引擎，如 UE4 等）与 HWUI 同时创建 VkDevice，自定义 Adreno 驱动无法处理 → SIGSEGV。兼容守护进程会在检测到应用后约 1 秒内将 HWUI 切换为 skiagl 解决冲突。若游戏在 skiavk 模式下运行正常 — 请将其移除，无需保留在此列表中。",
-    applyNowTitle: "立即应用渲染模式",
-    applyNowDesc: "通过 resetprop 即时应用 — 无需重启。重启应用以查看效果。",
-    applyNow: "立即应用",
-    // Game Exclusion Daemon toggle
-    daemonName: "游戏排除守护进程",
-    daemonDesc: "检测到原生 Vulkan 游戏时自动将 HWUI 切换为 skiagl。防止 skiavk 模式下的双 VkDevice 崩溃。",
-    daemonSub: "适用于在skiavk渲染模式下存在问题的应用",
     save: "保存并重启",
     saveRebootInfo: "更改将在保存并重启设备后生效。在进行更改之前，请务必备份当前配置。",
     resetDefaults: "恢复默认值",
@@ -1061,31 +1011,6 @@ const BUILTIN_ZH_TW = {
     useVulkanLabel: "Vulkan 屬性",
     renderStatusHint: "渲染器屬性已寫入 system.prop（持久化）並透過 resetprop 即時套用 — 重新啟動後完全生效",
     // Game Exclusion List
-    gameExclTitle: "遊戲排除清單",
-    gameExclSub: "⚠️ 僅在遊戲於 skiavk 模式下崩潰時才新增 — 正常運行則請移除",
-    gameExclDesc: "僅在遊戲於 skiavk 模式下立即崩潰時（黑屏、即時強制關閉、GPU 故障）才新增至此清單。若遊戲在 skiavk 模式下運行正常，請勿新增 — 不必要地新增會使遊戲繼續使用舊版 GL 渲染器，並浪費守護程式保護槽位。若遊戲已不再崩潰，請將其移除。",
-    gameExclBadge: "共享 · post-fs-data 和 service",
-    gameExclAdd: "新增套件名稱",
-    gameExclPlaceholder: "例如 com.example.game 或 com.example.*",
-    gameExclAddBtn: "新增",
-    gameExclRemove: "移除",
-    gameExclEmpty: "排除清單為空",
-    gameExclSave: "儲存清單",
-    gameExclSaved: "遊戲排除清單已儲存",
-    gameExclSaveError: "儲存排除清單失敗",
-    gameExclReset: "恢復預設",
-    gameExclResetConfirm: "將遊戲排除清單重置為出廠預設值？",
-    gameExclCount: "個套件",
-    gameExclWildcard: "支援萬用字元（例如 com.epicgames.*）",
-    gameExclWhyTitle: "何時新增或移除遊戲",
-    gameExclWhyBody: "僅在遊戲於 skiavk 模式下崩潰時才新增：崩潰由雙 VkDevice 衝突引起 — 直接使用 Vulkan 的應用程式（自訂 Vulkan 引擎，如 UE4 等）與 HWUI 同時建立 VkDevice，自訂 Adreno 驅動程式無法處理 → SIGSEGV。相容守護程式會在偵測到應用程式後約 1 秒內將 HWUI 切換為 skiagl 解決衝突。若遊戲在 skiavk 模式下運行正常 — 請將其移除，無需保留在此清單中。",
-    applyNowTitle: "立即套用渲染模式",
-    applyNowDesc: "透過 resetprop 即時套用 — 無需重新啟動。重啟應用以查看效果。",
-    applyNow: "立即套用",
-    // Game Exclusion Daemon toggle
-    daemonName: "遊戲排除守護程式",
-    daemonDesc: "偵測到原生 Vulkan 遊戲時自動將 HWUI 切換為 skiagl。防止 skiavk 模式下的雙 VkDevice 崩潰。",
-    daemonSub: "適用於在skiavk渲染模式下存在問題的應用",
     save: "保存並重啟",
     saveRebootInfo: "更改將在保存並重啟設備後生效。在進行更改之前，請務必備份當前配置。",
     resetDefaults: "恢復默認值",
@@ -1818,215 +1743,6 @@ async function loadRenderStatus() {
 
 // ============================================================
 // GAME EXCLUSION LIST — shared with post-fs-data.sh & service.sh
-// File: /sdcard/Adreno_Driver/Config/game_exclusion_list.sh
-// ============================================================
-
-const GAME_EXCL_FILE = `${SD_CONFIG}/game_exclusion_list.sh`;
-const GAME_EXCL_DATA = `/data/local/tmp/adreno_game_exclusion_list.sh`;
-const GAME_EXCL_MOD  = () => `${MOD_PATH}/game_exclusion_list.sh`;
-
-const DEFAULT_GAME_EXCL_PKGS = [
-    'com.tencent.ig',
-    'com.pubg.krmobile',
-    'com.pubg.imobile',
-    'com.pubg.newstate',
-    'com.vng.pubgmobile',
-    'com.rekoo.pubgm',
-    'com.tencent.tmgp.pubgmhd',
-    'com.epicgames.*',
-    'com.activision.callofduty.shooter',
-    'com.garena.game.codm',
-    'com.tencent.tmgp.cod',
-    'com.vng.codmvn',
-    'com.miHoYo.GenshinImpact',
-    'com.cognosphere.GenshinImpact',
-    'com.miHoYo.enterprise.HSRPrism',
-    'com.HoYoverse.hkrpgoversea',
-    'com.levelinfinite.hotta',
-    'com.proximabeta.mfh',
-    'com.HoYoverse.Nap',
-    'com.miHoYo.ZZZ',
-    'com.facebook.katana',
-    'com.facebook.orca',
-    'com.facebook.lite',
-    'com.facebook.mlite',
-    'com.instagram.android',
-    'com.instagram.lite',
-    'com.instagram.barcelona',
-    'com.whatsapp',
-    'com.whatsapp.w4b',
-];
-
-// Build the shell file content from a package array
-function buildGameExclShell(pkgs) {
-    const pkgLines = pkgs.map(p => `${p}`).join('\n');
-    return `#!/system/bin/sh
-# ============================================================
-# ADRENO DRIVER MODULE — SHARED GAME EXCLUSION LIST
-# ============================================================
-# Sourced by post-fs-data.sh AND service.sh at boot.
-# Edit via Adreno Manager → Config → Game Exclusion List.
-# One package per line. Wildcards like com.example.* supported.
-# ============================================================
-
-GAME_EXCLUSION_PKGS="
-${pkgLines}
-"
-
-_game_pkg_excluded() {
-  local _p="$1" _e
-  for _e in $GAME_EXCLUSION_PKGS; do
-    case "$_p" in $_e) return 0;; esac
-  done
-  return 1
-}
-`;
-}
-
-// Parse package list from a shell file's GAME_EXCLUSION_PKGS="..." block
-function parseGameExclShell(content) {
-    if (!content) return null;
-    const m = content.match(/GAME_EXCLUSION_PKGS="([^"]*)"/s);
-    if (!m) return null;
-    return m[1].split('\n')
-        .map(l => l.trim())
-        .filter(l => l && !l.startsWith('#'));
-}
-
-let _gameExclPkgs = [...DEFAULT_GAME_EXCL_PKGS];
-
-async function loadGameExclusionList() {
-    try {
-        let content = '';
-        const sdRes = await exec(`cat "${GAME_EXCL_FILE}" 2>/dev/null`);
-        if (sdRes.stdout && sdRes.stdout.includes('GAME_EXCLUSION_PKGS')) {
-            content = sdRes.stdout;
-        } else {
-            const dataRes = await exec(`cat "${GAME_EXCL_DATA}" 2>/dev/null`);
-            if (dataRes.stdout && dataRes.stdout.includes('GAME_EXCLUSION_PKGS')) {
-                content = dataRes.stdout;
-            } else {
-                const modRes = await exec(`cat "${GAME_EXCL_MOD()}" 2>/dev/null`);
-                if (modRes.stdout && modRes.stdout.includes('GAME_EXCLUSION_PKGS')) {
-                    content = modRes.stdout;
-                }
-            }
-        }
-        const parsed = content ? parseGameExclShell(content) : null;
-        _gameExclPkgs = parsed && parsed.length > 0 ? parsed : [...DEFAULT_GAME_EXCL_PKGS];
-    } catch (e) {
-        _gameExclPkgs = [...DEFAULT_GAME_EXCL_PKGS];
-    }
-    renderGameExclUI();
-}
-
-async function saveGameExclusionList() {
-    try {
-        const shell = buildGameExclShell(_gameExclPkgs);
-        // Escape single quotes for shell printf
-        const escaped = shell.replace(/'/g, "'\\''");
-        await exec(`mkdir -p "${SD_CONFIG}" 2>/dev/null`);
-        await exec(`printf '%s' '${escaped}' > "${GAME_EXCL_FILE}" 2>/dev/null`);
-        // Mirror to /data/local/tmp for early-boot access (post-fs-data reads this)
-        await exec(`printf '%s' '${escaped}' > "${GAME_EXCL_DATA}" 2>/dev/null`);
-        // Mirror to module path
-        if (MOD_PATH) {
-            await exec(`printf '%s' '${escaped}' > "${GAME_EXCL_MOD()}" 2>/dev/null`);
-        }
-        logToTerminal(`✅ Game exclusion list saved (${_gameExclPkgs.length} packages)`, 'success');
-        showToast(currentTranslations.gameExclSaved || 'Game exclusion list saved');
-    } catch (e) {
-        logToTerminal(`❌ Failed to save game exclusion list: ${e}`, 'error');
-        showToast(currentTranslations.gameExclSaveError || 'Failed to save exclusion list');
-    }
-}
-
-function renderGameExclUI() {
-    const t = currentTranslations;
-    const listEl = document.getElementById('gameExclList');
-    const countEl = document.getElementById('gameExclCount');
-    if (!listEl) return;
-
-    if (countEl) countEl.textContent = `${_gameExclPkgs.length} ${t.gameExclCount || 'packages'}`;
-
-    if (_gameExclPkgs.length === 0) {
-        listEl.innerHTML = `<div class="game-excl-empty">${t.gameExclEmpty || 'No packages in exclusion list'}</div>`;
-        return;
-    }
-
-    listEl.innerHTML = _gameExclPkgs.map((pkg, i) => `
-        <div class="game-excl-item slide-in" style="animation-delay:${i * 0.03}s">
-            <div class="game-excl-pkg-col">
-                <span class="game-excl-pkg">${pkg}</span>
-                ${pkg.endsWith('.*') ? '<span class="game-excl-wild">wildcard</span>' : ''}
-            </div>
-            <button class="game-excl-remove ripple-effect" data-index="${i}" aria-label="Remove ${pkg}">
-                <span>✕</span>
-            </button>
-        </div>
-    `).join('');
-
-    listEl.querySelectorAll('.game-excl-remove').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const idx = parseInt(btn.dataset.index, 10);
-            _gameExclPkgs.splice(idx, 1);
-            renderGameExclUI();
-        });
-    });
-}
-
-function initGameExclSection() {
-    const addBtn  = document.getElementById('btnGameExclAdd');
-    const saveBtn = document.getElementById('btnGameExclSave');
-    const resetBtn = document.getElementById('btnGameExclReset');
-    const whyBtn  = document.getElementById('btnGameExclWhy');
-    const whyBody = document.getElementById('gameExclWhyBody');
-
-    if (addBtn) {
-        addBtn.addEventListener('click', () => {
-            const input = document.getElementById('gameExclInput');
-            if (!input) return;
-            const val = input.value.trim();
-            if (!val) return;
-            if (!/^[a-zA-Z0-9.*_\-]+$/.test(val)) {
-                showToast('⚠️ Invalid package name format');
-                return;
-            }
-            if (!_gameExclPkgs.includes(val)) {
-                _gameExclPkgs.push(val);
-                renderGameExclUI();
-            }
-            input.value = '';
-        });
-        // Enter key support
-        document.getElementById('gameExclInput')?.addEventListener('keydown', e => {
-            if (e.key === 'Enter') addBtn.click();
-        });
-    }
-
-    if (saveBtn) saveBtn.addEventListener('click', saveGameExclusionList);
-
-    if (resetBtn) {
-        resetBtn.addEventListener('click', async () => {
-            const confirmed = await ConfirmDialog.show(
-                currentTranslations.gameExclReset || 'Reset to Defaults',
-                currentTranslations.gameExclResetConfirm || 'Reset game exclusion list to factory defaults?',
-                '♻️'
-            );
-            if (!confirmed) return;
-            _gameExclPkgs = [...DEFAULT_GAME_EXCL_PKGS];
-            renderGameExclUI();
-        });
-    }
-
-    if (whyBtn && whyBody) {
-        whyBtn.addEventListener('click', () => {
-            const hidden = whyBody.style.display === 'none' || !whyBody.style.display;
-            whyBody.style.display = hidden ? 'block' : 'none';
-            whyBtn.classList.toggle('expanded', hidden);
-        });
-    }
-}
 
 // Show or hide the FORCE_SKIAVKTHREADED_BACKEND toggle row based on selected render mode.
 // The force-threaded backend option is only relevant for skiavk
@@ -2080,7 +1796,6 @@ async function loadConfig() {
     setToggle('QGL', config.QGL);
     setToggle('ARM64_OPT', config.ARM64_OPT);
     setToggle('VERBOSE', config.VERBOSE);
-    setToggle('GAME_EXCLUSION_DAEMON', config.GAME_EXCLUSION_DAEMON);
     setSelect('RENDER_MODE', config.RENDER_MODE);
     // Load FORCE_SKIAVKTHREADED_BACKEND toggle
     const _ftb = document.getElementById('FORCE_SKIAVKTHREADED_BACKEND');
@@ -2655,186 +2370,8 @@ async function applyRenderNow() {
         logToTerminal('ℹ️ Props applied live — no force-stops. Apps adopt skiavk on next cold-start (LYB approach).', 'info');
 
         // ── VK Compat: ICD fix + gralloc WSI workarounds ─────────────────────────
-        if (renderMode === 'skiavk') {
-            try {
-                const _hwVkRes = await exec('getprop ro.hardware.vulkan 2>/dev/null || echo ""');
-                const _hwVkVal = (_hwVkRes.stdout || '').trim();
-                if (_hwVkVal && _hwVkVal !== 'adreno') {
-                    const _adrSo = await exec('[ -f /vendor/lib64/hw/vulkan.adreno.so ] || [ -f /vendor/lib/hw/vulkan.adreno.so ] && echo "yes" || echo "no"');
-                    if ((_adrSo.stdout || '').trim() === 'yes') {
-                        await exec('resetprop ro.hardware.vulkan adreno 2>/dev/null || true');
-                        logToTerminal(`🔧 ro.hardware.vulkan: "${_hwVkVal}" → "adreno" (ICD fix applied)`, 'warn');
-                    }
-                }
-                const _scoreRes = await exec('cat /data/local/tmp/adreno_vk_compat_score 2>/dev/null || echo ""');
-                if (_scoreRes.stdout) {
-                    let _gralloc = '';
-                    for (const line of _scoreRes.stdout.trim().split('\n')) {
-                        if (line.startsWith('GRALLOC=')) _gralloc = line.split('=')[1];
-                    }
-                    if (_gralloc === '2' || _gralloc === '3') {
-                        await exec('resetprop debug.vulkan.dev.layers "" 2>/dev/null || true');
-                        await exec('resetprop persist.graphics.vulkan.validation_enable 0 2>/dev/null || true');
-                        logToTerminal(`🔧 gralloc${_gralloc}: cleared OEM Vulkan layers (WSI compat)`, 'warn');
-                    }
-                    logToTerminal(`✅ VK compat: gralloc=${_gralloc || 'unknown'}`, 'info');
-                }
-            } catch(e) { /* non-fatal */ }
-        }
 
-        // ── App-triggered renderer switching daemon respawn ───────────────────
-        //
-        // WHY RESPAWNED HERE (not just at boot):
-        //   BUG FIX 1: service.sh only launches the daemon at boot when
-        //   RENDER_MODE is already skiavk. Switching via Apply Now from a
-        //   different mode left zero skiagl switching protection. Now we
-        //   always kill+respawn with the current exclusion list.
-        //
-        //   BUG FIX 2: If the user added packages via WebUI after boot, the
-        //   running daemon still had the old list baked in. Respawning always
-        //   uses the current _gameExclPkgs from the live WebUI state.
-        //
-        // ARCHITECTURE — EVENT-DRIVEN (not polling):
-        //   The daemon tails Android's 'events' logcat buffer for am_proc_start
-        //   and am_proc_died events. These are emitted by ActivityManagerService
-        //   at process fork/death. The daemon blocks on logcat read — zero CPU
-        //   when no monitored package is running. Reacts within <100ms of fork.
-        //
-        //   am_proc_start format (-v tag):
-        //     I/am_proc_start: [user,pid,uid,processName,type,component]
-        //   processName field (index 4, 1-based comma-split) = package name.
-        //   Matches "pkg:processName" for multi-process apps too.
-        //
-        // WHY skiagl (NOT "skiaglthreaded") for debug.hwui.renderer:
-        //   HWUI Properties.cpp only recognises three values:
-        //   "skiagl" → SkiaGL, "skiavk" → SkiaVK, anything else (including
-        //   "skiaglthreaded") → falls through to legacy "opengl" renderer
-        //   (Android 8 era). "skiagl" runs on HWUI's existing RenderThread —
-        //   it IS threaded. "skiaglthreaded" is only valid for
-        //   debug.renderengine.backend (SurfaceFlinger compositor), not HWUI.
-        //
-        // WHY debug.renderengine.backend is NOT touched:
-        //   Controls SurfaceFlinger compositor. OEM ROM SF property watchers
-        //   trigger render engine reinitialization on live change → SF crash
-        //   → all apps lose their window surfaces. Left at boot value.
-        //
-        // STATE: Shared via /data/local/tmp/adreno_daemon_active (file).
-        //   POSIX sh pipeline runs in a subshell; shell variables don't
-        //   propagate back. The file is the IPC channel between subshells.
-        //   "1" = switched to skiagl. "0" = on restore renderer.
-        if (renderMode === 'skiavk') {
-            try {
-                const daemonPath = '/data/local/tmp/adreno_game_daemon.sh';
-                const exclPkgs   = _gameExclPkgs.join(' ');
-
-                // Kill any stale daemon before writing the new one.
-                await exec(`pkill -f '${daemonPath}' 2>/dev/null; true`);
-
-                // ── Build the daemon script ─────────────────────────────────────
-                // Each shell script line is a separate element in scriptLines[].
-                // Lines are written using printf '%s\n' 'line' — single-quoted args
-                // preserve ALL shell metacharacters literally (no $ expansion during
-                // write). GAME_EXCLUSION_PKGS gets its own printf to allow the JS
-                // variable interpolation of exclPkgs without shell escaping issues.
-                //
-                // Backslash note: JS '\\*' → runtime string '\*' → shell file '\*'
-                // → when daemon runs, ${_ge%\*} strips trailing literal * wildcard. ✓
-                const scriptLines = [
-                    // [0] shebang (written first, creates/truncates the file)
-                    '#!/system/bin/sh',
-                    // [1] GAME_EXCLUSION_PKGS (written with separate printf for JS interpolation)
-                    `GAME_EXCLUSION_PKGS="${exclPkgs}"`,
-                    // [2..] body lines (appended in one printf call)
-                    // _RESTORE=skiavk: daemon always restores to skiavk on game exit.
-                    '_RESTORE=skiavk',
-                    '_SF=/data/local/tmp/adreno_daemon_active',
-                    'printf "0\\n" > "$_SF" 2>/dev/null || true',
-                    // /proc scanner — returns 0 if any excluded pkg is alive.
-                    // /proc/pid/cmdline is NUL-separated argv; shell string assignment
-                    // stops at the first NUL, so _rb = argv[0] = "com.pkg" or
-                    // "com.pkg:processname". Strip :processname suffix, then use exact
-                    // glob matching — same logic as _ie(). Prior *"${_gb}"* substring
-                    // match was the same false-positive bug fixed in _ie(): e.g.
-                    // com.tencent.ig matched com.tencent.igplugin, keeping skiagl active
-                    // after the real game exited → skiavk never restored.
-                    '_ae() { local _cf _rb _pkg _ge;',
-                    '  for _cf in /proc/[0-9]*/cmdline; do',
-                    '    [ -f "$_cf" ] || continue',
-                    '    { IFS= read -r _rb; } < "$_cf" 2>/dev/null || continue',
-                    '    [ -n "$_rb" ] || continue',
-                    '    _pkg="${_rb%%:*}"',
-                    '    for _ge in $GAME_EXCLUSION_PKGS; do',
-                    '      case "$_pkg" in $_ge) return 0;; esac',
-                    '    done',
-                    '  done; return 1; }',
-                     // FIX: _ie() now uses exact glob matching, same as _game_pkg_excluded().
-                     // Prior substring match (*"${_gb}"*) caused false positives:
-                     // e.g. com.tencent.ig pattern would match com.tencent.igplugin.
-                     '_ie() { local _p="$1" _ge; for _ge in $GAME_EXCLUSION_PKGS; do',
-                     '  case "$_p" in $_ge) return 0;; esac',
-                     '  done; return 1; }',
-                    // startup scan: handle pkg already running when daemon starts
-                    '_ae && { resetprop debug.hwui.renderer skiagl 2>/dev/null || true;',
-                    '  printf "1\\n" > "$_SF" 2>/dev/null || true;',
-                    '  printf "[ADRENO][DAEMON] startup:excl running->skiagl\\n" > /dev/kmsg 2>/dev/null || true; }',
-                    // event-driven loop: outer while restarts logcat if it ever exits
-                    'while true; do',
-                    '  logcat -b events -v tag am_proc_start:I am_proc_died:I 2>/dev/null |',
-                    '  while IFS= read -r _ln; do',
-                     '    _ga=$(cat "$_SF" 2>/dev/null || printf 0)',
-                     // FIX: extract _fb (raw fields) here; extract _pkg per-branch.
-                     // am_proc_start: [userId,pid,uid,processName,type,component] f4=pkg
-                     // am_proc_died:  [userId,pid,processName,adj,procState]      f3=pkg
-                     // Prior shared cut -d,-f4 for both events = BUG: am_proc_died f4 is
-                     // the adj integer (e.g. '18'), not the package name. _ie('18') never
-                     // matched, so _SF was never reset to 0 after app exit. Next open:
-                     // _ga=1 -> continue -> entire am_proc_start event SKIPPED -> no switch.
-                     '    _f="${_ln#*[}"; _fb="${_f%%]*}"',
-                     '    case "$_ln" in',
-                     '      *am_proc_start*)',
-                     '        _pkg=$(printf "%s" "$_fb" | cut -d, -f4 | tr -d " ")',
-                     '        [ -n "$_pkg" ] || continue',
-                     '        [ "$_ga" = 1 ] && continue',
-                     '        _ie "$_pkg" || continue',
-                     '        _ae || continue',  // verify live (guards stale logcat buffer entries)
-                     '        resetprop debug.hwui.renderer skiagl 2>/dev/null || true',
-                     '        printf "1\\n" > "$_SF" 2>/dev/null || true',
-                     '        printf "[ADRENO][DAEMON] start:%s->skiagl\\n" "$_pkg" > /dev/kmsg 2>/dev/null || true',
-                     '        ;;',
-                     '      *am_proc_died*)',
-                     '        _pkg=$(printf "%s" "$_fb" | cut -d, -f3 | tr -d " ")',
-                     '        [ -n "$_pkg" ] || continue',
-                     '        [ "$_ga" = 0 ] && continue',
-                     '        _ie "$_pkg" || continue',
-                     '        _ae && continue',  // other excluded pkgs still running
-                     '        resetprop debug.hwui.renderer "$_RESTORE" 2>/dev/null || true',
-                     '        printf "0\\n" > "$_SF" 2>/dev/null || true',
-                     '        printf "[ADRENO][DAEMON] died:%s->%s\\n" "$_pkg" "$_RESTORE" > /dev/kmsg 2>/dev/null || true',
-                     '        ;;',
-                     '    esac',
-                     '  done',
-                     '  sleep 2',  // logcat exited (OEM quirk) -- restart
-                     'done',
-                ];
-
-                // Write shebang → create/truncate file
-                await exec(`printf '%s\\n' '${scriptLines[0]}' > '${daemonPath}' 2>/dev/null`);
-                // Write GAME_EXCLUSION_PKGS with JS interpolation
-                await exec(`printf 'GAME_EXCLUSION_PKGS="%s"\\n' '${exclPkgs}' >> '${daemonPath}' 2>/dev/null`);
-                // Write body: single printf call, all lines single-quoted
-                const body = scriptLines.slice(2).map(l => `'${l}'`).join(' ');
-                await exec(`printf '%s\\n' ${body} >> '${daemonPath}' 2>/dev/null`);
-
-                await exec(`chmod 755 '${daemonPath}' 2>/dev/null; true`);
-                await exec(`nohup sh '${daemonPath}' >/dev/null 2>&1 &`);
-
-                logToTerminal(`✅ Event daemon respawned — ${_gameExclPkgs.length} pkgs monitored (logcat am_proc_start/died, skiagl↔${renderMode})`, 'success');
-            } catch (daemonErr) {
-                // Non-fatal — renderer props are already live. Daemon is best-effort.
-                logToTerminal(`⚠️ Daemon respawn failed (non-fatal): ${daemonErr}`, 'warn');
-            }
-        }
-
+        await loadRenderStatus
         await loadRenderStatus();
         showToast(`✅ Render mode applied: ${renderMode}`);
     } catch (e) {
@@ -2880,12 +2417,11 @@ async function saveConfig() {
     const qgl           = getValue('QGL');
     const arm           = getValue('ARM64_OPT');
     const verbose       = getValue('VERBOSE');
-    const daemon        = getValue('GAME_EXCLUSION_DAEMON');
     const forceThreaded = getValue('FORCE_SKIAVKTHREADED_BACKEND');
     const theme         = currentTheme || 'purple';
 
     const writeConfig = (path) =>
-        exec(`printf 'PLT=%s\\nQGL=%s\\nARM64_OPT=%s\\nVERBOSE=%s\\nRENDER_MODE=%s\\nGAME_EXCLUSION_DAEMON=%s\\nFORCE_SKIAVKTHREADED_BACKEND=%s\\nTHEME=%s\\n' '${plt}' '${qgl}' '${arm}' '${verbose}' '${finalRenderMode}' '${daemon}' '${forceThreaded}' '${theme}' > "${path}" 2>/dev/null`);
+        exec(`printf 'PLT=%s\\nQGL=%s\\nARM64_OPT=%s\\nVERBOSE=%s\\nRENDER_MODE=%s\\nFORCE_SKIAVKTHREADED_BACKEND=%s\\nTHEME=%s\\n' '${plt}' '${qgl}' '${arm}' '${verbose}' '${finalRenderMode}' '${forceThreaded}' '${theme}' > "${path}" 2>/dev/null`);
 
     await writeConfig(`${SD_CONFIG}/adreno_config.txt`);
     await writeConfig(`${MOD_PATH}/adreno_config.txt`);
@@ -5349,8 +4885,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     await ensureDirectories();
     await loadSystemInfo();
     await loadConfig();
-    await loadGameExclusionList();
-    initGameExclSection();
     await loadStatistics();  // Load statistics after config
     
     // Animate performance bar

@@ -20,55 +20,6 @@ MODDIR="${0%/*}"
 
 . "$MODDIR/common.sh"
 
-# ── SHARED GAME EXCLUSION LIST ────────────────────────────────────────────────
-# Defines GAME_EXCLUSION_PKGS and _game_pkg_excluded() used by the game exclusion daemon
-# and the game-compatibility daemon. Edit via Adreno Manager WebUI.
-_GAME_EXCL_SD="/sdcard/Adreno_Driver/Config/game_exclusion_list.sh"
-_GAME_EXCL_DATA="/data/local/tmp/adreno_game_exclusion_list.sh"
-_GAME_EXCL_MOD="${MODDIR}/game_exclusion_list.sh"
-if [ -f "$_GAME_EXCL_SD" ]; then
-  . "$_GAME_EXCL_SD"
-elif [ -f "$_GAME_EXCL_DATA" ]; then
-  . "$_GAME_EXCL_DATA"
-elif [ -f "$_GAME_EXCL_MOD" ]; then
-  . "$_GAME_EXCL_MOD"
-else
-  # Default list covers TWO distinct rendering problems under skiavk:
-  #
-  # GROUP 1 — Dual-VkDevice crash (UE4 / native-Vulkan games):
-  #   Game engine creates a VkDevice from its RHI thread. HWUI in skiavk mode
-  #   creates a second VkDevice for the Activity window in the same process.
-  #   Custom Adreno drivers cannot handle concurrent vkCreateDevice calls →
-  #   SIGSEGV in libgsl.so / VK_ERROR_DEVICE_LOST. Fix: switch HWUI to skiagl
-  #   so only ONE VkDevice exists in the process (the game engine's).
-  #
-  # GROUP 2 — Green line artifact (Meta apps: Facebook/Instagram/WhatsApp):
-  #   HWUI Vulkan swapchain allocates buffers in UBWC compressed format.
-  #   Meta apps' native render layers (React Native canvas, libvpx media) use
-  #   gralloc buffers with a DIFFERENT UBWC tile layout expectation. When
-  #   SurfaceFlinger composites both surfaces, the UBWC metadata mismatch
-  #   causes color channel corruption on specific scan lines → green line.
-  #   Fix: switch HWUI to skiagl for Meta apps → GL buffers → no UBWC mismatch.
-  #
-  # This list is the authoritative source for BOTH behaviors:
-  #   • These packages are excluded from renderer switching
-  #   • These packages trigger the skiagl renderer switch when running
-  GAME_EXCLUSION_PKGS="com.tencent.ig com.pubg.krmobile com.pubg.imobile com.pubg.newstate com.vng.pubgmobile com.rekoo.pubgm com.tencent.tmgp.pubgmhd com.epicgames.* com.activision.callofduty.shooter com.garena.game.codm com.tencent.tmgp.cod com.vng.codmvn com.miHoYo.GenshinImpact com.cognosphere.GenshinImpact com.miHoYo.enterprise.HSRPrism com.HoYoverse.hkrpgoversea com.levelinfinite.hotta com.proximabeta.mfh com.HoYoverse.Nap com.miHoYo.ZZZ com.facebook.katana com.facebook.orca com.facebook.lite com.facebook.mlite com.instagram.android com.instagram.lite com.instagram.barcelona com.whatsapp com.whatsapp.w4b"
-  _game_pkg_excluded() { local _p="$1" _e; for _e in $GAME_EXCLUSION_PKGS; do case "$_p" in $_e) return 0;; esac; done; return 1; }
-fi
-unset _GAME_EXCL_SD _GAME_EXCL_DATA _GAME_EXCL_MOD
-# Defensive guard: if none of the sourcing paths succeeded (file missing,
-# unreadable, or sourced file was truncated/corrupted and did not define the
-# function), provide a safe no-op stub so _is_native_vk_game_running() never
-# aborts with "command not found" (exit 127 in mksh). The stub disables game-
-# package exclusion silently rather than crashing mid-sequence.
-if ! command -v _game_pkg_excluded >/dev/null 2>&1; then
-  _game_pkg_excluded() { return 1; }
-  printf '[ADRENO] service.sh: _game_pkg_excluded() undefined after sourcing — game exclusion disabled (check game_exclusion_list.sh)\n' \
-    > /dev/kmsg 2>/dev/null || true
-fi
-# ─────────────────────────────────────────────────────────────────────────────
-
 cmd_exists() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -113,18 +64,6 @@ RENDER_MODE=$(printf '%s' "$RENDER_MODE" | tr '[:upper:]' '[:lower:]')
 [ "$RENDER_MODE" = "skiavkthreaded" ] && RENDER_MODE="skiavk"
 [ "$RENDER_MODE" = "skiaglthreaded" ] && RENDER_MODE="skiagl"
 [ "$FORCE_SKIAVKTHREADED_BACKEND" != "y" ] && FORCE_SKIAVKTHREADED_BACKEND="n"
-# AUTO-ENABLE GED — exact mirror of post-fs-data.sh lines 277+303-304.
-# post-fs-data.sh flow:
-#   line 277: [ "$GAME_EXCLUSION_DAEMON" != "y" ] && GAME_EXCLUSION_DAEMON="n"
-#   line 303: if [ "$GAME_EXCLUSION_DAEMON" = "n" ]; then GAME_EXCLUSION_DAEMON="y"
-# After line 277, GAME_EXCLUSION_DAEMON is always "n" for any default/fresh install
-# (config default is "n"). service.sh reads adreno_config.txt independently and
-# gets the same "n". Without mirroring line 303 here, the GED guard at line ~825
-# [ "$RENDER_MODE" = "skiavk" ] && [ "$GAME_EXCLUSION_DAEMON" = "y" ]
-# is NEVER satisfied on a default install -> daemon stack never launches.
-# Condition "= n" (not "!= n"): only auto-enable when value is "n", which is the
-# normalised form of any non-"y" value. This matches post-fs-data line 303 exactly.
-[ "$RENDER_MODE" = "skiavk" ] && [ "$GAME_EXCLUSION_DAEMON" = "n" ] && GAME_EXCLUSION_DAEMON="y"
 
 # ========================================
 # LOGGING SYSTEM
@@ -553,7 +492,7 @@ fi
 #   - post-fs-data.sh increments boot_attempts on every boot
 #   - service.sh was only resetting it at script END (line ~2649)
 #   - If service.sh crashes/is killed anywhere BEFORE that reset
-#     (during watchdog daemon, game exclusion, QGL handling, etc.),
+#     (during watchdog daemon, QGL handling, etc.),
 #     the counter is NEVER reset
 #   - After 4 consecutive incomplete runs: boot_attempts > 3 →
 #     post-fs-data.sh creates 'disable' → module permanently broken
@@ -752,203 +691,6 @@ case "$RENDER_MODE" in
     log_service "[OK] $RENDER_MODE: renderer prop enforced via resetprop at boot+2s; SystemUI NOT crashed (GMS/accounts protected)"
     ;;
 esac
-
-# ========================================
-# APP-TRIGGERED RENDERER SWITCHING DAEMON
-# ========================================
-# Monitors GAME_EXCLUSION_PKGS and switches debug.hwui.renderer between
-# skiagl (when an excluded package is running) and the original renderer
-# (when all excluded packages have exited). Covers two rendering problems:
-#
-# PROBLEM 1 — Dual-VkDevice crash (UE4 / native-Vulkan games):
-#   UE4/game engine creates a VkDevice from its RHI thread. HWUI in skiavk
-#   mode creates a SECOND VkDevice for the Activity window in the SAME process.
-#   Custom Adreno drivers cannot handle two concurrent vkCreateDevice calls →
-#   SIGSEGV in libgsl.so or VK_ERROR_DEVICE_LOST at match/level load.
-#   Fix: skiagl → HWUI uses GL, only ONE VkDevice in process → no race.
-#
-# PROBLEM 2 — Green scan-line artifact (Meta apps):
-#   HWUI Vulkan swapchain allocates buffers in UBWC compressed format.
-#   Meta apps' native render layers (React Native canvas, libvpx media
-#   decoder) allocate gralloc buffers expecting a DIFFERENT UBWC tile
-#   layout. SurfaceFlinger compositor sees UBWC metadata mismatch →
-#   color channel corruption on specific horizontal scan lines → green line.
-#   Fix: skiagl → HWUI uses GL buffers → no UBWC format mismatch.
-#
-# ARCHITECTURE — Game Exclusion Daemon (GED):
-#
-#   The GED is launched by post-fs-data.sh after boot_completed+2s.
-#   Only the native binary (bin/<abi>/adreno_ged) is used.
-#
-#   NATIVE GED (bin/<abi>/adreno_ged):
-#     Launch detection: Netlink PROC_EVENT_FORK+COMM — kernel delivers events
-#       via CN_PROC socket; zero CPU between events.
-#     Foreground verification: reads oom_score_adj ≤ 100 (AMS sets this in
-#       real-time: 0=FOREGROUND, 100=VISIBLE, ≥200=background service).
-#       This rejects Meta background services and deferred-classify processes.
-#       Periodic /proc scan every 1 s catches already-running apps and Meta
-#       apps that come to the foreground from persistent background (no new
-#       COMM event — only oom_score_adj changes). Equivalent to how Encore
-#       Tweaks uses ActivityManager + inotify to detect focused-app changes.
-#     Death detection: pidfd_open + epoll (Linux 5.3+) — kernel wakes epoll
-#       the instant the process exits; no polling.
-#       Falls back to /proc existence check on older kernels.
-#     GOS re-enforcement: re-applies skiagl every 5 s while any game is
-#       active, guarding against Samsung GOS / OEM perf daemon resets.
-#
-# STATE FILE: /data/local/tmp/adreno_ged_active
-#   "1" = at least one excluded game/app active, renderer = skiagl
-#   "0" = no excluded game/app active, renderer = restore target
-#   Written by the native GED on open/close.
-# ========================================
-
-# ========================================
-# GAME COMPATIBILITY DAEMON
-# ========================================
-# Switches debug.hwui.renderer to skiagl while a listed game is running
-# (prevents dual-VkDevice crash on UE4/native-Vulkan titles), then
-# restores the configured renderer once all listed games exit.
-#
-# ARCHITECTURE:
-#   Launch detection:  Netlink PROC_EVENT_FORK+COMM (zero CPU between events)
-#                      + oom_score_adj ≤ 100 foreground verification
-#                      + 1 s /proc scan for already-running / adj-only changes
-#   Death detection:   pidfd_open + epoll (Linux 5.3+); /proc fallback otherwise
-#   GOS re-enforcement: re-applies skiagl every 5 s while any game is active
-#
-# STATE FILE: /data/local/tmp/adreno_ged_active
-#   "1" = at least one listed game running, renderer = skiagl
-#   "0" = no listed games running, renderer = restore target
-# ========================================
-
-if [ "$RENDER_MODE" = "skiavk" ] && [ "$GAME_EXCLUSION_DAEMON" = "y" ]; then
-# ========================================
-# GAME EXCLUSION DAEMON LAUNCH (Encore-style inotify + Java companion)
-# ========================================
-# Architecture (identical to Encore Tweaks):
-#   1. system_monitor.apk (Java companion via app_process) polls Android's
-#      IActivityTaskManager.getFocusedRootTaskInfo() every 500ms and writes
-#      focused_app/pid/uid to a status file.
-#   2. adreno_ged (C daemon) watches the status file via inotify — zero CPU
-#      between writes. On game open: set renderer=skiagl + track PID via
-#      pidfd_open. On game exit: restore renderer. 5s timerfd re-enforces
-#      skiagl against GOS/OEM resets while a game is active.
-#
-# Why this replaces the old CN_PROC netlink approach:
-#   - No CAP_NET_ADMIN requirement (netlink CN_PROC was failing/crashing)
-#   - No /proc scanning (was causing false positive bootloops)
-#   - Accurate foreground detection via the same AM API Android uses
-#   - Zero CPU overhead: inotify blocks in kernel between file changes
-
-  log_service "========================================"
-  log_service "GAME EXCLUSION DAEMON LAUNCH (inotify/Java companion)"
-  log_service "========================================"
-
-  # ── Kill any stale instances from a previous boot ────────────────────
-  for _stale_file in "/data/local/tmp/adreno_ged_pid" \
-                     "/data/local/tmp/adreno_ged_sysmon_pid"; do
-    if [ -f "$_stale_file" ]; then
-      _stale_pid=""
-      { IFS= read -r _stale_pid; } < "$_stale_file" 2>/dev/null || true
-      if [ -n "$_stale_pid" ] && kill -0 "$_stale_pid" 2>/dev/null; then
-        kill -TERM "$_stale_pid" 2>/dev/null || true
-        sleep 1
-        kill -0 "$_stale_pid" 2>/dev/null && \
-          kill -KILL "$_stale_pid" 2>/dev/null || true
-      fi
-      rm -f "$_stale_file" 2>/dev/null || true
-    fi
-  done
-  unset _stale_file _stale_pid
-
-  # ── Detect GED binary for this ABI ────────────────────────────────────
-  _GED_ABI="$(getprop ro.product.cpu.abi 2>/dev/null || echo '')"
-  _GED_BIN=""
-  case "$_GED_ABI" in
-    arm64*|aarch64*)
-      [ -x "${MODDIR}/bin/arm64-v8a/adreno_ged" ] && \
-        _GED_BIN="${MODDIR}/bin/arm64-v8a/adreno_ged" ;;
-    arm*|armeabi*)
-      [ -x "${MODDIR}/bin/armeabi-v7a/adreno_ged" ] && \
-        _GED_BIN="${MODDIR}/bin/armeabi-v7a/adreno_ged" ;;
-  esac
-  unset _GED_ABI
-
-  if [ -z "$_GED_BIN" ]; then
-    log_service "[!] GED binary not found — game exclusion daemon not started"
-    log_service "    Check bin/arm64-v8a/adreno_ged or bin/armeabi-v7a/adreno_ged"
-  elif [ ! -f "$MODDIR/system_monitor.apk" ]; then
-    log_service "[!] system_monitor.apk not found in $MODDIR — cannot start Java companion"
-    log_service "    Reinstall the module to restore system_monitor.apk"
-  else
-    # ── Prepare status dir ─────────────────────────────────────────────
-    _GED_DIR="/data/local/tmp/adreno_ged"
-    _GED_STATUS="$_GED_DIR/system_status"
-    _GED_SYSMON_LOG="$_GED_DIR/sysmon.log"
-    mkdir -p "$_GED_DIR" 2>/dev/null || true
-
-    # ── Find app_process binary (64-bit preferred) ─────────────────────
-    _AP_BIN=""
-    for _ap in /system/bin/app_process64 /system/bin/app_process \
-               /system/bin/app_process32; do
-      [ -x "$_ap" ] && { _AP_BIN="$_ap"; break; }
-    done
-    unset _ap
-
-    if [ -z "$_AP_BIN" ]; then
-      log_service "[!] app_process not found — Java companion cannot start"
-      log_service "    This is unexpected; every Android device has app_process"
-    else
-      # ── Launch Java companion (system_monitor.apk via app_process) ────
-      # Mirrors Encore Tweaks service.sh exactly:
-      #   app_process -Djava.class.path=<apk> / --nice-name=<name> <class> <args>
-      # nohup: prevents SIGHUP from the parent Magisk shell killing the companion
-      # when the shell session tears down on some OEM ROMs (Encore does the same).
-      nohup "$_AP_BIN" \
-        -Djava.class.path="$MODDIR/system_monitor.apk" \
-        / \
-        --nice-name=AdrenoSysMon \
-        com.rem01gaming.systemmonitor.MainKt \
-        "$_GED_STATUS" \
-        "$_GED_DIR/java.lock" \
-        > "$_GED_SYSMON_LOG" 2>&1 &
-      _SYSMON_PID=$!
-      echo "$_SYSMON_PID" > /data/local/tmp/adreno_ged_sysmon_pid
-      log_service "[OK] Java companion launched PID=$_SYSMON_PID"
-      log_service "     APK: $MODDIR/system_monitor.apk"
-      log_service "     Status file: $_GED_STATUS"
-      log_service "     Lock file: $_GED_DIR/java.lock"
-      log_service "     Log: $_GED_SYSMON_LOG"
-      unset _SYSMON_PID
-
-      # Give sysmon ~2s to start and write the first status snapshot
-      sleep 2
-
-      # ── Launch C daemon (adreno_ged) ─────────────────────────────────
-      # Args: <restore_mode> <moddir> <status_file> <lock_file>
-      # lock_file: path to the java.lock held by system_monitor.apk.
-      # ged.c checks this lock at startup and monitors it in the timer
-      # loop to detect companion death (mirrors Encore's watch_java_lock).
-      # nohup: same protection as for sysmon above.
-      # ged.c is backgrounded with & but not in its own session.
-      # If the Magisk service.sh shell receives SIGHUP during teardown,
-      # the process group gets the signal. nohup prevents ged from dying.
-      nohup "$_GED_BIN" "$RENDER_MODE" "$MODDIR" "$_GED_STATUS" "$_GED_DIR/java.lock" >/dev/null 2>&1 &
-      _GED_PID=$!
-      echo "$_GED_PID" > /data/local/tmp/adreno_ged_pid
-      log_service "[OK] Game exclusion daemon launched PID=$_GED_PID"
-      log_service "     Binary: $_GED_BIN"
-      log_service "     Mode: restore to $RENDER_MODE when games exit"
-      log_service "     GOS re-enforcement: every 5s while game is active"
-      printf '[ADRENO-GED] launched PID=%d sysmon=%s mode=%s\n' \
-        "$_GED_PID" "$_AP_BIN" "$RENDER_MODE" > /dev/kmsg 2>/dev/null || true
-      unset _GED_PID
-    fi
-    unset _AP_BIN _GED_DIR _GED_STATUS _GED_SYSMON_LOG
-  fi
-  unset _GED_BIN
-fi
-
 
 # ========================================
 # SECONDARY GRAPHICS CACHE CLEARING
