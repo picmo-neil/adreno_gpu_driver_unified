@@ -98,8 +98,7 @@ class QGLAccessibilityService : AccessibilityService() {
                 process = Runtime.getRuntime().exec("su")
                 val os = DataOutputStream(process.outputStream)
 
-                os.writeBytes("KEYS_ARG=\"${keys.joinToString(",")}\"\n")
-                os.writeBytes("export QGL_KEYS=\"$KEYS_ARG\"\n")
+                os.writeBytes("export QGL_KEYS=\"${keys.joinToString(",")}\"\n")
                 os.writeBytes("export QGL_PACKAGE=\"$packageName\"\n")
                 os.writeBytes("$APPLY_SCRIPT_PATH \"$packageName\" &\n")
                 os.writeBytes("exit\n")
