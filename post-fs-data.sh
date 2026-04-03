@@ -28,9 +28,20 @@
 MODDIR="${0%/*}"
 . "$MODDIR/common.sh"
 
+# ── Boot timing profiler ────────────────────────────────────────────────
+_BOOT_PHASE_START=$(cat /proc/uptime 2>/dev/null | awk '{print $1}')
+# _log_emit will be wired to log_boot once log_boot() is defined below.
+# For now, use a stub that writes to a buffer drained later.
+_BOOT_TIMING_ENTRIES=""
+_add_boot_timing() { _BOOT_TIMING_ENTRIES="${_BOOT_TIMING_ENTRIES}${1}
+"; }
+_add_boot_timing "post-fs-data.sh started at ${_BOOT_PHASE_START}s uptime"
+
 # ========================================
 # EARLY ROOT DETECTION
 # ========================================
+
+_add_boot_timing "root detection started at $(cat /proc/uptime 2>/dev/null | awk '{print $1}')s"
 
 # Initialize metamodule state so it is always defined regardless of root type
 METAMODULE_ACTIVE=false
@@ -401,8 +412,10 @@ if [ "$VERBOSE" = "y" ]; then
     echo "[ADRENO][${_t}s] $1" >> "$CURRENT_LOG" 2>/dev/null || \
     echo "[ADRENO] $1" > /dev/kmsg 2>/dev/null || true
   }
+  _log_emit() { log_boot "$1"; }
 else
   log_boot() { :; }
+  _log_emit() { :; }
 fi
 
 # BUG2 FIX: Drain the early log buffer now that the real log_boot() is live.
@@ -413,6 +426,14 @@ if [ -f "${_EARLY_LOG_BUFFER:-}" ]; then
   rm -f "$_EARLY_LOG_BUFFER" 2>/dev/null
 fi
 unset _EARLY_LOG_BUFFER
+
+# ── Flush boot timing entries ───────────────────────────────────────────
+if [ -n "$_BOOT_TIMING_ENTRIES" ]; then
+  printf '%s' "$_BOOT_TIMING_ENTRIES" | while IFS= read -r _bt_line; do
+    [ -n "$_bt_line" ] && log_boot "[TIMING] $_bt_line"
+  done
+  unset _BOOT_TIMING_ENTRIES
+fi
 log_boot "MODDIR: $MODDIR"
 log_boot "Bootloop status: $IN_BOOTLOOP"
 log_boot "Root type: $ROOT_TYPE"
@@ -594,96 +615,21 @@ log_boot "========================================"
 log_boot "SYNCING MODULE STATE TO CONFIG"
 log_boot "========================================"
 
-QGL_OWNER_MARKER="/data/vendor/gpu/.adreno_qgl_owner"
 if [ "$QGL" = "n" ]; then
-  if [ -f "$QGL_OWNER_MARKER" ]; then
-    # BUG FIX: owner marker deletion was unconditional — it was removed even when
-    # qgl_config.txt deletion failed (e.g. file was at same_process_hal_file context
-    # after service.sh CASE A chcon, and init lacks 'unlink same_process_hal_file'
-    # without the fix in sepolicy.rule). This left an orphaned 0000 file without
-    # the owner marker. Next boot with QGL=y: foreign-file guard triggered → CASE A
-    # never ran → file permanently stuck at mode 0000.
-    # FIX: only remove the marker when the file was actually removed. If removal
-    # fails, keep the marker so subsequent boots retry with the correct context
-    # (service.sh will attempt relabeling + removal on the QGL=n path after SELinux
-    # injection is complete).
-    if rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null; then
-      log_boot "[OK] QGL disabled → removed module-owned /data/vendor/gpu/qgl_config.txt"
-      rm -f "$QGL_OWNER_MARKER" 2>/dev/null && log_boot "[OK] QGL owner marker removed" || true
-    else
-      log_boot "[!] QGL disabled but failed to remove qgl_config.txt"
-      log_boot "    Root cause: file may be at same_process_hal_file context (from prior CASE A activation)"
-      log_boot "    Owner marker PRESERVED — service.sh cleanup will retry after SELinux injection"
-      log_boot "    If this persists: check dmesg for 'avc.*same_process_hal_file.*unlink'"
-    fi
-  elif [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
-    log_boot "QGL disabled → qgl_config.txt present but owned by another manager — leaving untouched"
+  if [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
+    rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null && \
+      log_boot "[OK] QGL disabled → removed /data/vendor/gpu/qgl_config.txt" || \
+      log_boot "[!] QGL disabled → failed to remove qgl_config.txt (may be same_process_hal_file context)"
   else
-    log_boot "QGL disabled → qgl_config.txt not present (nothing to remove)"
+    log_boot "QGL disabled → qgl_config.txt not present"
   fi
+  rm -f "/data/vendor/gpu/.adreno_qgl_owner" 2>/dev/null || true
 else
-  log_boot "QGL enabled → config will be installed in QGL section below"
+  log_boot "QGL enabled → file will be installed below"
 fi
 
-# ── QGL: Pre-create /data/vendor/gpu with correct SELinux context ─────────
-# WHY: post-fs-data.sh runs as init domain (full permissions). service.sh
-# runs as su/magisk and can write to vendor_data_file ONLY IF the directory
-# already carries the correct label. If service.sh creates the directory via
-# mkdir, the resulting label depends on the transition rules in effect, which
-# may be wrong or missing → cp/mv still fails even with the su write rules.
-# Pre-creating here from init context with explicit chcon guarantees the
-# label is vendor_data_file:s0 so service.sh writes succeed.
-# HyperOS does this already below; this block covers ALL ROMs.
-#
-# CRITICAL FIX (root cause of second-boot SF hang):
-# Do NOT chcon /data/vendor/gpu to same_process_hal_file HERE.
-# Reason: if the directory is already same_process_hal_file (from a previous boot's
-# CASE A activation), creating QGL_TEMP inside it produces a file with 'unlabeled'
-# context (no type_transition for init→same_process_hal_file:dir). init lacks
-# 'create' on unlabeled → cp fails silently → QGL_TEMP never created → mv never
-# runs → old 0644 file stays → SF reads it during skiavkthreaded vkCreateDevice → hang.
-#
-# CORRECT APPROACH (matching LYB Kernel Manager):
-# 1. Ensure directory exists with vendor_data_file context (writable by init)
-# 2. Create/install the file (works: type_transition init→vendor_data_file:dir = vendor_data_file)
-# 3. chcon file → same_process_hal_file AFTER install
-# 4. chcon DIRECTORY → same_process_hal_file AFTER file is safely installed
-# This guarantees cp works on every boot regardless of previous dir context.
 if [ "$QGL" = "y" ]; then
-  if ! [ -d /data/vendor/gpu ]; then
-    if mkdir -p /data/vendor/gpu 2>/dev/null; then
-      chown root:system /data/vendor/gpu 2>/dev/null || true
-      chmod 0775 /data/vendor/gpu 2>/dev/null || true
-      # Label as vendor_data_file so init can create files in it (type_transition exists)
-      chcon u:object_r:vendor_data_file:s0 /data/vendor/gpu 2>/dev/null || true
-      log_boot "[OK] QGL: pre-created /data/vendor/gpu (init-level, context=vendor_data_file)"
-    else
-      log_boot "[!] QGL: /data/vendor/gpu mkdir failed in post-fs-data (unusual — continuing)"
-    fi
-  else
-    # Directory exists — ensure it has vendor_data_file context so init can create files.
-    # If it's currently same_process_hal_file (from previous boot activation), relabel it
-    # back to vendor_data_file so cp into it produces vendor_data_file-typed temp files.
-    # The directory will be re-labeled to same_process_hal_file AFTER file install (below).
-    _cur_ctx=$(ls -dZ /data/vendor/gpu 2>/dev/null | awk '{print $1}')
-    case "${_cur_ctx:-}" in
-      *same_process_hal_file*)
-        # Relabel directory back to vendor_data_file so cp produces vendor_data_file files.
-        # This is the key fix: without this, cp in a same_process_hal_file dir creates
-        # unlabeled files that init cannot create (SELinux denies 'create' on unlabeled).
-        chcon u:object_r:vendor_data_file:s0 /data/vendor/gpu 2>/dev/null || true
-        log_boot "[OK] QGL: /data/vendor/gpu was same_process_hal_file → relabeled vendor_data_file for safe install"
-        ;;
-      *vendor_data_file*)
-        log_boot "[OK] QGL: /data/vendor/gpu already vendor_data_file — no relabel needed"
-        ;;
-      *)
-        chcon u:object_r:vendor_data_file:s0 /data/vendor/gpu 2>/dev/null || true
-        log_boot "[OK] QGL: /data/vendor/gpu (prev ctx: ${_cur_ctx:-unknown}) → relabeled vendor_data_file"
-        ;;
-    esac
-    unset _cur_ctx
-  fi
+  log_boot "QGL: enabled — directory pre-created, file install deferred to boot-completed.sh"
 fi
 
 PLT_DIR="$MODDIR/system/vendor/etc"
@@ -748,6 +694,38 @@ else
 fi
 
 log_boot "VERBOSE: $VERBOSE (read fresh from config each boot — no sync needed)"
+
+# ── PHASE 1: REMOVE QGL PRE-ZYGOTE ──────────────────────────────────────
+# ROOT CAUSE OF BOOTLOOP: If qgl_config.txt exists when the GPU driver loads
+# during early boot (pre-zygote), the driver reads it during vkDevice init.
+# With a 127-extension QGL config (many unsupported on the target GPU), the
+# VkDevice becomes corrupt → SystemUI crashes → black screen → watchdog reboot.
+#
+# LYB writes QGL at BOOT_COMPLETED broadcast (post-zygote) via its onboot
+# BroadcastReceiver. We match this by removing any stale QGL here (pre-zygote)
+# and letting boot-completed.sh re-apply it after launcher is ready + 8s delay.
+#
+# This is a REMOVE-THEN-REAPPLY strategy:
+#   Phase 1 (here): Remove QGL → GPU driver loads clean → no bootloop
+#   Phase 2 (boot-completed.sh): Re-apply QGL after launcher Vulkan init
+if [ "$QGL" = "y" ]; then
+  if [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
+    rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null && \
+      log_boot "[OK] QGL: removed stale config (will be re-applied at boot-completed)" || \
+      log_boot "[!] QGL: failed to remove stale config (may cause bootloop)"
+  else
+    log_boot "QGL: no stale config found (clean boot)"
+  fi
+  rm -f "/data/vendor/gpu/.adreno_qgl_owner" 2>/dev/null || true
+else
+  # QGL=n: ensure no QGL file exists
+  if [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
+    rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null && \
+      log_boot "[OK] QGL: disabled → removed existing config" || \
+      log_boot "[!] QGL: disabled → failed to remove config"
+  fi
+  rm -f "/data/vendor/gpu/.adreno_qgl_owner" 2>/dev/null || true
+fi
 
 log_boot "========================================"
 log_boot "MODULE STATE SYNC COMPLETE"
@@ -875,25 +853,22 @@ if [ "$TOOL_FOUND" = "true" ]; then
   cat > "$_RULES_TMP" << 'SELINUX_RULES_BATCH'
 allow hal_graphics_composer_default gpu_device chr_file { read write open ioctl getattr }
 allow hal_graphics_composer_default same_process_hal_file file { read open getattr execute map }
+allow hal_graphics_composer_default same_process_hal_file dir { search read open getattr }
 allow hal_graphics_composer_default vendor_file file { read open getattr execute map }
 allow hal_graphics_allocator_default gpu_device chr_file { read write open ioctl getattr }
 allow hal_graphics_allocator_default same_process_hal_file file { read open getattr execute map }
+allow hal_graphics_allocator_default same_process_hal_file dir { search read open getattr }
 allow hal_graphics_mapper_default gpu_device chr_file { read write open ioctl getattr }
 allow hal_graphics_mapper_default same_process_hal_file file { read open getattr execute map }
+allow hal_graphics_mapper_default same_process_hal_file dir { search read open getattr }
 allow surfaceflinger gpu_device chr_file { read write open ioctl getattr }
 allow surfaceflinger same_process_hal_file file { read open getattr execute map }
+allow surfaceflinger same_process_hal_file dir { search read open getattr }
 allow surfaceflinger vendor_file file { read open getattr execute map }
-allow surfaceflinger vendor_data_file dir { read search getattr }
-allow surfaceflinger vendor_data_file file { read open getattr }
-allow hal_graphics_composer_default vendor_data_file file { read open getattr }
-allow hal_graphics_allocator_default vendor_data_file file { read open getattr }
-allow hal_graphics_mapper_default vendor_data_file file { read open getattr }
 allow system_server gpu_device chr_file { read write open ioctl getattr }
 allow system_server same_process_hal_file file { read open getattr execute map }
 allow system_server same_process_hal_file dir { search read open getattr }
 allow system_server vendor_file file { read open getattr execute map }
-allow system_server vendor_data_file dir { read search getattr write add_name create setattr }
-allow system_server vendor_data_file file { read open getattr create write setattr }
 allow zygote gpu_device chr_file { read write open ioctl getattr }
 allow zygote same_process_hal_file file { read open getattr execute map }
 allow zygote same_process_hal_file dir { search read open getattr }
@@ -909,29 +884,18 @@ allow init same_process_hal_file file { read open getattr execute map relabelto 
 allow init same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }
 allow init vendor_file file { read open getattr execute execute_no_trans }
 allow init gpu_device chr_file { read write open ioctl getattr setattr }
-allow init vendor_data_file dir { create read write open add_name remove_name search setattr getattr relabelfrom }
-allow init vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }
-allow hal_graphics_composer_default same_process_hal_file dir { search read open getattr }
-allow hal_graphics_allocator_default same_process_hal_file dir { search read open getattr }
-allow hal_graphics_mapper_default same_process_hal_file dir { search read open getattr }
 allow hal_graphics_mapper same_process_hal_file dir { search read open getattr }
-allow surfaceflinger same_process_hal_file dir { search read open getattr }
+allow hal_graphics_mapper same_process_hal_file file { read open getattr execute map }
 allow hal_graphics_composer_default self capability dac_read_search
 allow hal_graphics_allocator_default self capability dac_read_search
 allow hal_graphics_mapper_default self capability dac_read_search
 allow surfaceflinger self capability dac_read_search
 allow system_server self capability dac_read_search
 allow vendor_init gpu_device chr_file { read write open ioctl getattr setattr }
-allow vendor_init vendor_data_file dir { create read write search add_name setattr }
-allow vendor_init vendor_data_file file { create read write setattr }
 allow vendor_init vendor_firmware_file dir { search read getattr }
 allow vendor_init vendor_firmware_file file { read open getattr }
-allow su vendor_data_file dir { create read write open search add_name remove_name setattr getattr relabelfrom }
-allow su vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }
 allow su same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }
 allow su same_process_hal_file file { getattr setattr relabelto relabelfrom create write open read unlink rename }
-allow magisk vendor_data_file dir { create read write open search add_name remove_name setattr getattr relabelfrom }
-allow magisk vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }
 allow magisk same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }
 allow magisk same_process_hal_file file { getattr setattr relabelto relabelfrom create write open read unlink rename }
 allow init unlabeled file { getattr setattr relabelfrom unlink rename }
@@ -1041,15 +1005,11 @@ SELINUX_RULES_BATCH
     inject "allow surfaceflinger same_process_hal_file file { read open getattr execute map }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow surfaceflinger same_process_hal_file dir { search read open getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow surfaceflinger vendor_file file { read open getattr execute map }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow surfaceflinger vendor_data_file dir { read search getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow surfaceflinger vendor_data_file file { read open getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
 
     inject "allow system_server gpu_device chr_file { read write open ioctl getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow system_server same_process_hal_file file { read open getattr execute map }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow system_server same_process_hal_file dir { search read open getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow system_server vendor_file file { read open getattr execute map }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow system_server vendor_data_file dir { read search getattr write add_name create setattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow system_server vendor_data_file file { read open getattr create write setattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
 
     inject "allow zygote gpu_device chr_file { read write open ioctl getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow zygote same_process_hal_file file { read open getattr execute map }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
@@ -1083,59 +1043,18 @@ SELINUX_RULES_BATCH
     # write+add_name+remove_name: needed for creating/removing files in same_process_hal_file dirs
     # (QGL_TEMP creation, owner marker touch, mv rename within the dir).
     inject "allow init same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    # QGL: init needs relabelfrom+relabelto to chcon qgl_config.txt vendor_data_file→same_process_hal_file
-    # These are NOT in the batch (to avoid neverallow risk) — silent-fail individually.
-    "$SEPOLICY_TOOL" --live "allow init vendor_data_file file { relabelfrom }" >/dev/null 2>&1 && \
-      RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    # vendor_data_file dir relabelfrom: init chcon's /data/vendor/gpu/ FROM vendor_data_file
-    # TO same_process_hal_file. Without relabelfrom on vendor_data_file dir, the first-boot
-    # chcon of the directory silently fails (directory stays vendor_data_file → driver
-    # ignores qgl_config.txt regardless of file context).
-    "$SEPOLICY_TOOL" --live "allow init vendor_data_file dir { relabelfrom }" >/dev/null 2>&1 && \
-      RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    # BUG FIX: was relabelto-only. Added relabelfrom+unlink so init can relabel/delete
-    # the file after service.sh CASE A chcon'd it to same_process_hal_file.
-    # These three rules are critical for the mv-over-existing-file path in the retry
-    # loop (mv of QGL_TEMP over QGL_TARGET at same_process_hal_file context).
-    "$SEPOLICY_TOOL" --live "allow init same_process_hal_file file { relabelto relabelfrom unlink }" >/dev/null 2>&1 && \
-      RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    # QGL FIX: same_process_hal_file must be allowed to 'associate' with the /data
-    # filesystem. The kernel security_sid_mls_copy() check verifies this BEFORE
-    # evaluating relabelfrom/relabelto — if denied, chcon silently returns EACCES.
-    # labeledfs = ext4/f2fs/erofs with xattr (/data partition on modern Android).
-    # NOT using '*': Knox neverallow blocks tmpfs/proc/devpts with '*' → safe.
-    "$SEPOLICY_TOOL" --live "allow same_process_hal_file labeledfs filesystem associate" >/dev/null 2>&1 && \
-      RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    "$SEPOLICY_TOOL" --live "allow same_process_hal_file unlabeled filesystem associate" >/dev/null 2>&1 && \
-      RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    inject "allow init vendor_file file { read open getattr execute execute_no_trans }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow init gpu_device chr_file { read write open ioctl getattr setattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow init vendor_data_file dir { create read write open add_name remove_name search setattr getattr relabelfrom }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow init vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     # UNLABELED FIX for init domain:
     # OEM ROMs without type_transition → init-created files in /data/vendor/gpu/
-    # get 'unlabeled' label. The chcon in post-fs-data.sh (chcon vendor_data_file)
-    # needs relabelfrom unlabeled AND relabelto vendor_data_file. Without these,
-    # chcon silently fails → file stays unlabeled → service.sh CASE A cannot chmod it.
+    # get 'unlabeled' label. The chcon in boot-completed.sh
+    # needs relabelfrom unlabeled. Without these,
+    # chcon silently fails → file stays unlabeled.
     # rename: needed for mv QGL_TEMP→QGL_TARGET when QGL_TEMP has unlabeled context.
     # write+add_name+remove_name on dir: needed for file creation in same_process_hal_file/unlabeled dirs.
     "$SEPOLICY_TOOL" --live "allow init unlabeled file { getattr setattr relabelfrom unlink rename }" \
       >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
     "$SEPOLICY_TOOL" --live "allow init unlabeled dir { getattr setattr relabelfrom write add_name remove_name }" \
       >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    "$SEPOLICY_TOOL" --live "allow init vendor_data_file file { relabelfrom relabelto }" \
-      >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    # init filesystem mount rules: silent-fail — these trigger audit storms on OEM ROMs
-    # (MIUI/HyperOS/OneUI neverallow policies reject filesystem mounts from init domain).
-    # Injected opportunistically; failure is expected and non-critical.
-    "$SEPOLICY_TOOL" --live "allow init labeledfs filesystem { mount unmount }" >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    "$SEPOLICY_TOOL" --live "allow init tmpfs filesystem mount" >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    "$SEPOLICY_TOOL" --live "allow init rootfs filesystem mount" >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    "$SEPOLICY_TOOL" --live "allow init overlayfs filesystem mount" >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-
-    inject "allow domain gpu_device dir { search read }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow domain vendor_data_file dir { search read getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow domain vendor_data_file file { read open getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     # dac_read_search: targeted grants only — "allow domain self capability dac_read_search"
     # violates AOSP neverallow ~dac_override_allowed self:capability dac_read_search
     # (domain.te). On OEM ROMs with strict policy validation daemons this causes a
@@ -1148,24 +1067,12 @@ SELINUX_RULES_BATCH
     "$SEPOLICY_TOOL" --live "allow system_server self capability dac_read_search" >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
 
     inject "allow vendor_init gpu_device chr_file { read write open ioctl getattr setattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow vendor_init vendor_data_file dir { create read write search add_name setattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow vendor_init vendor_data_file file { create read write setattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow vendor_init vendor_firmware_file dir { search read getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow vendor_init vendor_firmware_file file { read open getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow vendor_init self capability { chown fowner }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
 
     inject "allow domain logd unix_stream_socket { connectto write }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow domain kernel file { read open }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    # NOTE: type_transition rules intentionally REMOVED.
-    # Injecting "type_transition init vendor_data_file:dir/file vendor_data_file" via
-    # magiskpolicy --live causes bootloops on OEM ROMs (MIUI/HyperOS, OneUI, ColorOS).
-    # Root cause: OEM vendor SELinux policies either (a) have neverallow rules that block
-    # these type_transitions, causing the entire batch to fail when batched together, or
-    # (b) the successfully-injected rule overrides the OEM's own type_transition rules for
-    # vendor_init-created /data/vendor/gpu/ directories, labeling them with the wrong type
-    # → vendor HAL services (GPU compositor, allocator) can't access the directory
-    # → SurfaceFlinger crashes → bootloop. The allow rules above already provide all
-    # necessary GPU access; type_transition rules are not required for driver operation.
   fi
   rm -f "$_RULES_TMP" 2>/dev/null
 
@@ -1181,11 +1088,7 @@ SELINUX_RULES_BATCH
   # in /data/vendor/gpu/ as 'unlabeled'. init needs relabelfrom unlabeled to chcon.
   "$SEPOLICY_TOOL" --live "allow init unlabeled file { getattr setattr relabelfrom unlink rename }" \
     >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-  # allow init vendor_data_file relabelfrom+relabelto: needed for chcon
-  # vendor_data_file→same_process_hal_file on ACTIVE MODE install. Also needed
-  # by service.sh CASE A after mode fix (chcon vendor_data_file→same_process_hal_file).
-  "$SEPOLICY_TOOL" --live "allow init vendor_data_file file { relabelfrom relabelto }" \
-    >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
+  # allow init vendor_data_file relabelfrom+relabelto: REMOVED (no vendor_data_file slop)
   # same_process_hal_file associate: kernel security_sid_mls_copy() checks this
   # BEFORE evaluating relabelfrom/relabelto. If denied, chcon returns EACCES
   # even when relabelfrom+relabelto are present. Must be unconditionally present.
@@ -1193,8 +1096,6 @@ SELINUX_RULES_BATCH
     >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
   "$SEPOLICY_TOOL" --live "allow same_process_hal_file unlabeled filesystem associate" \
     >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-  log_boot "  [+] init relabeling rules + same_process_hal_file associate injected (unconditional)"
-  # ── END critical unconditional init relabeling rules ─────────────────────
 
   # ── OEM-SAFE BROAD DOMAIN RULES — silent-fail individual injection ────────
   # These 6 "allow domain ..." rules were removed from the batch heredoc because
@@ -1205,8 +1106,7 @@ SELINUX_RULES_BATCH
   #     Batch contains both isolated_app and domain (a superset) — conflict.
   #
   #   allow domain gpu_device dir { search read }  → Broad but individually safe;
-  #   allow domain vendor_data_file dir/file        removed from batch because a
-  #                                                  SINGLE conflicting rule can
+  #                                                  removed from batch because a
   #   allow domain logd unix_stream_socket ...      → ColorOS/RealmeUI:
   #     neverallow domain logd:unix_stream_socket connectto
   #
@@ -1222,10 +1122,6 @@ SELINUX_RULES_BATCH
   "$SEPOLICY_TOOL" --live "allow domain system_lib_file file { read open getattr execute map }" >/dev/null 2>&1 && \
     { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] domain → system_lib_file execute (optional, OEM-permissive only)"; } || true
   "$SEPOLICY_TOOL" --live "allow domain gpu_device dir { search read }" >/dev/null 2>&1 && \
-    RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-  "$SEPOLICY_TOOL" --live "allow domain vendor_data_file dir { search read getattr }" >/dev/null 2>&1 && \
-    RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-  "$SEPOLICY_TOOL" --live "allow domain vendor_data_file file { read open getattr }" >/dev/null 2>&1 && \
     RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
   "$SEPOLICY_TOOL" --live "allow domain logd unix_stream_socket { connectto write }" >/dev/null 2>&1 && \
     RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
@@ -1257,33 +1153,27 @@ SELINUX_RULES_BATCH
     { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] vendor_init capability chown/fowner (optional)"; } || \
     log_boot "  [~] vendor_init capability chown/fowner: skipped (Knox neverallow — expected on OneUI)"
 
-  # ── QGL: su/magisk write access for service.sh install path ──────────────
-  # ROOT CAUSE OF QGL INSTALL FAILURE IN service.sh:
-  # The batch above grants 'domain' only READ on vendor_data_file.
-  # service.sh (late_start) runs as su/magisk domain and needs WRITE to
+  # ── QGL: su/magisk access for boot-completed.sh install path ──────────────
+  # service.sh (late_start) runs as su/magisk domain and needs access to
   # atomically install qgl_config.txt after boot_completed.
   # These rules are injected individually (silent-fail) so su/magisk type
   # absence on non-Magisk roots doesn't poison the batch.
   # On KernelSU/APatch the 'su' type is the correct service.sh context;
   # 'magisk' covers Magisk proper. Both are always attempted.
   if [ "$QGL" = "y" ] && [ -n "$SEPOLICY_TOOL" ]; then
-    log_boot "  [QGL] Injecting vendor_data_file write+relabel for su/magisk (service.sh install + chcon path)"
+    log_boot "  [QGL] Injecting same_process_hal_file access for su/magisk/ksu"
     # su   = KernelSU (standard, tiann) and APatch service.sh domain
     # magisk = Magisk service.sh domain (already has allow magisk * * *, but belt+suspenders)
     # ksu  = KernelSU-Next (rifsxd) service.sh domain (uses u:r:ksu:s0, NOT su)
     for _qgl_ctx in su magisk ksu; do
       "$SEPOLICY_TOOL" --live \
-        "allow ${_qgl_ctx} vendor_data_file dir { create read write open search add_name remove_name setattr getattr }" \
+        "allow ${_qgl_ctx} same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }" \
         >/dev/null 2>&1 && \
-        { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] ${_qgl_ctx} → vendor_data_file dir write"; } || true
-      "$SEPOLICY_TOOL" --live \
-        "allow ${_qgl_ctx} vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }" \
-        >/dev/null 2>&1 && \
-        { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] ${_qgl_ctx} → vendor_data_file file write+relabelfrom+relabelto"; } || true
+        { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] ${_qgl_ctx} → same_process_hal_file dir full"; } || true
       "$SEPOLICY_TOOL" --live \
         "allow ${_qgl_ctx} same_process_hal_file file { getattr setattr relabelto relabelfrom create write open read unlink rename }" \
         >/dev/null 2>&1 && \
-        { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] ${_qgl_ctx} → same_process_hal_file file full (create/write/read/relabel/unlink)"; } || true
+        { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] ${_qgl_ctx} → same_process_hal_file file full"; } || true
       # UNLABELED FIX: new files cp'd into same_process_hal_file dir get unlabeled
       # context on OEM ROMs without type_transition. create/write/open needed for cp.
       "$SEPOLICY_TOOL" --live \
@@ -1312,14 +1202,6 @@ SELINUX_RULES_BATCH
   # (magiskpolicy handles duplicate allow rules idempotently) and this block ensures
   # coverage when QGL=n or when the tool is absent during the QGL block.
   if [ -n "$SEPOLICY_TOOL" ]; then
-    "$SEPOLICY_TOOL" --live \
-      "allow ksu vendor_data_file dir { create read write open search add_name remove_name setattr getattr }" \
-      >/dev/null 2>&1 && \
-      { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] ksu -> vendor_data_file dir (KSU-Next standalone)"; } || true
-    "$SEPOLICY_TOOL" --live \
-      "allow ksu vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }" \
-      >/dev/null 2>&1 && \
-      { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] ksu -> vendor_data_file file (KSU-Next standalone)"; } || true
     "$SEPOLICY_TOOL" --live \
       "allow ksu same_process_hal_file file { getattr setattr relabelto relabelfrom create write open read unlink rename }" \
       >/dev/null 2>&1 && \
@@ -2620,7 +2502,7 @@ case "$RENDER_MODE" in
     # Re-apply debug.hwui.renderer in case vendor_init overrode it.
     # NO force-stops. LYB Kernel Manager never force-stops apps and works
     # perfectly — existing pipeline blobs remain valid after QGL activation.
-    # Force-stopping at boot+25s (5s after QGL at +20s) caused apps to
+    # Force-stopping at boot+10s (5s after QGL at +5s) caused apps to
     # cold-compile ALL shaders WITH QGL active → QGLCCompileToIRShader SIGSEGV.
     (
         _WAIT=0
@@ -2956,253 +2838,34 @@ log_boot "RENDER MODE APPLICATION COMPLETE"
 log_boot "========================================"
 
 # ========================================
-# QGL CONFIGURATION INSTALLATION
+# QGL CONFIGURATION — DEFERRED TO boot-completed.sh
 # ========================================
-# Runs as init domain — unconditional write access to all paths, no SELinux
-# restrictions. This section ALWAYS installs qgl_config.txt.
+# LYB Kernel Manager NEVER writes qgl_config.txt pre-zygote. It writes
+# exclusively at BOOT_COMPLETED broadcast time (via onboot BroadcastReceiver).
+# Writing it here (post-fs-data) causes:
+#   - Pre-zygote: SF reads QGL during boot → caches compiled with QGL
+#   - If file is 0000 (protected): SF gets EACCES → no-QGL caches
+#   - When boot-completed.sh activates (0644): mixed QGL/no-QGL contexts
+#     on same KGSL device → cascade crash → black screen → bootloop
 #
-# BOOT FREEZE ROOT CAUSE (skiavkthreaded + QGL pre-SF):
-# ALWAYS ACTIVE MODE (0644):
-#   qgl_config.txt is written at 0644 here in post-fs-data.sh.
-#   SF, apps, and every process reads it from the very start of the boot.
-#   All pipeline caches compiled during boot are WITH QGL active.
-#   boot-completed.sh re-writes at boot_completed to refresh the inode
-#   and ensure correct SELinux context — identical to LYB Kernel Manager.
-#
-# WHY THE OLD PROTECTED MODE (0000) CAUSED BLACK SCREEN:
-#   Writing 0000 meant all boot-session caches were compiled without QGL.
-#   When QGL activated at boot_completed, the pipelineCacheUUID had NOT
-#   changed (custom Adreno drivers don't update UUID on QGL changes).
-#   Driver loaded old no-QGL blobs with QGL active → wrong shader output
-#   → black screen for every app including the launcher.
-#   The _PREV_BOOT_SUCCESS gate already handles first-boot SF hang safety
-#   by using skiaglthreaded on the first boot after install.
+# FIX: do NOT install qgl_config.txt here at all. boot-completed.sh handles
+# it exclusively at the correct timing (boot_completed + 3s stabilization).
+# The /data/vendor/gpu directory is pre-created below for SELinux readiness.
 
 if [ "$QGL" = "y" ]; then
-  # ── LYB BOOT 2+ BEHAVIOR: skip install if file already active ─────────────
-  # ROOT CAUSE OF CASCADE CRASH (first app works, second crashes, cascade):
-  #
-  #   LYB never writes qgl_config.txt during post-fs-data/init time.
-  #   On boot 2+, the previous boot's 0644 file is still present when
-  #   BOOT_COMPLETED fires. ALL apps from BOOT_COMPLETED+0s read the SAME
-  #   QGL config — consistent KGSL context state across the entire session.
-  #   No mixed state = no cascade crash.
-  #
-  #   Our module overwrites the previous boot's 0644 with 0000 here, which
-  #   creates a transition window:
-  #     BOOT_COMPLETED+0s to +20s: apps get EACCES → default (no-QGL) KGSL contexts
-  #     BOOT_COMPLETED+20s:        boot-completed.sh writes 0644 → QGL KGSL contexts
-  #   When both types of context coexist on the same KGSL device → crash → cascade.
-  #
-  #   FIX: if the file already exists at 0644 with our owner marker (written by
-  #   boot-completed.sh on the previous boot), SKIP the install entirely.
-  #   boot-completed.sh will refresh it at BOOT_COMPLETED+20s (same mechanism as LYB).
-  #   All apps from BOOT_COMPLETED+0s read the same config → consistent → no crash.
-  #
-  #   BOOT 1 / fresh install: file absent or not ours → fall through to normal install
-  #   (writes 0000, boot-completed.sh activates at +20s with line-by-line write).
-  # ─────────────────────────────────────────────────────────────────────────────
-  _qgl_skip=false
-  case "$RENDER_MODE" in
-    skiavk)
-      _qgl_existing_mode=$(stat -c '%a' "/data/vendor/gpu/qgl_config.txt" 2>/dev/null || echo "")
-      _qgl_existing_owner="/data/vendor/gpu/.adreno_qgl_owner"
-      case "$_qgl_existing_mode" in
-        "644"|"0644")
-          if [ -f "$_qgl_existing_owner" ]; then
-            _qgl_skip=true
-            log_boot "[OK] QGL: file already at 0644 with owner marker — SKIP install (LYB boot 2+ behavior)"
-            log_boot "    All apps from BOOT_COMPLETED+0s will see consistent QGL state."
-            log_boot "    boot-completed.sh will refresh at BOOT_COMPLETED+20s."
-          fi
-          ;;
-      esac
-      unset _qgl_existing_mode _qgl_existing_owner
-      ;;
-  esac
-
-  if [ "$_qgl_skip" = "true" ]; then
-    unset _qgl_skip _QGL_SKIAVK_BOOT
-  else
-  unset _qgl_skip
-
-  # ── Determine whether skiavkthreaded will be active this boot ─────────────
-  # skiavkthreaded = SF uses Vulkan compositor → reads qgl_config.txt during
-  # cold vkCreateDevice init → certain QGL settings cause indefinite hang.
-  # Write 0000 to prevent SF from reading it. boot-completed.sh writes 0644
-  # at boot_completed — "settings take effect for the next app launched" (RE §7).
-  _QGL_SKIAVK_BOOT=false
-  case "$RENDER_MODE" in
-    skiavk)
-      _QGL_SKIAVK_BOOT=true
-      log_boot "[OK] QGL: RENDER_MODE=${RENDER_MODE} → skiavkthreaded boot → PROTECTED MODE (0000)"
-      ;;
-  esac
-  if [ "$_QGL_SKIAVK_BOOT" = "false" ]; then
-    _hwui_live=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
-    if [ "$_hwui_live" = "skiavk" ]; then
-      _QGL_SKIAVK_BOOT=true
-      log_boot "[OK] QGL: debug.hwui.renderer=skiavk detected → PROTECTED MODE (0000)"
-    else
-      log_boot "[OK] QGL: no Vulkan renderer active → ACTIVE MODE (0644)"
-    fi
-    unset _hwui_live
-  fi
-
-  log_boot "========================================"
-  log_boot "QGL CONFIGURATION: INSTALLING (init domain)"
-  log_boot "========================================"
-
-  if [ -f "$MODDIR/qgl_config.txt" ]; then
-    QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
-    QGL_TEMP="/data/vendor/gpu/.qgl_config.txt.tmp.$$"
-    QGL_OWNER_MARKER="/data/vendor/gpu/.adreno_qgl_owner"
-    QGL_INSTALL_SUCCESS=false
-    MAX_RETRIES=5
-    RETRY_COUNT=0
-
-    # ── OWNERSHIP RECLAIM: protected-mode file without owner marker ─────────
-    # If qgl_config.txt exists at mode 0000 (our exclusive PROTECTED MODE) but the
-    # owner marker is missing, the foreign-file guard below would incorrectly skip
-    # the file as "third-party". No third-party manager (LYB, etc.) ever writes a
-    # mode-0000 file — they write at 0644. Mode 0000 is only written by this module's
-    # post-fs-data PROTECTED MODE path. The marker is lost when:
-    #   (a) The QGL=n disable path removed the marker but not the file (now fixed above)
-    #   (b) The owner marker write failed silently on a prior boot
-    # Fix: write the marker before the guard so CASE A can proceed on service.sh.
-    if [ -f "$QGL_TARGET" ] && [ ! -f "$QGL_OWNER_MARKER" ]; then
-      _pfd_reown_mode=$(stat -c '%a' "$QGL_TARGET" 2>/dev/null || echo "?")
-      case "$_pfd_reown_mode" in
-        "0"|"00"|"000"|"0000")
-          log_boot "[OK] QGL: protected-mode file (mode=0000) found without owner marker"
-          log_boot "    Reclaiming ownership (marker was lost — see QGL=n path fix comment)"
-          touch "$QGL_OWNER_MARKER" 2>/dev/null && \
-            chmod 0600 "$QGL_OWNER_MARKER" 2>/dev/null && \
-            log_boot "    Owner marker re-created — CASE A will activate the file" || \
-            log_boot "    [!] Owner marker re-create failed — file may stay 0000 this boot"
-          ;;
-      esac
-      unset _pfd_reown_mode
-    fi
-    # ── END ownership reclaim ────────────────────────────────────────────────
-
-    # Foreign-file guard: if the file exists without our owner marker, leave it.
-    if [ -f "$QGL_TARGET" ] && [ ! -f "$QGL_OWNER_MARKER" ]; then
-      log_boot "[!] QGL: qgl_config.txt exists but NOT owned by this module — leaving untouched"
-      QGL_INSTALL_SUCCESS=true
-    else
-      while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$QGL_INSTALL_SUCCESS" = "false" ]; do
-        sleep 1
-        if touch /data/.adreno_qgl_test 2>/dev/null && rm -f /data/.adreno_qgl_test 2>/dev/null; then
-          if mkdir -p /data/vendor/gpu 2>/dev/null; then
-            # CRITICAL: Ensure directory is vendor_data_file BEFORE cp.
-            # If it's same_process_hal_file (from a prior boot's activation), cp creates
-            # a file with 'unlabeled' context (no type_transition) → init 'create' denied
-            # → cp fails → temp file never created → mv never runs → old 0644 stays →
-            # SF reads it → skiavkthreaded hang → watchdog → reboot.
-            # Relabeling to vendor_data_file here (with init's unrestricted chcon) ensures
-            # type_transition (init → vendor_data_file:dir → vendor_data_file file) fires.
-            chcon u:object_r:vendor_data_file:s0 /data/vendor/gpu 2>/dev/null || true
-            if cp -f "$MODDIR/qgl_config.txt" "$QGL_TEMP" 2>/dev/null; then
-              if [ -f "$QGL_TEMP" ] && [ -s "$QGL_TEMP" ]; then
-
-                  if [ "$_QGL_SKIAVK_BOOT" = "true" ]; then
-                    # PROTECTED MODE — SF uses skiavkthreaded (Vulkan), reads
-                    # qgl_config.txt during cold vkCreateDevice init which hangs.
-                    # 0000 → SF gets EACCES → no hang. boot-completed.sh writes
-                    # 0644 at boot_completed. Every app launched AFTER boot_completed
-                    # reads QGL. This is LYB-equivalent: "settings take effect for
-                    # the next app launched" (RE reference §7 timing note).
-                    chmod 0000 "$QGL_TEMP" 2>/dev/null
-                    chown 0:0 "$QGL_TEMP" 2>/dev/null
-                  else
-                    # ACTIVE MODE — SF uses skiaglthreaded (GL), never reads
-                    # qgl_config.txt at init. Safe to install at 0644 now.
-                    chmod 0644 "$QGL_TEMP" 2>/dev/null
-                    chown 0:1000 "$QGL_TEMP" 2>/dev/null
-                  fi
-
-                if mv -f "$QGL_TEMP" "$QGL_TARGET" 2>/dev/null; then
-                  if [ -f "$QGL_TARGET" ]; then
-                    ACTUAL_SIZE=$(stat -c%s "$QGL_TARGET" 2>/dev/null || echo 0)
-                    if [ "$ACTUAL_SIZE" -gt 0 ]; then
-                      QGL_INSTALL_SUCCESS=true
-                      touch "$QGL_OWNER_MARKER" 2>/dev/null || true
-                      chmod 0600 "$QGL_OWNER_MARKER" 2>/dev/null || true
-
-                        "$SEPOLICY_TOOL" --live \
-                          "allow same_process_hal_file labeledfs filesystem associate" \
-                          >/dev/null 2>&1 || true
-                        "$SEPOLICY_TOOL" --live \
-                          "allow same_process_hal_file unlabeled filesystem associate" \
-                          >/dev/null 2>&1 || true
-                        if [ "$_QGL_SKIAVK_BOOT" = "true" ]; then
-                          # Protected mode: label vendor_data_file. boot-completed.sh
-                          # will chcon to same_process_hal_file when it re-writes.
-                          chcon u:object_r:vendor_data_file:s0 "$QGL_TARGET" 2>/dev/null || true
-                          _qgl_ctx=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
-                          log_boot "[OK] QGL written — PROTECTED MODE (${ACTUAL_SIZE}B, 0000, ctx=${_qgl_ctx})"
-                          log_boot "    boot-completed.sh activates at boot_completed"
-                          unset _qgl_ctx
-                        else
-                          if chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null; then
-                            chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu 2>/dev/null || true
-                            _qgl_ctx=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
-                            log_boot "[OK] QGL written — ACTIVE MODE (${ACTUAL_SIZE}B, 0644, ctx=${_qgl_ctx})"
-                          else
-                            chcon u:object_r:vendor_data_file:s0 "$QGL_TARGET" 2>/dev/null || true
-                            _qgl_ctx=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
-                            log_boot "[!] QGL written — ACTIVE MODE (${ACTUAL_SIZE}B, 0644, ctx=${_qgl_ctx}) — chcon OEM-blocked"
-                          fi
-                          unset _qgl_ctx
-                        fi
-                      log_boot "[OK] QGL owner marker: $QGL_OWNER_MARKER"
-                      break
-                    else
-                      log_boot "[X] QGL post-rename file is empty — retrying"
-                    fi
-                  else
-                    log_boot "[X] QGL post-rename file missing — retrying"
-                  fi
-                else
-                  log_boot "[X] QGL atomic rename failed — retrying"
-                  rm -f "$QGL_TEMP" 2>/dev/null
-                fi
-              else
-                log_boot "[X] QGL temp file empty/missing after cp — retrying"
-                rm -f "$QGL_TEMP" 2>/dev/null
-              fi
-            else
-              log_boot "[X] QGL cp to temp failed — retrying"
-            fi
-          else
-            log_boot "[X] QGL mkdir /data/vendor/gpu failed — retrying"
-          fi
-        else
-          log_boot "[X] /data not writable yet — retrying"
-        fi
-        RETRY_COUNT=$((RETRY_COUNT + 1))
-        [ "$QGL_INSTALL_SUCCESS" = "false" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ] && \
-          sleep $((RETRY_COUNT * 2))
-      done
-      rm -f "$QGL_TEMP" 2>/dev/null
-
-      if [ "$QGL_INSTALL_SUCCESS" = "false" ]; then
-        log_boot "[X] ERROR: QGL install failed after $MAX_RETRIES attempts"
-        log_boot "    service.sh will attempt emergency install post-boot_completed"
-      fi
-    fi
-
-    unset QGL_TARGET QGL_TEMP QGL_OWNER_MARKER QGL_INSTALL_SUCCESS
-    unset MAX_RETRIES RETRY_COUNT ACTUAL_SIZE
-  else
-    log_boot "[X] ERROR: $MODDIR/qgl_config.txt not found — cannot install QGL"
-  fi
-
-  unset _QGL_SKIAVK_BOOT
-  fi # end _qgl_skip else block
+  log_boot "QGL: enabled — installation deferred to boot-completed.sh (LYB timing)"
+  # Pre-create directory with correct context so boot-completed.sh has a
+  # ready target. This is safe — no file exists yet, just the directory.
+  mkdir -p /data/vendor/gpu 2>/dev/null || true
+  chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu 2>/dev/null || true
+  # Remove any stale file from a crashed previous boot to ensure clean state
+  rm -f /data/vendor/gpu/qgl_config.txt 2>/dev/null || true
+  log_boot "[OK] QGL: /data/vendor/gpu pre-created, stale file cleared"
 else
   log_boot "QGL configuration disabled"
+  # If QGL is disabled, clean up any existing file
+  rm -f /data/vendor/gpu/qgl_config.txt 2>/dev/null || true
+  rm -f /data/vendor/gpu/.adreno_qgl_owner 2>/dev/null || true
 fi
 
 # ========================================
@@ -3333,17 +2996,16 @@ if [ -d "$MODDIR/system/vendor/firmware" ]; then
     log_boot "WARNING: Failed to set SELinux contexts for firmware"
 fi
 
-# ── OEM-specific: QGL data directory fix ─────────────────────────────────────
-if [ "$HYPEROS_ROM" = "true" ] && [ "$QGL" = "y" ]; then
+# ── QGL data directory setup (ALL OEMs) ─────────────────────────────────────
+# GPU HAL writes shader caches here at runtime. It runs in the 'system'
+# group (GID 1000). 0775 = owner+group write. 0755 would deny group
+# writes → HAL can't create caches → crash → SurfaceFlinger restart loop.
+# same_process_hal_file is required for BOTH the directory and qgl_config.txt.
+# The Adreno driver validates both contexts before reading the config file.
+if [ "$QGL" = "y" ]; then
   mkdir -p /data/vendor/gpu 2>/dev/null
-  # GPU HAL writes shader caches here at runtime. It runs in the 'system'
-  # group (GID 1000). 0775 = owner+group write. 0755 would deny group
-  # writes → HAL can't create caches → crash → SurfaceFlinger restart loop.
   chown root:system /data/vendor/gpu 2>/dev/null || true
   chmod 0775 /data/vendor/gpu 2>/dev/null || true
-  # same_process_hal_file is required for BOTH the directory and qgl_config.txt.
-  # The Adreno driver validates both contexts before reading the config file.
-  # The directory receiving same_process_hal_file is validated by LYB Kernel Manager.
   chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu 2>/dev/null || true
   log_boot "QGL directory context set to same_process_hal_file (dir+file both required by driver)"
 fi

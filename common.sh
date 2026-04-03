@@ -15,6 +15,388 @@
 #
 # Source with: . "$MODDIR/common.sh"
 
+# ============================================================
+# STRUCTURED LOGGING HELPERS (verbose=y)
+# ============================================================
+# Provides section headers, status markers, and system state dumps
+# matching the capture script's logging style. All functions are
+# no-ops when VERBOSE != y.
+
+# Section header — prints === SECTION NAME ===
+log_section() {
+  [ "$VERBOSE" = "y" ] || return 0
+  _log_emit "========================================"
+  _log_emit "  $1"
+  _log_emit "========================================"
+}
+
+# Status markers
+log_ok()   { [ "$VERBOSE" = "y" ] || return 0; _log_emit "[OK] $1"; }
+log_fail() { [ "$VERBOSE" = "y" ] || return 0; _log_emit "[FAIL] $1"; }
+log_warn() { [ "$VERBOSE" = "y" ] || return 0; _log_emit "[WARN] $1"; }
+log_info() { [ "$VERBOSE" = "y" ] || return 0; _log_emit "[INFO] $1"; }
+
+# Dump system state to a file (processes, properties, GPU info, etc.)
+dump_boot_state() {
+  [ "$VERBOSE" = "y" ] || return 0
+  local _state_dir="$1"
+  [ -z "$_state_dir" ] && return 0
+  mkdir -p "$_state_dir" 2>/dev/null || return 0
+
+  ps -A > "$_state_dir/processes.txt" 2>/dev/null || true
+  getprop > "$_state_dir/properties.txt" 2>/dev/null || true
+  getenforce > "$_state_dir/selinux_status.txt" 2>/dev/null || true
+  dumpsys SurfaceFlinger > "$_state_dir/surfaceflinger_dump.txt" 2>/dev/null || true
+  dumpsys gpu > "$_state_dir/gpu_dump.txt" 2>/dev/null || true
+
+  for proc in surfaceflinger zygote64 zygote; do
+    _pid=$(pidof "$proc" 2>/dev/null | awk '{print $1}')
+    if [ -n "$_pid" ]; then
+      cat "/proc/$_pid/maps" > "$_state_dir/${proc}_maps.txt" 2>/dev/null || true
+      cat "/proc/$_pid/cmdline" | tr '\0' ' ' > "$_state_dir/${proc}_cmdline.txt" 2>/dev/null || true
+    fi
+  done
+
+  # GPU sysfs state
+  if [ -r /sys/class/kgsl/kgsl-3d0/gpu_model ]; then
+    {
+      echo "GPU Model: $(cat /sys/class/kgsl/kgsl-3d0/gpu_model 2>/dev/null)"
+      echo "GPU Clock: $(cat /sys/class/kgsl/kgsl-3d0/gpu_clock 2>/dev/null)"
+      echo "GPU Busy: $(cat /sys/class/kgsl/kgsl-3d0/gpubusy 2>/dev/null)"
+    } > "$_state_dir/gpu_sysfs.txt" 2>/dev/null || true
+  fi
+
+  # QGL state
+  if [ -f /data/vendor/gpu/qgl_config.txt ]; then
+    ls -laZ /data/vendor/gpu/qgl_config.txt > "$_state_dir/qgl_file_info.txt" 2>/dev/null || true
+    stat /data/vendor/gpu/qgl_config.txt >> "$_state_dir/qgl_file_info.txt" 2>/dev/null || true
+    cp /data/vendor/gpu/qgl_config.txt "$_state_dir/qgl_config_backup.txt" 2>/dev/null || true
+  fi
+
+  _log_emit "[OK] System state dumped to $_state_dir"
+}
+
+# Start logcat + dmesg capture for 120 seconds after boot completed.
+# Writes to $LOG_BASE_DIR/Booted/capture_logcat.txt and capture_dmesg.txt.
+# Auto-stops after 120s and runs analyze_boot_logs on the captured data.
+# Call from service.sh after boot is confirmed stable.
+start_boot_capture() {
+  [ "$VERBOSE" = "y" ] || return 0
+  local _capture_dir="$1"
+  [ -z "$_capture_dir" ] && return 0
+  mkdir -p "$_capture_dir" 2>/dev/null || return 0
+
+  _log_emit "=== STARTING 120s BOOT CAPTURE ==="
+  _log_emit "  Logcat: $_capture_dir/capture_logcat.txt"
+  _log_emit "  Dmesg:  $_capture_dir/capture_dmesg.txt"
+  _log_emit "  Auto-stops after 120 seconds"
+  _log_emit "  Analysis: $_capture_dir/analysis.md (auto-generated after capture)"
+
+  # Use -f flag (direct file write) — more reliable than shell redirect under SELinux
+  logcat -v threadtime -f "$_capture_dir/capture_logcat.txt" 2>/dev/null &
+  _logcat_pid=$!
+
+  dmesg -w > "$_capture_dir/capture_dmesg.txt" 2>&1 &
+  _dmesg_pid=$!
+
+  # Verify logcat is actually writing
+  sleep 2
+  if [ -s "$_capture_dir/capture_logcat.txt" ]; then
+    _lc_lines=$(wc -l < "$_capture_dir/capture_logcat.txt" 2>/dev/null || echo 0)
+    _log_emit "[OK] Capture started (logcat=$_logcat_pid, $_lc_lines lines buffered)"
+  else
+    _log_emit "[WARN] Logcat -f produced no output, trying redirect fallback..."
+    kill "$_logcat_pid" 2>/dev/null || true
+    logcat -v threadtime > "$_capture_dir/capture_logcat.txt" 2>&1 &
+    _logcat_pid=$!
+    sleep 2
+    if [ -s "$_capture_dir/capture_logcat.txt" ]; then
+      _lc_lines=$(wc -l < "$_capture_dir/capture_logcat.txt" 2>/dev/null || echo 0)
+      _log_emit "[OK] Logcat capture via redirect (PID: $_logcat_pid, $_lc_lines lines)"
+    else
+      _log_emit "[FAIL] Logcat capture failed — buffer may be empty or broken"
+    fi
+  fi
+  unset _lc_lines
+
+  # Self-terminating: kill both after 120s, then generate analysis
+  (
+    sleep 120
+    kill "$_logcat_pid" 2>/dev/null || true
+    kill "$_dmesg_pid" 2>/dev/null || true
+    # Small delay to let file handles flush
+    sleep 2
+    analyze_boot_logs "$_capture_dir"
+  ) &
+
+  _log_emit "[OK] 120s boot capture armed — will auto-stop + generate analysis.md"
+}
+
+# Analyze captured logs and generate analysis.md in the capture directory.
+# Scans logcat + dmesg for crashes, GPU errors, SELinux denials, renderer status,
+# QGL state, OEM overrides, and performance data.
+analyze_boot_logs() {
+  [ "$VERBOSE" = "y" ] || return 0
+  local _capture_dir="$1"
+  [ -z "$_capture_dir" ] && return 0
+
+  _logcat="$_capture_dir/capture_logcat.txt"
+  _dmesg="$_capture_dir/capture_dmesg.txt"
+  _report="$_capture_dir/analysis.md"
+
+  # Wait up to 10s for capture files to appear (capture may still be running)
+  _wait=0
+  while [ ! -f "$_logcat" ] && [ $_wait -lt 10 ]; do
+    sleep 1
+    _wait=$((_wait + 1))
+  done
+
+  # Check logcat content quality
+  _logcat_lines=0
+  if [ -f "$_logcat" ]; then
+    _logcat_lines=$(wc -l < "$_logcat" 2>/dev/null || echo 0)
+  fi
+
+  {
+    echo "# Adreno GPU Driver — Boot Analysis Report"
+    echo ""
+    echo "Generated: $(date 2>/dev/null || echo 'unknown')"
+    echo ""
+    if [ "$_logcat_lines" -lt 10 ] 2>/dev/null; then
+      echo "**WARNING: Logcat buffer has only $_logcat_lines lines.**"
+      echo "This device may have a tiny logcat buffer or logd is clearing it."
+      echo "Check: \`getprop persist.logd.size\` and \`logcat -d | wc -l\`"
+      echo "Analysis based on dmesg + system state only."
+      echo ""
+    fi
+
+    # ── CRASHES ──
+    echo "## Crashes"
+    echo ""
+    if [ -f "$_logcat" ]; then
+      _crash_count=$(grep -c "FATAL EXCEPTION\|*** FATAL\|Process crashed\|*** ***" "$_logcat" 2>/dev/null || echo 0)
+      echo "**Total crashes: $_crash_count**"
+      echo ""
+      if [ "$_crash_count" -gt 0 ] 2>/dev/null; then
+        echo "### Crashed Processes"
+        echo ""
+        grep -o "Process [^ ]* (pid [0-9]*)" "$_logcat" 2>/dev/null | sort -u | while IFS= read -r _cp; do
+          echo "- $_cp"
+        done
+        echo ""
+        echo "### Launcher Crashes"
+        echo ""
+        grep -i "launcher\|home\|trebuchet\|pixel\|oneui" "$_logcat" 2>/dev/null | grep -i "crash\|fatal\|error\|die" | tail -10 | while IFS= read -r _lc; do
+          echo "- $_lc"
+        done
+        echo ""
+      fi
+    else
+      echo "**No logcat available for crash analysis**"
+      echo ""
+    fi
+
+    # ── GPU / VULKAN ERRORS ──
+    echo "## GPU / Vulkan Errors"
+    echo ""
+    if [ -f "$_logcat" ]; then
+      _vk_errors=$(grep -i "vulkan\|vk\|skiavk" "$_logcat" 2>/dev/null | grep -ic "error\|fail\|crash\|fatal" || echo 0)
+      _gpu_errors=$(grep -i "adreno\|kgsl\|gpu\|gles\|egl" "$_logcat" 2>/dev/null | grep -ic "error\|fail\|crash\|fatal" || echo 0)
+      echo "- Vulkan errors in logcat: **$_vk_errors**"
+      echo "- GPU/EGL errors in logcat: **$_gpu_errors**"
+      echo ""
+      if [ "$_vk_errors" -gt 0 ] 2>/dev/null || [ "$_gpu_errors" -gt 0 ] 2>/dev/null; then
+        echo "### Recent GPU/Vulkan Errors"
+        echo ""
+        grep -i "vulkan\|vk\|skiavk\|adreno\|kgsl\|gpu\|gles\|egl" "$_logcat" 2>/dev/null | grep -i "error\|fail\|crash\|fatal" | tail -15 | while IFS= read -r _ge; do
+          echo "- $_ge"
+        done
+        echo ""
+      fi
+    fi
+    if [ -f "$_dmesg" ]; then
+      _kgpu=$(grep -ic "kgsl\|adreno\|gpu\|vulkan" "$_dmesg" 2>/dev/null || echo 0)
+      echo "- GPU-related kernel log lines: **$_kgpu**"
+      echo ""
+      if [ "$_kgpu" -gt 0 ] 2>/dev/null; then
+        echo "### Kernel GPU Logs (last 20)"
+        echo ""
+        grep -i "kgsl\|adreno\|gpu\|vulkan" "$_dmesg" 2>/dev/null | tail -20 | while IFS= read -r _kg; do
+          echo "- $_kg"
+        done
+        echo ""
+      fi
+    fi
+
+    # ── SELINUX DENIALS ──
+    echo "## SELinux Denials"
+    echo ""
+    _avc_count=0
+    if [ -f "$_logcat" ]; then
+      _avc_lc=$(grep -c "avc: denied" "$_logcat" 2>/dev/null || echo 0)
+      _avc_count=$((_avc_count + _avc_lc))
+    fi
+    if [ -f "$_dmesg" ]; then
+      _avc_dm=$(grep -c "avc: denied" "$_dmesg" 2>/dev/null || echo 0)
+      _avc_count=$((_avc_count + _avc_dm))
+    fi
+    echo "**Total AVC denials: $_avc_count**"
+    echo ""
+    if [ "$_avc_count" -gt 0 ] 2>/dev/null; then
+      echo "### Recent Denials"
+      echo ""
+      if [ -f "$_logcat" ]; then
+        grep -i "avc: denied" "$_logcat" 2>/dev/null | tail -10 | while IFS= read -r _av; do
+          echo "- $_av"
+        done
+      fi
+      if [ -f "$_dmesg" ]; then
+        grep -i "avc: denied" "$_dmesg" 2>/dev/null | tail -10 | while IFS= read -r _av; do
+          echo "- $_av"
+        done
+      fi
+      echo ""
+    fi
+
+    # ── RENDERER STATUS ──
+    echo "## Renderer Status"
+    echo ""
+    echo "| Property | Value |"
+    echo "|----------|-------|"
+    echo "| debug.hwui.renderer | $(getprop debug.hwui.renderer 2>/dev/null || echo 'not set') |"
+    echo "| debug.renderengine.backend | $(getprop debug.renderengine.backend 2>/dev/null || echo 'not set') |"
+    echo "| ro.hwui.use_vulkan | $(getprop ro.hwui.use_vulkan 2>/dev/null || echo 'not set') |"
+    echo "| ro.config.vulkan.enabled | $(getprop ro.config.vulkan.enabled 2>/dev/null || echo 'not set') |"
+    echo ""
+    # SystemUI Vulkan check
+    _sysui_vk=$(dumpsys gfxinfo com.android.systemui 2>/dev/null | grep -c "Skia (Vulkan)" 2>/dev/null || echo 0)
+    _sysui_pipe=$(dumpsys gfxinfo com.android.systemui 2>/dev/null | grep -i "Pipeline" | head -1 || echo "unavailable")
+    echo "- SystemUI Vulkan surfaces: **$_sysui_vk**"
+    echo "- SystemUI pipeline: \`${_sysui_pipe}\`"
+    echo ""
+
+    # ── QGL STATUS ──
+    echo "## QGL Status"
+    echo ""
+    if [ -f /data/vendor/gpu/qgl_config.txt ]; then
+      _qgl_size=$(stat -c '%s' /data/vendor/gpu/qgl_config.txt 2>/dev/null || echo 'unknown')
+      _qgl_ctx=$(ls -Z /data/vendor/gpu/qgl_config.txt 2>/dev/null | awk '{print $1}' || echo 'unknown')
+      echo "- QGL file: **present** ($_qgl_size bytes)"
+      echo "- SELinux context: \`${_qgl_ctx}\`"
+      case "$_qgl_ctx" in
+        *same_process_hal_file*) echo "- Context: **correct** (same_process_hal_file)" ;;
+        *) echo "- Context: **unexpected** — expected same_process_hal_file" ;;
+      esac
+    else
+      echo "- QGL file: **not present**"
+    fi
+    echo ""
+
+    # ── OEM OVERRIDE DETECTION ──
+    echo "## OEM Override Detection"
+    echo ""
+    echo "Checking if any OEM build.prop or init.rc overrides our renderer props..."
+    echo ""
+    _oem_found=false
+    for _opf in /vendor/build.prop /odm/etc/build.prop /product/build.prop; do
+      if [ -f "$_opf" ]; then
+        _ov=$(grep "^debug\.hwui\.renderer=" "$_opf" 2>/dev/null | cut -d= -f2 | tr -d '\r')
+        if [ -n "$_ov" ] && [ "$_ov" != "skiavk" ]; then
+          echo "- **$_opf** sets debug.hwui.renderer=\`$_ov\`"
+          _oem_found=true
+        fi
+      fi
+    done
+    for _rcd in /vendor/etc/init /odm/etc/init /product/etc/init; do
+      [ -d "$_rcd" ] || continue
+      for _rcf in "$_rcd"/*.rc; do
+        [ -f "$_rcf" ] || continue
+        if grep -q "setprop debug\.hwui\.renderer" "$_rcf" 2>/dev/null; then
+          _rcv=$(grep "setprop debug\.hwui\.renderer" "$_rcf" 2>/dev/null | head -1 | awk '{print $NF}' | tr -d '\r')
+          if [ -n "$_rcv" ] && [ "$_rcv" != "skiavk" ]; then
+            echo "- **$_rcf** sets debug.hwui.renderer=\`$_rcv\`"
+            _oem_found=true
+          fi
+        fi
+      done
+    done
+    if [ "$_oem_found" = "false" ]; then
+      echo "**No OEM overrides detected — clean.**"
+    fi
+    echo ""
+
+    # ── PERFORMANCE SUMMARY ──
+    echo "## Performance Summary"
+    echo ""
+    if [ -r /sys/class/kgsl/kgsl-3d0/gpu_model ]; then
+      echo "- GPU Model: $(cat /sys/class/kgsl/kgsl-3d0/gpu_model 2>/dev/null)"
+    fi
+    if [ -r /sys/class/kgsl/kgsl-3d0/gpubusy ]; then
+      _gb=$(cat /sys/class/kgsl/kgsl-3d0/gpubusy 2>/dev/null)
+      echo "- GPU Busy: $_gb"
+    fi
+    if [ -r /sys/class/kgsl/kgsl-3d0/gpu_clock ]; then
+      echo "- GPU Clock: $(cat /sys/class/kgsl/kgsl-3d0/gpu_clock 2>/dev/null) Hz"
+    fi
+    echo "- Uptime: $(cat /proc/uptime 2>/dev/null | awk '{print $1}')s"
+    echo ""
+
+    # Mount status
+    _mount_issues=0
+    for _ml in /vendor/lib64/libGLESv2_adreno.so /vendor/lib64/hw/vulkan.adreno.so; do
+      if [ -f "$_ml" ]; then
+        if [ -r "$_ml" ]; then
+          echo "- [OK] $_ml (readable)"
+        else
+          echo "- [FAIL] $_ml (not readable)"
+          _mount_issues=$((_mount_issues + 1))
+        fi
+      fi
+    done
+    [ "$_mount_issues" -gt 0 ] && echo "" && echo "**$_mount_issues library access issue(s)**" || echo "" && echo "**All libraries accessible.**"
+    echo ""
+
+    # ── SURFACEFLINGER ISSUES ──
+    echo "## SurfaceFlinger Issues"
+    echo ""
+    if [ -f "$_logcat" ]; then
+      _sf_err=$(grep -i "surfaceflinger" "$_logcat" 2>/dev/null | grep -ic "error\|fail\|crash\|fatal\|kill" || echo 0)
+      echo "**SurfaceFlinger errors: $_sf_err**"
+      echo ""
+      if [ "$_sf_err" -gt 0 ] 2>/dev/null; then
+        grep -i "surfaceflinger" "$_logcat" 2>/dev/null | grep -i "error\|fail\|crash\|fatal\|kill" | tail -10 | while IFS= read -r _sf; do
+          echo "- $_sf"
+        done
+        echo ""
+      fi
+    fi
+
+    # ── HWUI LOGS ──
+    echo "## HWUI Logs"
+    echo ""
+    if [ -f "$_logcat" ]; then
+      _hwui_err=$(grep -i "hwui\|renderthread" "$_logcat" 2>/dev/null | grep -ic "error\|fail\|crash\|fatal" || echo 0)
+      echo "**HWUI errors: $_hwui_err**"
+      echo ""
+      if [ "$_hwui_err" -gt 0 ] 2>/dev/null; then
+        grep -i "hwui\|renderthread" "$_logcat" 2>/dev/null | grep -i "error\|fail\|crash\|fatal" | tail -10 | while IFS= read -r _he; do
+          echo "- $_he"
+        done
+        echo ""
+      fi
+    fi
+
+  } > "$_report" 2>/dev/null || true
+
+  _log_emit "[OK] Analysis saved to: $_report"
+}
+
+# Single dispatch function — routes all log output to the right destination.
+# Must be defined by the calling script (log_boot, log_service, etc.) before use.
+# These helpers call _log_emit which the script MUST define.
+# Default: no-op — scripts override _log_emit to point to their log function.
+_log_emit() { :; }
+
 # Single-pass config loader. Reads file once, extracts and normalises all 5 variables.
 load_config() {
   local cfg="$1" _k _v

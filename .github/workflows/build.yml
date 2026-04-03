@@ -12,11 +12,17 @@ on:
       - 'uninstall.sh'
       - 'common.sh'
       - 'customize.sh'
+      - 'files.sh'
       - 'system.prop'
       - 'sepolicy.rule'
       - 'module.prop'
       - 'adreno_config.txt'
       - 'qgl_config.txt'
+      - 'qgl_profiles.json'
+      - 'apply_qgl.sh'
+      - 'QGLTrigger/**'
+      - 'AGENTS.md'
+      - '.context/**'
   workflow_dispatch:
     inputs:
       create_release:
@@ -38,16 +44,85 @@ permissions:
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 3: Assemble final flashable zip
+  # Job 1: Build QGL Trigger APK
+  # ────────────────────────────────────────────────────────────────────────────
+  build-apk:
+    name: Build QGL Trigger APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build APK
+        run: |
+          cd QGLTrigger
+          chmod +x gradlew 2>/dev/null || true
+          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 || {
+            echo "::warning::APK build failed — module will be packaged without QGL Trigger APK"
+            exit 0
+          }
+
+      - name: Upload APK artifact
+        if: hashFiles('QGLTrigger/app/build/outputs/apk/release/*.apk') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: qgl-trigger-apk
+          path: QGLTrigger/app/build/outputs/apk/release/*.apk
+          retention-days: 30
+
+      - name: Copy APK to staging
+        run: |
+          mkdir -p staging
+          cp QGLTrigger/app/build/outputs/apk/release/*.apk staging/QGLTrigger.apk 2>/dev/null && \
+            echo "APK copied to staging/" || \
+            echo "::warning::No APK found — QGL Trigger APK will not be included in module zip"
+
+      - name: Upload staging APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-apk
+          path: staging/QGLTrigger.apk
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 2: Assemble final flashable zip
   # ────────────────────────────────────────────────────────────────────────────
   assemble:
     name: Assemble Module Zip
+    needs: build-apk
     runs-on: ubuntu-latest
     steps:
       - name: Checkout module repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # Download APK from build job
+      - name: Download QGL Trigger APK
+        uses: actions/download-artifact@v4
+        with:
+          name: staging-apk
+          path: apk-staging
+        continue-on-error: true
+
+      - name: Copy APK to repo root
+        run: |
+          if [ -f "apk-staging/QGLTrigger.apk" ]; then
+            cp apk-staging/QGLTrigger.apk ./QGLTrigger.apk
+            echo "QGLTrigger.apk copied to repo root"
+          else
+            echo "::warning::QGLTrigger.apk not available — module will not include the APK"
+          fi
 
       - name: Determine version
         id: version
@@ -110,12 +185,26 @@ jobs:
           for f in \
             module.prop system.prop \
             customize.sh post-fs-data.sh service.sh uninstall.sh \
-            boot-completed.sh \
+            boot-completed.sh apply_qgl.sh \
             common.sh \
-            adreno_config.txt qgl_config.txt sepolicy.rule \
-            files.sh banner; do
+            adreno_config.txt qgl_config.txt qgl_profiles.json sepolicy.rule \
+            files.sh banner AGENTS.md; do
             [ -f "$f" ] && cp "$f" "${S}/" && echo "  + $f"
           done
+
+          # ── QGL Trigger APK (optional) ───────────────────────────────────────
+          if [ -f "QGLTrigger.apk" ]; then
+            cp QGLTrigger.apk "${S}/QGLTrigger.apk"
+            echo "  + QGLTrigger.apk ($(du -h QGLTrigger.apk | cut -f1))"
+          else
+            echo "  ! QGLTrigger.apk — NOT INCLUDED (APK build failed or not triggered)"
+          fi
+
+          # Update version in module.prop inside staging
+          VERSION_CODE=$(date +%y%m%d)
+          sed -i "s/^version=.*/version=${VERSION}/" "${S}/module.prop"
+          sed -i "s/^versionCode=.*/versionCode=${VERSION_CODE}/" "${S}/module.prop"
+          echo "  + module.prop version updated to ${VERSION} (${VERSION_CODE})"
 
           # Root image/asset files
           shopt -s nullglob
@@ -144,7 +233,7 @@ jobs:
           done
           echo "  + system/ scaffold (empty, $(find "${S}/system" -type d | wc -l) dirs)"
 
-          for dir in webroot Documentation; do
+          for dir in webroot Documentation .context; do
             if [ -d "$dir" ]; then
               cp -r "$dir" "${S}/${dir}"
               echo "  + ${dir}/ ($(find "$dir" -type f | wc -l) files)"

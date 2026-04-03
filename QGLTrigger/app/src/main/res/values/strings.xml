@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">QGL Trigger Service — detects app switches and applies per-app GPU layer configurations. No data is collected.</string>
+</resources>

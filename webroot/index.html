@@ -464,178 +464,50 @@
             </div>
         </div>
 
-        <div class="card glass-panel animate-in" style="animation-delay: 0.1s;">
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        <!-- PER-APP QGL PROFILES (LYB-style)                           -->
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        <div class="card glass-panel animate-in" style="animation-delay: 0.08s;">
             <div class="card-header">
-                <span class="header-icon gradient-text animate-bounce">📱</span>
+                <span class="header-icon gradient-text">📱</span>
                 <div>
-                    <h2 data-i18n="sysInfo">System Overview</h2>
-                    <span class="header-subtitle" data-i18n="sysInfoSub">Device information and status</span>
+                    <h2 data-i18n="perAppQGLTitle">Per-App QGL Profiles</h2>
+                    <span class="header-subtitle" data-i18n="perAppQGLSub">LYB-style app-specific GPU configs</span>
                 </div>
             </div>
-            <div class="info-grid">
-                <div class="info-item slide-in">
-                    <label data-i18n="device">Device</label>
-                    <span class="value skeleton-text" id="device"></span>
-                </div>
-                <div class="info-item slide-in" style="animation-delay: 0.05s;">
-                    <label data-i18n="android">Android</label>
-                    <span class="value skeleton-text" id="android"></span>
-                </div>
-                <div class="info-item highlight slide-in" style="animation-delay: 0.1s;">
-                    <label data-i18n="gpu">GPU Model</label>
-                    <span class="value skeleton-text" id="gpu"></span>
-                </div>
-                <div class="info-item slide-in" style="animation-delay: 0.15s;">
-                    <label data-i18n="modVer">Module</label>
-                    <span class="value skeleton-text" id="modVer"></span>
-                </div>
-            </div>
-            <div class="performance-bar">
-                <div class="performance-fill" id="performanceFill"></div>
-            </div>
-        </div>
-
-        <div class="card glass-panel animate-in" style="animation-delay: 0.15s;">
-            <div class="card-header">
-                <span class="header-icon gradient-text">⚙️</span>
-                <div>
-                    <h2 data-i18n="hardwareTitle">Hardware Details</h2>
-                    <span class="header-subtitle" data-i18n="hardwareSub">Processor and GPU information</span>
-                </div>
-            </div>
-            
-            <div class="hardware-section">
-                <h3 class="section-subtitle" data-i18n="processorLabel">Processor</h3>
-                <div class="info-grid">
-                    <div class="info-item highlight">
-                        <label data-i18n="socLabel">SoC</label>
-                        <span class="value skeleton-text" id="soc">Loading...</span>
-                    </div>
-                    <div class="info-item">
-                        <label data-i18n="cpuLabel">CPU</label>
-                        <span class="value skeleton-text" id="cpu">Loading...</span>
-                    </div>
-                    <div class="info-item highlight">
-                        <label data-i18n="socCodenameLabel">SoC Codename</label>
-                        <span class="value skeleton-text" id="socCodename">Loading...</span>
-                    </div>
-                    <div class="info-item">
-                        <label data-i18n="architectureLabel">Architecture</label>
-                        <span class="value skeleton-text" id="architecture">Loading...</span>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="divider elegant-divider"></div>
-            
-            <div class="hardware-section">
-                <h3 class="section-subtitle" data-i18n="gpuSectionLabel">GPU</h3>
-                <div class="info-grid">
-                    <div class="info-item highlight">
-                        <label data-i18n="gpuModelLabel">GPU Model</label>
-                        <span class="value skeleton-text" id="gpuModel">Loading...</span>
-                    </div>
-                    <div class="info-item">
-                        <label data-i18n="gpuVendorLabel">Vendor</label>
-                        <span class="value skeleton-text" id="gpuVendor">Loading...</span>
-                    </div>
-                    <div class="info-item">
-                        <label data-i18n="rendererLabel">Renderer</label>
-                        <span class="value skeleton-text" id="renderer">Loading...</span>
-                    </div>
-                    <div class="info-item highlight">
-                        <label data-i18n="driverVersionLabel">Driver Version</label>
-                        <span class="value skeleton-text" id="driverVersion">Loading...</span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="divider elegant-divider"></div>
-
-            <div class="hardware-section">
-                <h3 class="section-subtitle" data-i18n="renderStatusLabel">Live Render Status</h3>
-                <div class="info-grid">
-                    <div class="info-item highlight">
-                        <label data-i18n="hwuiRendererLabel">HWUI Renderer</label>
-                        <span class="value skeleton-text" id="hwuiRendererStatus">Loading...</span>
-                    </div>
-                    <div class="info-item">
-                        <label data-i18n="renderEngineLabel">Render Engine</label>
-                        <span class="value skeleton-text" id="renderEngineStatus">Loading...</span>
-                    </div>
-                    <div class="info-item">
-                        <label data-i18n="useVulkanLabel">Vulkan Prop</label>
-                        <span class="value skeleton-text" id="useVulkanStatus">Loading...</span>
-                    </div>
-                </div>
-                <p class="render-status-hint" data-i18n="renderStatusHint">Props applied at boot via resetprop — not system.prop</p>
-            </div>
-        </div>
-
-        <div class="card glass-panel animate-in" style="animation-delay: 0.2s;">
-            <div class="row-center">
-                <div class="text-col">
-                    <h3 data-i18n="langName">Language</h3>
-                    <p class="desc-text" data-i18n="langDesc">Choose interface language</p>
-                </div>
-                <div class="select-wrapper elegant">
-                    <select id="LANG_SELECT" aria-label="Language Selection">
-                        <option value="en">🇺🇸 English</option>
-                        <option value="zh-CN">🇨🇳 简体中文</option>
-                        <option value="zh-TW">🇹🇼 繁體中文</option>
-                        <option value="custom" id="optCustom" disabled>🎨 Custom</option>
-                        <option value="system" data-i18n="langSystem">🌐 System</option>
-                    </select>
-                    <span class="arrow">▼</span>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <section id="tab-config" class="view-section" role="tabpanel" aria-labelledby="nav-config">
-        <h2 class="section-label" data-i18n="config">Driver Settings</h2>
-
-        <div class="card glass-panel animate-in">
-            <div class="setting-item ripple-target hover-lift">
-                <div class="text-col">
-                    <div class="setting-header">
-                        <div class="setting-title" data-i18n="pltName">PLT Patching</div>
-                        <div class="info-tooltip" data-tooltip="Enables procedure linkage table patching for enhanced compatibility">
-                            <span class="tooltip-icon">ℹ️</span>
-                        </div>
-                    </div>
-                    <div class="setting-desc" data-i18n="pltDesc">Zuras Banch++ to work if available in driver</div>
-                    <div class="badge badge-primary" data-i18n="pltSub">Required for Zuras Banch++</div>
-                </div>
-                <label class="switch modern-switch" aria-label="PLT Patching Toggle">
-                    <input type="checkbox" id="PLT" role="switch">
-                    <span class="slider modern-slider">
-                        <span class="slider-text off">OFF</span>
-                        <span class="slider-text on">ON</span>
-                    </span>
-                </label>
-            </div>
-            
-            <div class="divider elegant-divider"></div>
 
             <div class="setting-item ripple-target hover-lift">
                 <div class="text-col">
                     <div class="setting-header">
-                        <div class="setting-title" data-i18n="qglName">QGL Config</div>
-                        <div class="info-tooltip" data-tooltip="Qualcomm Graphics Library configuration for A8xx chipsets">
-                            <span class="tooltip-icon">ℹ️</span>
-                        </div>
+                        <div class="setting-title" data-i18n="qglTriggerApk">QGL Trigger APK</div>
                     </div>
-                    <div class="setting-desc" data-i18n="qglDesc">Configure Qualcomm Graphics Library for A8xx GPUs</div>
-                    <div class="badge badge-warning pulse-subtle" data-i18n="qglSub">A8xx Only</div>
+                    <div class="setting-desc" data-i18n="qglTriggerApkDesc">Companion app that applies QGL configs when apps open (like LYB Kernel Manager). Requires Accessibility Service.</div>
                 </div>
                 <div class="row-end">
-                    <button class="btn-small ripple-effect modern-btn" id="btnEditQGL" aria-label="Edit QGL" style="margin-right: 8px;">
+                    <button class="btn-small ripple-effect modern-btn" id="btnInstallQGLApk">
+                        <span class="btn-icon">📦</span>
+                        <span data-i18n="installApk">Install APK</span>
+                    </button>
+                    <span class="badge" id="qglApkStatus" style="font-size:10px;" data-i18n="checkingStatus">Checking...</span>
+                </div>
+            </div>
+
+            <div class="divider elegant-divider"></div>
+
+            <div class="setting-item ripple-target hover-lift">
+                <div class="text-col">
+                    <div class="setting-header">
+                        <div class="setting-title" data-i18n="globalQGLProfile">Global QGL Profile</div>
+                    </div>
+                    <div class="setting-desc" data-i18n="globalQGLProfileDesc">Default QGL config applied to all apps without a specific profile.</div>
+                </div>
+                <div class="row-end">
+                    <button class="btn-small ripple-effect modern-btn" id="btnEditGlobalQGL">
                         <span class="btn-icon">✏️</span>
                         <span data-i18n="edit">Edit</span>
                     </button>
-                    <label class="switch modern-switch" aria-label="QGL Toggle">
-                        <input type="checkbox" id="QGL" role="switch">
+                    <label class="switch modern-switch">
+                        <input type="checkbox" id="globalQGLEnabled" role="switch">
                         <span class="slider modern-slider">
                             <span class="slider-text off">OFF</span>
                             <span class="slider-text on">ON</span>
@@ -643,107 +515,22 @@
                     </label>
                 </div>
             </div>
-            
-            <div class="divider elegant-divider"></div>
-
-            <div class="setting-item ripple-target hover-lift">
-                <div class="text-col">
-                    <div class="setting-header">
-                        <div class="setting-title" data-i18n="armName">ARM64 Optimization</div>
-                        <div class="info-tooltip" data-tooltip="Remove 32-bit libraries to save space on 64-bit devices">
-                            <span class="tooltip-icon">ℹ️</span>
-                        </div>
-                    </div>
-                    <div class="setting-desc" data-i18n="armDesc">Remove 32-bit libraries to reduce storage usage</div>
-                </div>
-                <label class="switch modern-switch" aria-label="ARM64 Optimization Toggle">
-                    <input type="checkbox" id="ARM64_OPT" role="switch">
-                    <span class="slider modern-slider">
-                        <span class="slider-text off">OFF</span>
-                        <span class="slider-text on">ON</span>
-                    </span>
-                </label>
-            </div>
-            
-            <div class="divider elegant-divider"></div>
-
-            <div class="setting-item ripple-target hover-lift">
-                <div class="text-col">
-                    <div class="setting-header">
-                        <div class="setting-title" data-i18n="verboseName">Verbose Logging</div>
-                        <div class="info-tooltip" data-tooltip="Enable detailed boot logs for debugging">
-                            <span class="tooltip-icon">ℹ️</span>
-                        </div>
-                    </div>
-                    <div class="setting-desc" data-i18n="verboseDesc">Enable detailed logs for troubleshooting</div>
-                </div>
-                <label class="switch modern-switch" aria-label="Verbose Logging Toggle">
-                    <input type="checkbox" id="VERBOSE" role="switch">
-                    <span class="slider modern-slider">
-                        <span class="slider-text off">OFF</span>
-                        <span class="slider-text on">ON</span>
-                    </span>
-                </label>
-            </div>
-            
-            <div class="divider elegant-divider"></div>
-
-            <div class="setting-item ripple-target hover-lift">
-                <div class="text-col">
-                    <div class="setting-header">
-                        <div class="setting-title" data-i18n="renderName">Rendering Mode</div>
-                        <div class="info-tooltip" data-tooltip="Select graphics rendering backend">
-                            <span class="tooltip-icon">ℹ️</span>
-                        </div>
-                    </div>
-                    <div class="setting-desc mode-desc-text" data-i18n="renderDesc">Default rendering backend with balanced performance</div>
-                </div>
-                <div class="select-wrapper modern">
-                    <select id="RENDER_MODE" aria-label="Rendering Mode">
-                        <option value="normal" data-i18n="renderNormal">Normal</option>
-                        <option value="skiavk">SkiaVK</option>
-                        <option value="skiagl">SkiaGL</option>
-                    </select>
-                    <span class="arrow">▼</span>
-                </div>
-            </div>
-
-            <!-- Force skiavkthreaded backend toggle — only shown when skiavk is selected -->
-            <div id="forceThreadedRow" class="setting-item ripple-target hover-lift" style="display:none;">
-                <div class="text-col">
-                    <div class="setting-header">
-                        <div class="setting-title" data-i18n="forceThreadedName">Force Skiavkthreaded Backend</div>
-                    </div>
-                    <div class="setting-desc" data-i18n="forceThreadedDesc">Force <code>debug.renderengine.backend=skiavkthreaded</code> even on Android &lt;14 (API 34). Strict OEM ROMs (MIUI/HyperOS, OneUI) may bootloop — only enable if you know your device supports it.</div>
-                    <div class="badge badge-warning" data-i18n="forceThreadedSub">⚠️ Android 14+ recommended</div>
-                </div>
-                <label class="switch modern-switch" aria-label="Force Skiavkthreaded Backend Toggle">
-                    <input type="checkbox" id="FORCE_SKIAVKTHREADED_BACKEND" role="switch">
-                    <span class="slider modern-slider">
-                        <span class="slider-text off">OFF</span>
-                        <span class="slider-text on">ON</span>
-                    </span>
-                </label>
-            </div>
 
             <div class="divider elegant-divider"></div>
 
-            <div class="apply-now-row">
-                <div class="text-col">
-                    <div class="setting-title" data-i18n="applyNowTitle">Apply Render Mode Now</div>
-                    <div class="setting-desc" data-i18n="applyNowDesc">Apply via resetprop instantly — no reboot needed. Kill &amp; reopen apps to see effect.</div>
-                </div>
-                <button class="btn-apply-now ripple-effect" id="btnApplyRenderNow" aria-label="Apply render mode now without rebooting">
-                    <span class="btn-icon">⚡</span>
-                    <span data-i18n="applyNow">Apply Now</span>
+            <div class="row-between" style="margin-bottom: 12px;">
+                <h3 style="font-size: 0.95em; margin: 0;" data-i18n="appSpecificProfiles">App-Specific Profiles</h3>
+                <button class="btn-small ripple-effect modern-btn" id="btnAddAppProfile">
+                    <span class="btn-icon">➕</span>
+                    <span data-i18n="addApp">Add App</span>
                 </button>
             </div>
-        </div>
 
-        <div class="card glass-panel animate-in" style="animation-delay: 0.05s;">
-            <div class="info-banner modern-info">
-                <span class="info-icon">ℹ️</span>
-                <p class="info-text" data-i18n="saveRebootInfo">Changes will be applied after saving and rebooting your device. Make sure to backup your current configuration before making changes.</p>
+            <div id="appProfilesList" style="display: flex; flex-direction: column; gap: 8px;">
+                <div class="info-banner modern-info" id="noAppProfilesMsg">
+                    <span class="info-icon">📱</span>
+                    <p class="info-text" data-i18n="noAppProfilesMsg">No app-specific profiles yet. All apps use the global QGL config.</p>
+                </div>
             </div>
         </div>
 
@@ -1122,6 +909,82 @@
                       autocomplete="off"
                       autocorrect="off"
                       autocapitalize="off"></textarea>
+        </div>
+    </div>
+</div>
+
+<!-- Per-App QGL Profile Editor Modal -->
+<div id="appProfileModal" class="modal" role="dialog" aria-labelledby="appProfileModalTitle" aria-modal="true" style="display:none;">
+    <div class="modal-overlay" id="appProfileOverlay"></div>
+    <div class="modal-container modal-animate">
+        <div class="modal-header">
+            <div>
+                <h2 id="appProfileModalTitle" data-i18n="appProfileModalTitle">App QGL Profile</h2>
+                <p class="modal-subtitle" id="appProfileSubtitle" data-i18n="appProfileModalSub">Configure QGL for this app</p>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-text ripple-effect" id="btnSaveAppProfile">
+                    <span class="btn-icon">💾</span>
+                    <span data-i18n="qglSave">Save</span>
+                </button>
+                <button class="icon-btn close-btn ripple-effect" id="closeAppProfile" aria-label="Close">✕</button>
+            </div>
+        </div>
+        <div class="editor-container">
+            <div style="padding: 16px;">
+                <div class="setting-item" style="margin-bottom: 16px;">
+                    <div class="text-col">
+                        <div class="setting-title" data-i18n="packageName">Package Name</div>
+                    </div>
+                    <input type="text" id="appProfilePkg" class="input-glass premium-input" placeholder="com.example.app" readonly style="opacity: 0.7;">
+                </div>
+                <div class="setting-item" style="margin-bottom: 16px;">
+                    <div class="text-col">
+                        <div class="setting-title" data-i18n="enableProfile">Enable Profile</div>
+                    </div>
+                    <label class="switch modern-switch">
+                        <input type="checkbox" id="appProfileEnabled" role="switch">
+                        <span class="slider modern-slider">
+                            <span class="slider-text off">OFF</span>
+                            <span class="slider-text on">ON</span>
+                        </span>
+                    </label>
+                </div>
+                <div class="setting-item" style="margin-bottom: 8px;">
+                    <div class="setting-title" data-i18n="qglKeysLabel">QGL Keys (one per line, format: key=value)</div>
+                </div>
+            </div>
+            <textarea id="appProfileEditor"
+                      spellcheck="false"
+                      data-i18n="qglKeysPlaceholder"
+                      placeholder="0x0=0x8675309&#10;VK_KHR_swapchain=True&#10;..."
+                      aria-label="App QGL Profile Editor"
+                      autocomplete="off"
+                      autocorrect="off"
+                      autocapitalize="off"
+                      style="flex: 1; min-height: 200px;"></textarea>
+        </div>
+    </div>
+</div>
+
+<!-- App Picker Modal (for selecting installed apps) -->
+<div id="appPickerModal" class="modal" role="dialog" aria-labelledby="appPickerTitle" aria-modal="true" style="display:none;">
+    <div class="modal-overlay" id="appPickerOverlay"></div>
+    <div class="modal-container modal-animate" style="max-height: 80vh;">
+        <div class="modal-header">
+            <div>
+                <h2 id="appPickerTitle" data-i18n="selectAppTitle">Select App</h2>
+                <p class="modal-subtitle" data-i18n="selectAppSub">Choose an app to create a QGL profile for</p>
+            </div>
+            <div class="modal-actions">
+                <button class="icon-btn close-btn ripple-effect" id="closeAppPicker" aria-label="Close">✕</button>
+            </div>
+        </div>
+        <div style="padding: 12px;">
+            <input type="text" id="appPickerSearch" class="input-glass premium-input" data-i18n="searchApps" placeholder="Search apps..." style="width: 100%; margin-bottom: 12px;">
+        </div>
+        <div id="appPickerList" style="overflow-y: auto; max-height: 50vh; padding: 0 12px 12px;">
+            <!-- App list rendered dynamically -->
         </div>
     </div>
 </div>
