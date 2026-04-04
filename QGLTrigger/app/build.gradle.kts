@@ -5,12 +5,12 @@ plugins {
 
 android {
     namespace = "io.github.adreno.qgl.trigger"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "io.github.adreno.qgl.trigger"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0"
     }

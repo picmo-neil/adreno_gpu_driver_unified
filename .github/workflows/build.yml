@@ -66,12 +66,12 @@ jobs:
           cache-read-only: false
 
       - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
         run: |
-          # GitHub runners have Android SDK pre-installed but may not have platform 35
-          # Accept all licenses first
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          # Install required components
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" 2>&1
+          # Install Android SDK platform 36 and build tools (required by targetSdk = 36)
+          sdkmanager --install "platforms;android-36" "build-tools;35.0.0" --licenses 2>&1
 
       - name: Generate Gradle Wrapper
         run: |
