@@ -71,15 +71,16 @@ jobs:
           # gradle is now available (installed by setup-gradle via gradle-version input)
           gradle wrapper --no-daemon
 
-      - name: Ensure debug keystore exists
+      - name: Generate release keystore
         run: |
-          cd QGLTrigger
-          if [ ! -f "app/debug.keystore" ]; then
-            echo "Creating debug keystore..."
-            keytool -genkeypair -v -keystore app/debug.keystore -storepass android \
-              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
-              -validity 10000 -dname "CN=Android Debug,O=Android,C=US" 2>&1 || true
-          fi
+          keytool -genkeypair -v \
+            -keystore QGLTrigger/app/release.keystore \
+            -storepass android \
+            -alias release \
+            -keypass android \
+            -keyalg RSA -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=QGL Trigger,O=Adreno,C=US" 2>&1
 
       - name: Build APK
         id: build
