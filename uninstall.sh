@@ -19,10 +19,10 @@ echo "========================================"
 echo ""
 echo "Cleaning GPU caches..."
 
-# Clean QGL config
+# Clean QGL config — remove ALL files FIRST, then rmdir the empty directory
 rm -f /data/vendor/gpu/qgl_config.txt 2>/dev/null || true
-rmdir /data/vendor/gpu 2>/dev/null || true
 rm -f /data/vendor/gpu/.adreno_qgl_owner 2>/dev/null || true
+rmdir /data/vendor/gpu 2>/dev/null || true
 
 # Function to clean caches safely
 clean_caches() {
@@ -151,6 +151,7 @@ rm -f  /data/local/tmp/adreno_skiavk_force_override 2>/dev/null || true  # user-
 rm -f  /data/local/tmp/adreno_vk_compat             2>/dev/null || true  # prop_only/incompatible flag — Vulkan compat state
 rm -f  /data/local/tmp/adreno_config.txt            2>/dev/null || true  # SD mirror read by next post-fs-data boot
 rm -f  /data/local/tmp/adreno_early_log_buffer.*    2>/dev/null || true  # leftover early log buffers
+rm -f  /data/local/tmp/adreno_watchdog_pid          2>/dev/null || true  # old-vendor watchdog PID file
 echo "✓ Temp files removed"
 echo ""
 

@@ -11,12 +11,17 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import java.io.DataOutputStream
 import java.io.IOException
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 private const val TAG = "QGLTrigger"
 private const val APPLY_SCRIPT_PATH = "/data/adb/modules/adreno_gpu_driver_unified/apply_qgl.sh"
 private const val DEBOUNCE_MS = 2000L
 private const val NOTIFICATION_CHANNEL_ID = "qgl_trigger_channel"
 private const val NOTIFICATION_ID = 1001
+private const val QGL_TARGET = "/data/vendor/gpu/qgl_config.txt"
+private const val QGL_DIR = "/data/vendor/gpu"
+private const val SELINUX_CONTEXT = "u:object_r:same_process_hal_file:s0"
 
 private val SYSTEM_UI_PACKAGES = setOf(
     "com.android.systemui",
@@ -39,6 +44,9 @@ class QGLAccessibilityService : AccessibilityService() {
     private var lastAppPackage: String? = null
     private var lastSwitchTime: Long = 0L
     private var currentForegroundPackage: String? = null
+    private val scriptExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "QGL-ScriptExecutor").apply { isDaemon = true }
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -59,7 +67,9 @@ class QGLAccessibilityService : AccessibilityService() {
 
         if (packageName == applicationContext.packageName) return
 
-        if (SYSTEM_UI_PACKAGES.any { packageName.startsWith(it) }) {
+        if (SYSTEM_UI_PACKAGES.any { pkg ->
+                packageName == pkg || packageName.startsWith("$pkg.")
+            }) {
             return
         }
 
@@ -92,31 +102,70 @@ class QGLAccessibilityService : AccessibilityService() {
     }
 
     private fun executeQGLScript(packageName: String, keys: List<String>) {
-        Thread {
+        scriptExecutor.execute {
             var process: Process? = null
+            var os: DataOutputStream? = null
             try {
                 process = Runtime.getRuntime().exec("su")
-                val os = DataOutputStream(process.outputStream)
+                os = DataOutputStream(process.outputStream)
 
-                os.writeBytes("export QGL_KEYS=\"${keys.joinToString(",")}\"\n")
-                os.writeBytes("export QGL_PACKAGE=\"$packageName\"\n")
-                os.writeBytes("$APPLY_SCRIPT_PATH \"$packageName\" &\n")
+                val magicHeader = "0x0=0x8675309"
+
+                // Atomic write: printf content to temp file, then mv to target.
+                // printf > tmp && mv tmp target is atomic on ext4/f2fs (rename syscall).
+                // The heredoc approach (cat > tmp <<'EOF') is NOT atomic — cat truncates
+                // the file first, then writes. If the su process is killed between
+                // truncate and write completion (OOM killer, timeout), the temp file
+                // is left empty/partial and mv moves corrupted data to the target.
+                //
+                // Keys are written via a heredoc to the temp file, but the heredoc
+                // feeds into printf which writes to the temp file in a single shell
+                // operation. The subsequent mv is the atomic boundary.
+                os.writeBytes("mkdir -p $QGL_DIR 2>/dev/null\n")
+                os.writeBytes("{\n")
+                os.writeBytes("printf '%s\\n' '$magicHeader'\n")
+                for (key in keys) {
+                    val escaped = key.replace("'", "'\\''")
+                    os.writeBytes("printf '%s\\n' '$escaped'\n")
+                }
+                os.writeBytes("} > ${QGL_TARGET}.tmp 2>/dev/null && ")
+                os.writeBytes("mv -f ${QGL_TARGET}.tmp $QGL_TARGET 2>/dev/null\n")
+                os.writeBytes("chcon $SELINUX_CONTEXT $QGL_DIR 2>/dev/null || true\n")
+                os.writeBytes("chcon $SELINUX_CONTEXT $QGL_TARGET 2>/dev/null || true\n")
                 os.writeBytes("exit\n")
                 os.flush()
+                // Do NOT close os before waitFor — let the shell exit naturally
+                // after reading "exit". Closing stdin prematurely can cause SIGPIPE
+                // if the shell is mid-read from its input stream.
 
-                Log.d(TAG, "QGL script dispatched for $packageName (fire-and-forget)")
+                val finished = process.waitFor(5, TimeUnit.SECONDS)
+                if (!finished) {
+                    process.destroyForcibly()
+                    process.waitFor(2, TimeUnit.SECONDS)
+                    Log.w(TAG, "su process timed out and was force-destroyed for $packageName")
+                }
+
+                val exitCode = process.exitValue()
+                if (exitCode != 0) {
+                    Log.e(TAG, "su process exited with code $exitCode for $packageName")
+                } else {
+                    Log.d(TAG, "QGL config written directly for $packageName (${keys.size} keys)")
+                }
             } catch (e: IOException) {
                 Log.e(TAG, "Failed to execute su for $packageName", e)
             } catch (e: SecurityException) {
                 Log.e(TAG, "Root access denied for $packageName", e)
             } finally {
                 try {
-                    process?.outputStream?.close()
+                    os?.close()
                 } catch (_: IOException) {
                 }
-                process?.destroy()
+                try {
+                    process?.destroy()
+                } catch (_: Exception) {
+                }
             }
-        }.start()
+        }
     }
 
     override fun onInterrupt() {
@@ -125,6 +174,14 @@ class QGLAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         Log.w(TAG, "AccessibilityService destroyed — Android will restart it")
+        scriptExecutor.shutdown()
+        try {
+            if (!scriptExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
+                scriptExecutor.shutdownNow()
+            }
+        } catch (_: InterruptedException) {
+            scriptExecutor.shutdownNow()
+        }
         super.onDestroy()
     }
 

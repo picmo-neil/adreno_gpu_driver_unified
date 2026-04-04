@@ -504,7 +504,7 @@ const DEFAULT_EN = {
     renderDesc: "Default rendering backend with balanced performance",
     renderDescSkiaVK: "Skia with Vulkan backend - Better performance on modern GPUs",
     renderDescSkiaGL: "Skia with OpenGL backend - Better compatibility",
-    renderDescSkiaVK: "Aggressive SkiaVK with forced app restarts - Maximum performance",
+    renderDescSkiaVKThreaded: "Aggressive SkiaVK with forced app restarts - Maximum performance",
     forceThreadedName: "Force Skiavkthreaded Backend",
     forceThreadedDesc: "Force debug.renderengine.backend=skiavkthreaded even on Android <14 (API 34). Strict OEM ROMs (MIUI/HyperOS, OneUI) may bootloop — only enable if you know your device supports it.",
     forceThreadedSub: "⚠️ Android 14+ recommended",
@@ -794,7 +794,7 @@ const BUILTIN_ZH_CN = {
     renderDesc: "默认渲染后端，性能均衡",
     renderDescSkiaVK: "Skia + Vulkan 后端 - 现代GPU性能更佳",
     renderDescSkiaGL: "Skia + OpenGL 后端 - 兼容性更好",
-    renderDescSkiaVK: "激进SkiaVK模式，强制重启应用 - 最高性能",
+    renderDescSkiaVKThreaded: "激进SkiaVK模式，强制重启应用 - 最高性能",
     forceThreadedName: "强制 Skiavkthreaded 后端",
     forceThreadedDesc: "即使设备低于 Android 14（API 34）也强制设置 debug.renderengine.backend=skiavkthreaded。严格的 OEM ROM（MIUI/HyperOS、OneUI）可能导致启动循环——仅在确认设备支持时启用。",
     forceThreadedSub: "⚠️ 建议 Android 14 及以上",
@@ -1083,8 +1083,8 @@ const BUILTIN_ZH_TW = {
     renderName: "渲染模式",
     renderDesc: "默認渲染後端，性能均衡",
     renderDescSkiaVK: "Skia + Vulkan 後端 - 現代GPU性能更佳",
-    renderDescSkiaGL: "Skia + OpenGL 後端 - 兼容性更好",
-    renderDescSkiaVK: "激進SkiaVK模式，強制重啟應用 - 最高性能",
+    renderDescSkiaGL: "Skia + OpenGL 後端 - 相容性更好",
+    renderDescSkiaVKThreaded: "激進SkiaVK模式，強制重啟應用 - 最高性能",
     forceThreadedName: "強制 Skiavkthreaded 後端",
     forceThreadedDesc: "即使裝置低於 Android 14（API 34）也強制設定 debug.renderengine.backend=skiavkthreaded。嚴格的 OEM ROM（MIUI/HyperOS、OneUI）可能導致啟動循環——僅在確認裝置支援時啟用。",
     forceThreadedSub: "⚠️ 建議 Android 14 及以上",
@@ -1409,10 +1409,10 @@ async function autoTranslateAndSave(targetLang) {
         
         // Save to custom.json
         const jsonContent = JSON.stringify(translated, null, 2);
-        const escapedJson = jsonContent.replace(/'/g, "'\\''");
+        const b64 = btoa(encodeURIComponent(jsonContent).replace(/%([0-9A-F]{2})/g, (_, p1) => String.fromCharCode(parseInt(p1, 16))));
         
         await exec(`mkdir -p "${SD_LANG}" 2>/dev/null`);
-        await exec(`echo '${escapedJson}' > "${SD_LANG}/custom.json"`);
+        await exec(`printf '%s' '${b64}' | base64 -d > "${SD_LANG}/custom.json" 2>/dev/null`);
         await exec(`cp "${SD_LANG}/custom.json" "${MOD_WEB_LANG}/custom.json" 2>/dev/null`);
         
         // Enable custom option
@@ -1474,9 +1474,10 @@ async function performDocsTranslation() {
                 }
             }
             
-            const finalMd = translatedLines.join('\n').replace(/'/g, "'\\''");
+            const finalMd = translatedLines.join('\n');
+            const b64 = btoa(encodeURIComponent(finalMd).replace(/%([0-9A-F]{2})/g, (_, p1) => String.fromCharCode(parseInt(p1, 16))));
             await exec(`mkdir -p "${SD_DOCS}" 2>/dev/null`);
-            await exec(`echo '${finalMd}' > "${SD_DOCS}/custom_README.md"`);
+            await exec(`printf '%s' '${b64}' | base64 -d > "${SD_DOCS}/custom_README.md" 2>/dev/null`);
             await exec(`cp "${SD_DOCS}/custom_README.md" "${MOD_DOCS}/custom_README.md" 2>/dev/null`);
             
             logToTerminal('✓ Documentation translated!', 'success');
@@ -1689,17 +1690,20 @@ async function ensureDirectories() {
     // Create default language files only if they don't exist (to avoid slowdown on every load)
     const checkEn = await exec(`[ -f "${SD_LANG}/en.json" ] && echo "exists"`);
     if (!checkEn.stdout || !checkEn.stdout.includes('exists')) {
-        const enStr = JSON.stringify(DEFAULT_EN, null, 2).replace(/'/g, "'\\''");
-        await exec(`echo '${enStr}' > "${SD_LANG}/en.json" 2>/dev/null`);
-        await exec(`echo '${enStr}' > "${MOD_WEB_LANG}/en.json" 2>/dev/null`);
-        
-        const twStr = JSON.stringify(BUILTIN_ZH_TW, null, 2).replace(/'/g, "'\\''");
-        await exec(`echo '${twStr}' > "${SD_LANG}/zh-TW.json" 2>/dev/null`);
-        await exec(`echo '${twStr}' > "${MOD_WEB_LANG}/zh-TW.json" 2>/dev/null`);
-        
-        const cnStr = JSON.stringify(BUILTIN_ZH_CN, null, 2).replace(/'/g, "'\\''");
-        await exec(`echo '${cnStr}' > "${SD_LANG}/zh-CN.json" 2>/dev/null`);
-        await exec(`echo '${cnStr}' > "${MOD_WEB_LANG}/zh-CN.json" 2>/dev/null`);
+        // Use printf + heredoc instead of echo for large JSON — avoids shell ARG_MAX limits
+        // and single-quote escaping issues with echo '${json}'
+        const writeJsonFile = async (path, obj) => {
+            const json = JSON.stringify(obj, null, 2);
+            // Base64 encode to avoid all shell escaping issues
+            const b64 = btoa(encodeURIComponent(json).replace(/%([0-9A-F]{2})/g, (_, p1) => String.fromCharCode(parseInt(p1, 16))));
+            await exec(`printf '%s' '${b64}' | base64 -d > "${path}" 2>/dev/null`);
+        };
+        await writeJsonFile(`${SD_LANG}/en.json`, DEFAULT_EN);
+        await writeJsonFile(`${MOD_WEB_LANG}/en.json`, DEFAULT_EN);
+        await writeJsonFile(`${SD_LANG}/zh-TW.json`, BUILTIN_ZH_TW);
+        await writeJsonFile(`${MOD_WEB_LANG}/zh-TW.json`, BUILTIN_ZH_TW);
+        await writeJsonFile(`${SD_LANG}/zh-CN.json`, BUILTIN_ZH_CN);
+        await writeJsonFile(`${MOD_WEB_LANG}/zh-CN.json`, BUILTIN_ZH_CN);
     }
 }
 
@@ -1724,8 +1728,8 @@ async function loadStatistics() {
 async function saveStatistics() {
     try {
         const json = JSON.stringify(statistics, null, 2);
-        const escaped = json.replace(/'/g, "'\\''");
-        await exec(`echo '${escaped}' > "${SD_STATS}"`);
+        const b64 = btoa(encodeURIComponent(json).replace(/%([0-9A-F]{2})/g, (_, p1) => String.fromCharCode(parseInt(p1, 16))));
+        await exec(`printf '%s' '${b64}' | base64 -d > "${SD_STATS}" 2>/dev/null`);
     } catch (e) {
         console.error('Failed to save statistics:', e);
     }
@@ -2497,7 +2501,6 @@ async function applyRenderNow() {
 
         // ── VK Compat: ICD fix + gralloc WSI workarounds ─────────────────────────
 
-        await loadRenderStatus
         await loadRenderStatus();
         showToast(`✅ Render mode applied: ${renderMode}`);
     } catch (e) {
@@ -4984,6 +4987,31 @@ document.addEventListener('DOMContentLoaded', async () => {
     const qglEditor = document.getElementById('qglEditor');
     if (qglEditor) {
         qglEditor.addEventListener('input', updateQGLLineCount);
+    }
+
+    // ── KEYBOARD FIX: When soft keyboard appears on mobile, adjust modal to keep textarea visible ──
+    // Android WebView fires visualViewport resize when keyboard appears/disappears
+    if (window.visualViewport) {
+        const keyboardHandler = () => {
+            const viewportHeight = window.visualViewport.height;
+            const windowHeight = window.innerHeight;
+            const keyboardVisible = viewportHeight < windowHeight * 0.85;
+            
+            // Apply to all modals with textareas
+            document.querySelectorAll('.modal-container').forEach(container => {
+                if (keyboardVisible) {
+                    container.classList.add('keyboard-visible');
+                    container.style.maxHeight = `${viewportHeight * 0.75}px`;
+                    container.style.height = `${viewportHeight * 0.75}px`;
+                } else {
+                    container.classList.remove('keyboard-visible');
+                    container.style.maxHeight = '';
+                    container.style.height = '';
+                }
+            });
+        };
+        window.visualViewport.addEventListener('resize', keyboardHandler);
+        window.visualViewport.addEventListener('scroll', keyboardHandler);
     }
 
     // Render mode description updater

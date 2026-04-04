@@ -969,6 +969,13 @@ write_compat_state() {
 read_compat_state() {
   local _state_file="/data/local/tmp/adreno_vk_compat_full"
   [ -f "$_state_file" ] || return 1
+  # Validate state file ownership — must be root:root to prevent injection
+  local _owner
+  _owner=$(stat -c '%U:%G' "$_state_file" 2>/dev/null) || return 1
+  if [ "$_owner" != "root:root" ]; then
+    printf '%s\n' "[read_compat_state] SKIP: unsafe owner $_owner" >&2
+    return 1
+  fi
   # Source the state file — sets all VK_COMPAT_* variables
   # shellcheck disable=SC1090
   . "$_state_file" 2>/dev/null || return 1
@@ -1014,6 +1021,28 @@ probe_vulkan_compat_extended() {
     # strip anything non-numeric
     _v="${_v%%[!0-9]*}"
     echo "${_v:-0}"
+  }
+
+  # ── Cache frequently-read props once (avoids 8+ redundant getprop forks) ──
+  _pvk_cached_vendor_api=""
+  _pvk_cached_sys_sdk=""
+  _pvk_get_vendor_api() {
+    if [ -z "$_pvk_cached_vendor_api" ]; then
+      _pvk_cached_vendor_api=$(_pvk_int_prop ro.vendor.api_level)
+      if [ "$_pvk_cached_vendor_api" -eq 0 ] 2>/dev/null; then
+        _pvk_cached_vendor_api=$(_pvk_int_prop ro.product.first_api_level)
+      fi
+      if [ "$_pvk_cached_vendor_api" -eq 0 ] 2>/dev/null; then
+        _pvk_cached_vendor_api=$(_pvk_int_prop ro.board.api_level)
+      fi
+    fi
+    echo "$_pvk_cached_vendor_api"
+  }
+  _pvk_get_sys_sdk() {
+    if [ -z "$_pvk_cached_sys_sdk" ]; then
+      _pvk_cached_sys_sdk=$(_pvk_int_prop ro.build.version.sdk)
+    fi
+    echo "$_pvk_cached_sys_sdk"
   }
 
   # ══════════════════════════════════════════════════════════════════════════

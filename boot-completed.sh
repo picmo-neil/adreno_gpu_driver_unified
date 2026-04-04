@@ -50,6 +50,9 @@ unset _boot_wait
 # STEP 2: WAIT FOR LAUNCHER PID
 # ══════════════════════════════════════════════════════════════════════════
 
+# Common launcher packages across OEM ROMs
+_LAUNCHER_PKGS="com.android.launcher3 com.google.android.apps.nexuslauncher com.sec.android.app.launcher com.miui.home com.oppo.launcher com.vivo.launcher com.huawei.android.launcher com.lge.launcher3 com.htc.launcher com.oneplus.launcher com.samsung.android.app.homelauncher"
+
 _lp=0
 while [ $_lp -lt 60 ]; do
   for _pkg in $_LAUNCHER_PKGS; do
@@ -61,7 +64,7 @@ while [ $_lp -lt 60 ]; do
   sleep 1
   _lp=$((_lp + 1))
 done
-unset _lp _pkg
+unset _lp _pkg _LAUNCHER_PKGS
 
 # ══════════════════════════════════════════════════════════════════════════
 # STEP 3: SAFETY MARGIN (Vulkan pipeline settle)

@@ -44,9 +44,12 @@ CONFIG_FILE="/sdcard/Adreno_Driver/Config/adreno_config.txt"
 DATA_CONFIG="/data/local/tmp/adreno_config.txt"
 ALT_CONFIG="$MODDIR/adreno_config.txt"
 
-# Priority: /sdcard (mounted by service.sh time) -> /data/local/tmp (mirrored) -> $MODDIR
-if ! load_config "$CONFIG_FILE"; then
-  if ! load_config "$DATA_CONFIG"; then
+# Priority: /data/local/tmp (authoritative mirror from previous boot) →
+#           /sdcard (if mirror not yet created) → $MODDIR (bundled defaults)
+# This matches post-fs-data.sh's priority order so both scripts see the same
+# config values during the same boot cycle.
+if ! load_config "$DATA_CONFIG"; then
+  if ! load_config "$CONFIG_FILE"; then
     load_config "$ALT_CONFIG" || true
   fi
 fi
@@ -1030,8 +1033,25 @@ if [ "$RENDER_MODE" = "skiavk" ]; then
         mv "${_skvk_compat_file}.tmp" "$_skvk_compat_file" 2>/dev/null || true
     else
       # Runtime canary: check SystemUI is actually on Vulkan pipeline
-      _skvk_sysui_count=$(dumpsys gfxinfo com.android.systemui 2>/dev/null \
-                          | grep -c "Skia (Vulkan)" 2>/dev/null || echo "0")
+      # BUG FIX: dumpsys gfxinfo can hang if SystemUI is unresponsive.
+      # Wrap with timeout: run in background, kill after 10s.
+      # Use background+kill fallback for devices without 'timeout' (toybox).
+      if command -v timeout >/dev/null 2>&1; then
+        _skvk_sysui_dump=$(timeout 10 dumpsys gfxinfo com.android.systemui 2>/dev/null || true)
+      else
+        dumpsys gfxinfo com.android.systemui > /dev/tmp/adreno_gfxinfo_$$ 2>&1 &
+        _gfxinfo_pid=$!
+        _gfxinfo_wait=0
+        while kill -0 "$_gfxinfo_pid" 2>/dev/null && [ $_gfxinfo_wait -lt 10 ]; do
+          sleep 1
+          _gfxinfo_wait=$((_gfxinfo_wait + 1))
+        done
+        kill "$_gfxinfo_pid" 2>/dev/null || true
+        wait "$_gfxinfo_pid" 2>/dev/null || true
+        _skvk_sysui_dump=$(cat /dev/tmp/adreno_gfxinfo_$$ 2>/dev/null || true)
+        rm -f /dev/tmp/adreno_gfxinfo_$$ 2>/dev/null || true
+      fi
+      _skvk_sysui_count=$(printf '%s' "$_skvk_sysui_dump" | grep -c "Skia (Vulkan)" 2>/dev/null || echo "0")
       _skvk_sysui_count="${_skvk_sysui_count:-0}"
 
       if [ "$_skvk_sysui_count" -gt 0 ] 2>/dev/null; then
@@ -1039,8 +1059,7 @@ if [ "$RENDER_MODE" = "skiavk" ]; then
           mv "${_skvk_compat_file}.tmp" "$_skvk_compat_file" 2>/dev/null || true
         log_service "[OK] skiavk VK canary: SystemUI on Vulkan (${_skvk_sysui_count} Skia(Vulkan) surface(s)) — writing confirmed, QGL gate cleared for next boot"
       else
-        _skvk_pipe=$(dumpsys gfxinfo com.android.systemui 2>/dev/null \
-                     | grep -i "Pipeline" | head -1 || echo "")
+        _skvk_pipe=$(printf '%s' "$_skvk_sysui_dump" | grep -i "Pipeline" | head -1 || echo "")
         _skvk_live=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
         printf 'prop_only\n' > "${_skvk_compat_file}.tmp" 2>/dev/null && \
           mv "${_skvk_compat_file}.tmp" "$_skvk_compat_file" 2>/dev/null || true
@@ -1049,7 +1068,7 @@ if [ "$RENDER_MODE" = "skiavk" ]; then
         log_service "    Live renderer prop: '${_skvk_live}'"
         log_service "    Skia(Vulkan) count: 0"
       fi
-      unset _skvk_sysui_count _skvk_pipe _skvk_live
+      unset _skvk_sysui_count _skvk_pipe _skvk_live _skvk_sysui_dump
     fi
     unset _skvk_drv_ok
   fi

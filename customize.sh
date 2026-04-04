@@ -1820,7 +1820,6 @@ Configuration:
 --------------
 PLT Enabled: $PLT
 QGL Enabled: $QGL
-QGL Enabled: $QGL
 ARM64 Optimization: $ARM64_OPT
 Render Mode: $RENDER_MODE
 

@@ -6,17 +6,21 @@ import java.io.IOException
 
 private const val TAG = "QGLTrigger"
 private const val PROFILE_PATH = "/sdcard/Adreno_Driver/Config/qgl_profiles.json"
+private const val MAX_PROFILE_SIZE = 1024 * 1024L // 1MB limit
 
 object ProfileManager {
 
-    private var cachedProfile: QGLProfile? = null
-    private var lastLoadTime: Long = 0
+    @Volatile private var cachedProfile: QGLProfile? = null
+    @Volatile private var lastLoadTime: Long = 0L
     private const val CACHE_TTL_MS = 5000L
+    private val cacheLock = Any()
 
     fun getProfile(): QGLProfile? {
         val now = System.currentTimeMillis()
-        if (cachedProfile != null && (now - lastLoadTime) < CACHE_TTL_MS) {
-            return cachedProfile
+        val cached = cachedProfile
+        val lastLoad = lastLoadTime
+        if (cached != null && (now - lastLoad) < CACHE_TTL_MS) {
+            return cached
         }
         return loadProfile()
     }
@@ -50,12 +54,18 @@ object ProfileManager {
             Log.w(TAG, "Profile file not readable at $PROFILE_PATH")
             return null
         }
+        if (file.length() > MAX_PROFILE_SIZE) {
+            Log.e(TAG, "Profile file too large: ${file.length()} bytes (max: $MAX_PROFILE_SIZE)")
+            return null
+        }
 
         return try {
             val content = file.readText()
             val profile = parseJson(content)
-            cachedProfile = profile
-            lastLoadTime = System.currentTimeMillis()
+            synchronized(cacheLock) {
+                cachedProfile = profile
+                lastLoadTime = System.currentTimeMillis()
+            }
             Log.d(TAG, "Successfully loaded profile with ${profile.apps.size} app entries")
             profile
         } catch (e: IOException) {
@@ -101,7 +111,7 @@ object ProfileManager {
                 }
 
                 skipWhitespace()
-                if (peek() == ',') {
+                if (pos < json.length && peek() == ',') {
                     pos++
                 }
             }
@@ -135,7 +145,7 @@ object ProfileManager {
                 }
 
                 skipWhitespace()
-                if (peek() == ',') {
+                if (pos < json.length && peek() == ',') {
                     pos++
                 }
             }
@@ -164,7 +174,7 @@ object ProfileManager {
                 apps[pkgName] = appProfile
 
                 skipWhitespace()
-                if (peek() == ',') {
+                if (pos < json.length && peek() == ',') {
                     pos++
                 }
             }
@@ -198,7 +208,7 @@ object ProfileManager {
                 }
 
                 skipWhitespace()
-                if (peek() == ',') {
+                if (pos < json.length && peek() == ',') {
                     pos++
                 }
             }
@@ -223,7 +233,7 @@ object ProfileManager {
                 list.add(item)
 
                 skipWhitespace()
-                if (peek() == ',') {
+                if (pos < json.length && peek() == ',') {
                     pos++
                 }
             }
@@ -248,9 +258,20 @@ object ProfileManager {
                                 'n' -> '\n'
                                 't' -> '\t'
                                 'r' -> '\r'
+                                'b' -> '\b'
+                                'f' -> '\u000C'
                                 '"' -> '"'
                                 '\\' -> '\\'
                                 '/' -> '/'
+                                'u' -> {
+                                    if (pos + 4 <= json.length) {
+                                        val hex = json.substring(pos, pos + 4)
+                                        pos += 4
+                                        hex.toIntOrNull(16)?.toChar() ?: '?'
+                                    } else {
+                                        '?'
+                                    }
+                                }
                                 else -> escaped
                             }
                         )
@@ -268,11 +289,23 @@ object ProfileManager {
         private fun parseBoolean(): Boolean {
             skipWhitespace()
             return if (json.startsWith("true", pos)) {
-                pos += 4
-                true
+                val after = pos + 4
+                if (after < json.length && json[after].isLetterOrDigit()) {
+                    Log.w(TAG, "Invalid boolean at position $pos: not followed by delimiter")
+                    false
+                } else {
+                    pos = after
+                    true
+                }
             } else if (json.startsWith("false", pos)) {
-                pos += 5
-                false
+                val after = pos + 5
+                if (after < json.length && json[after].isLetterOrDigit()) {
+                    Log.w(TAG, "Invalid boolean at position $pos: not followed by delimiter")
+                    false
+                } else {
+                    pos = after
+                    false
+                }
             } else {
                 Log.w(TAG, "Unexpected boolean value at position $pos")
                 false

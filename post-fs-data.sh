@@ -29,7 +29,10 @@ MODDIR="${0%/*}"
 . "$MODDIR/common.sh"
 
 # ── Boot timing profiler ────────────────────────────────────────────────
-_BOOT_PHASE_START=$(cat /proc/uptime 2>/dev/null | awk '{print $1}')
+# Read /proc/uptime ONCE — avoids repeated cat+awk forks in post-fs-data
+# where every ms matters. Subsequent timing entries reuse this value or
+# compute deltas from it.
+{ read _BOOT_PHASE_START _; } < /proc/uptime 2>/dev/null || _BOOT_PHASE_START="0"
 # _log_emit will be wired to log_boot once log_boot() is defined below.
 # For now, use a stub that writes to a buffer drained later.
 _BOOT_TIMING_ENTRIES=""
@@ -41,7 +44,7 @@ _add_boot_timing "post-fs-data.sh started at ${_BOOT_PHASE_START}s uptime"
 # EARLY ROOT DETECTION
 # ========================================
 
-_add_boot_timing "root detection started at $(cat /proc/uptime 2>/dev/null | awk '{print $1}')s"
+_add_boot_timing "root detection started at ${_BOOT_PHASE_START}s"
 
 # Initialize metamodule state so it is always defined regardless of root type
 METAMODULE_ACTIVE=false
@@ -2457,6 +2460,7 @@ case "$RENDER_MODE" in
         # every 3s until boot_completed+30s. Covers the vendor_init service
         # window when old vendor late_start services override our prop.
         # Runs in a detached subshell so it never blocks post-fs-data.
+        # PID is written to a state file so service.sh can kill it early if needed.
         (
           _w_applied=0
           _w_wait=0
@@ -2486,8 +2490,13 @@ case "$RENDER_MODE" in
           done
           # Final summary to kmsg for debugging
           echo "[ADRENO-OLDVENDOR] Watchdog complete. Total re-applications: ${_w_applied}" > /dev/kmsg 2>/dev/null || true
+          # Clean up PID file on normal exit
+          rm -f /data/local/tmp/adreno_watchdog_pid 2>/dev/null || true
         ) &
-        log_boot "[OK] Old-vendor prop watchdog launched (PID=$!) — re-enforces skiavk if vendor_init overrides it"
+        _wd_pid=$!
+        printf '%d\n' "$_wd_pid" > /data/local/tmp/adreno_watchdog_pid 2>/dev/null || true
+        log_boot "[OK] Old-vendor prop watchdog launched (PID=$_wd_pid) — re-enforces skiavk if vendor_init overrides it"
+        unset _wd_pid
 
       else
         log_boot "Old vendor check: CLEAN (vendor/build.prop hwui='${VENDOR_HWUI_PROP:-<none>}')"
@@ -2498,25 +2507,10 @@ case "$RENDER_MODE" in
     fi
     # ══ END OLD VENDOR DETECTION ═════════════════════════════════════════════
 
-    # ── Re-enforce renderer prop after boot_completed ─────────────────────────
-    # Re-apply debug.hwui.renderer in case vendor_init overrode it.
-    # NO force-stops. LYB Kernel Manager never force-stops apps and works
-    # perfectly — existing pipeline blobs remain valid after QGL activation.
-    # Force-stopping at boot+10s (5s after QGL at +5s) caused apps to
-    # cold-compile ALL shaders WITH QGL active → QGLCCompileToIRShader SIGSEGV.
-    (
-        _WAIT=0
-        while [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ] && [ $_WAIT -lt 90 ]; do
-          sleep 3; _WAIT=$((_WAIT + 3))
-        done
-        [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ] && exit 0
-        if command -v resetprop >/dev/null 2>&1; then
-          resetprop debug.hwui.renderer skiavk 2>/dev/null || true
-        fi
-        printf '[ADRENO] skiavk BG: renderer re-enforced at boot_completed (no force-stops)\n' \
-          > /dev/kmsg 2>/dev/null || true
-    ) >/dev/null 2>&1 &
-    log_boot "[OK] skiavk: renderer re-enforced after boot_completed (no force-stops — LYB approach)"
+    # NOTE: The old redundant renderer re-enforcement subshell (previously at
+    # lines 2507-2518) was removed. The watchdog launched above already covers
+    # the same ground: it re-enforces debug.hwui.renderer=skiavk every 3-5s
+    # from post-fs-data through boot_completed+60s. No duplicate needed.
     ;;
 
   skiagl)
@@ -3003,9 +2997,7 @@ fi
 # same_process_hal_file is required for BOTH the directory and qgl_config.txt.
 # The Adreno driver validates both contexts before reading the config file.
 if [ "$QGL" = "y" ]; then
-  mkdir -p /data/vendor/gpu 2>/dev/null
-  chown root:system /data/vendor/gpu 2>/dev/null || true
-  chmod 0775 /data/vendor/gpu 2>/dev/null || true
+  mkdir -p /data/vendor/gpu 2>/dev/null || true
   chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu 2>/dev/null || true
   log_boot "QGL directory context set to same_process_hal_file (dir+file both required by driver)"
 fi

@@ -1560,6 +1560,28 @@ input:focus-visible + .modern-slider {
 }
 #qglEditor::placeholder { color: var(--text-4); }
 
+/* ── KEYBOARD FIX: When soft keyboard appears, modal scrolls to keep textarea visible ── */
+.modal-container.keyboard-visible {
+    max-height: 60vh !important;
+    height: 60vh !important;
+    bottom: auto !important;
+    top: 50% !important;
+    transform: translateY(-50%) !important;
+    border-radius: var(--r-2xl) !important;
+    border-bottom: 1px solid var(--border-2) !important;
+    overflow-y: auto !important;
+}
+.modal-container.keyboard-visible .editor-container {
+    min-height: 200px;
+}
+/* Ensure textarea is always visible when focused on mobile */
+@media (max-height: 500px) {
+    .modal-container {
+        max-height: 85vh !important;
+        height: 85vh !important;
+    }
+}
+
 .doc-container { flex: 1; overflow-y: auto; padding: var(--s-5); }
 .markdown-body, .markdown-content { color: var(--text-2); font-size: 13px; line-height: 1.8; }
 .markdown-content h1 { font-size: 20px; font-weight: 700; color: var(--text-1); margin: 20px 0 10px; letter-spacing: -0.02em; }

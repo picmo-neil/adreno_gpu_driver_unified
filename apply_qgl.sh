@@ -92,17 +92,24 @@ if [ "$MODE" = "boot" ]; then
   log_qgl "[BOOT] Applying QGL from $_qsrc"
 
   _qtmp="${QGL_TARGET}.tmp.$$"
+  _qtmp2="${QGL_TARGET}.tmp2.$$"
   if cp -f "$_qsrc" "$_qtmp" 2>/dev/null && mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
     chcon u:object_r:same_process_hal_file:s0 "$QGL_DIR" 2>/dev/null || true
     chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
     log_qgl "[BOOT] QGL applied successfully ($(wc -l < "$_qsrc" 2>/dev/null || echo '?') lines)"
   else
     rm -f "$_qtmp" 2>/dev/null || true
-    cp -f "$_qsrc" "$QGL_TARGET" 2>/dev/null || { log_qgl "[BOOT] FAILED to apply QGL"; exit 1; }
-    chcon u:object_r:same_process_hal_file:s0 "$QGL_DIR" 2>/dev/null || true
-    chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
-    log_qgl "[BOOT] QGL applied (fallback path)"
+    if cp -f "$_qsrc" "$_qtmp2" 2>/dev/null && mv -f "$_qtmp2" "$QGL_TARGET" 2>/dev/null; then
+      chcon u:object_r:same_process_hal_file:s0 "$QGL_DIR" 2>/dev/null || true
+      chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
+      log_qgl "[BOOT] QGL applied (fallback atomic path)"
+    else
+      rm -f "$_qtmp2" 2>/dev/null || true
+      log_qgl "[BOOT] FAILED to apply QGL"
+      exit 1
+    fi
   fi
+  rm -f "$_qtmp2" 2>/dev/null || true
   exit 0
 fi
 
@@ -181,9 +188,17 @@ _extract_section_keys() {
             q1 = index(line, "\"")
             if (q1 == 0) break
             rest = substr(line, q1 + 1)
-            q2 = index(rest, "\"")
+            # Find closing quote, skipping escaped quotes (\" → literal quote in value)
+            q2 = 0
+            for (ci = 1; ci <= length(rest); ci++) {
+              ch = substr(rest, ci, 1)
+              if (ch == "\\") { ci++; continue }
+              if (ch == "\"") { q2 = ci; break }
+            }
             if (q2 == 0) break
             val = substr(rest, 1, q2 - 1)
+            # Unescape any \" sequences in the value
+            gsub(/\\"/, "\"", val)
             # Skip "keys" and "enabled" — only output actual key=value pairs
             if (index(val, "=") > 0) {
               print val
@@ -224,7 +239,10 @@ extract_keys() {
 }
 
 # ── Read profile JSON ────────────────────────────────────────────────────
-_json=$(cat "$PROFILE_PATH" 2>/dev/null)
+_json=""
+if [ -f "$PROFILE_PATH" ]; then
+  _json=$(cat "$PROFILE_PATH" 2>/dev/null) || true
+fi
 if [ -z "$_json" ]; then
   log_qgl "[APP] Failed to read qgl_profiles.json"
   exit 0
