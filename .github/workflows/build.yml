@@ -70,8 +70,10 @@ jobs:
 
       - name: Install Android SDK components
         run: |
-          # Install Android SDK platform 36 and build tools (required by targetSdk = 36)
-          sdkmanager --install "platforms;android-36" "build-tools;35.0.0" --licenses 2>&1
+          # Accept all pending licenses first (--licenses is mutually exclusive with --install)
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          # Install Android platform 36 and build-tools (required by targetSdk = 36)
+          sdkmanager "platforms;android-36" "build-tools;35.0.0"
 
       - name: Generate Gradle Wrapper
         run: |
