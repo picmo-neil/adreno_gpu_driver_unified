@@ -3586,8 +3586,8 @@ async function applyAndSaveTheme(theme) {
         lines.push(`THEME=${theme}`);
         const config = lines.join('\n');
         const escaped = config.replace(/'/g, "'\\''");
-        await exec(`echo '${escaped}' > "${SD_CONFIG}/adreno_config.txt"`);
-        await exec(`echo '${escaped}' > "${MOD_PATH}/adreno_config.txt" 2>/dev/null`);
+        await exec(`printf '%s\\n' '${escaped}' > "${SD_CONFIG}/adreno_config.txt"`);
+        await exec(`printf '%s\\n' '${escaped}' > "${MOD_PATH}/adreno_config.txt" 2>/dev/null`);
         logToTerminal(`✓ Theme saved to config`, 'success');
     } catch (e) {
         logToTerminal(`Theme save error: ${e.message}`, 'warn');
@@ -4879,8 +4879,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             try {
                 const defaults = `PLT=n\nQGL=n\nARM64_OPT=n\nVERBOSE=n\nRENDER_MODE=normal\nTHEME=purple`;
                 const escapedDefaults = defaults.replace(/'/g, "'\\''");
-                await exec(`echo '${escapedDefaults}' > "${SD_CONFIG}/adreno_config.txt"`);
-                await exec(`echo '${escapedDefaults}' > "${MOD_PATH}/adreno_config.txt"`);
+                await exec(`printf '%s\\n' '${escapedDefaults}' > "${SD_CONFIG}/adreno_config.txt"`);
+                await exec(`printf '%s\\n' '${escapedDefaults}' > "${MOD_PATH}/adreno_config.txt"`);
                 await loadConfig();
                 showToast('✅ Configuration reset to defaults');
             } catch (e) {

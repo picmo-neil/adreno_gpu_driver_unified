@@ -15,20 +15,15 @@ android {
         versionName = "1.0"
     }
 
-    signingConfigs {
-        create("release") {
-            storeFile = file("debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
-        }
-    }
-
+    // Use debug signing config (Gradle's default) - works without keystore
+    // Custom keystore only needed if specifically building for release store
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("release")
+            // Use debug signing (default Android behavior)
+            // This allows building without a keystore file
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -37,7 +32,7 @@ android {
         debug {
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfig = signingConfigs.getByName("release")
+            // Debug builds use debug signing by default
         }
     }
 
@@ -50,6 +45,20 @@ android {
         compilerOptions {
             jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
         }
+    }
+}
+
+// Optional: Load custom keystore if it exists (for release builds with real certificate)
+val customKeystore = file("debug.keystore")
+if (customKeystore.exists()) {
+    android.signingConfigs.create("release") {
+        storeFile = customKeystore
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+    }
+    android.buildTypes.getByName("release") {
+        signingConfig = android.signingConfigs.getByName("release")
     }
 }
 

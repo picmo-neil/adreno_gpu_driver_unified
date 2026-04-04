@@ -15,7 +15,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 private const val TAG = "QGLTrigger"
-private const val APPLY_SCRIPT_PATH = "/data/adb/modules/adreno_gpu_driver_unified/apply_qgl.sh"
 private const val DEBOUNCE_MS = 2000L
 private const val NOTIFICATION_CHANNEL_ID = "qgl_trigger_channel"
 private const val NOTIFICATION_ID = 1001
