@@ -495,6 +495,9 @@ const DEFAULT_EN = {
     qglName: "QGL Config",
     qglDesc: "Configure Qualcomm Graphics Library for Adreno GPUs.Instead use lyb kernel manager for better control and it supports all socs",
     qglSub: "Reminder: Better to use lyb kernel manager",
+    qglPerappName: "Per-App QGL",
+    qglPerappDesc: "APK applies matching QGL profile at each app launch (like LYB). Off = single static config at boot.",
+    skiavkPerappWarning: "⚠️ skiavk + Per-App QGL Off: Apps launched before boot_completed+3s receive NO QGL config at Vulkan init time. This degrades benchmark scores.",
     edit: "Edit",
     armName: "ARM64 Optimization",
     armDesc: "Remove 32-bit libraries for unsupported ROMs",
@@ -785,6 +788,9 @@ const BUILTIN_ZH_CN = {
     qglName: "QGL配置",
     qglDesc: "为 Adreno GPU 配置 Qualcomm 图形库，建议改用 Lyb 内核管理器，以获得更精细的控制，并支持所有 SoC",
     qglSub: "提醒：最好使用 lyb Kernel Manager",
+    qglPerappName: "Per-App QGL",
+    qglPerappDesc: "APK在每次应用启动时应用匹配的QGL配置（类似LYB）。关闭=启动时单一静态配置。",
+    skiavkPerappWarning: "⚠️ skiavk + Per-App QGL关闭：boot_completed+3秒前启动的应用在Vulkan初始化时无法获得QGL配置。这会降低基准测试分数。",
     edit: "编辑",
     armName: "ARM64优化",
     armDesc: "移除32位库，用于不支持32位的ROM",
@@ -1075,6 +1081,9 @@ const BUILTIN_ZH_TW = {
     qglName: "QGL配置",
     qglDesc: "為 Adreno GPU 設定 Qualcomm 圖形函式庫,建議改用 Lyb 核心管理器，以取得更精細的控制，並支援所有 SoC",
     qglSub: "提醒：最好使用 lyb Kernel Manager",
+    qglPerappName: "Per-App QGL",
+    qglPerappDesc: "APK在每次應用程式啟動時套用相符的QGL設定（類似LYB）。關閉=開機時單一靜態設定。",
+    skiavkPerappWarning: "⚠️ skiavk + Per-App QGL關閉：boot_completed+3秒前啟動的應用程式在Vulkan初始化時無法獲得QGL設定。這會降低基準測試分數。",
     edit: "編輯",
     armName: "ARM64優化",
     armDesc: "移除32位元庫，用於不支援32位元的ROM",
@@ -1924,9 +1933,13 @@ async function loadConfig() {
     
     setToggle('PLT', config.PLT);
     setToggle('QGL', config.QGL);
+    setToggle('QGL_PERAPP', config.QGL_PERAPP);
     setToggle('ARM64_OPT', config.ARM64_OPT);
     setToggle('VERBOSE', config.VERBOSE);
     setSelect('RENDER_MODE', config.RENDER_MODE);
+    // Show/hide QGL_PERAPP row based on QGL state
+    const _qglPerappRow = document.getElementById('qglPerappRow');
+    if (_qglPerappRow) _qglPerappRow.style.display = config.QGL === 'y' ? '' : 'none';
     // Load FORCE_SKIAVKTHREADED_BACKEND toggle
     const _ftb = document.getElementById('FORCE_SKIAVKTHREADED_BACKEND');
     if (_ftb) _ftb.checked = config.FORCE_SKIAVKTHREADED_BACKEND === 'y';
@@ -1942,6 +1955,24 @@ async function loadConfig() {
     
     // Show current live render prop values so user can verify what's actually active
     await loadRenderStatus();
+
+    // Check skiavk + QGL_PERAPP=n warning after config loads
+    const _qgl = document.getElementById('QGL')?.checked || false;
+    const _qpa = document.getElementById('QGL_PERAPP')?.checked || false;
+    const _rm = document.getElementById('RENDER_MODE')?.value || 'normal';
+    if (_qgl && !_qpa && _rm === 'skiavk') {
+        const _warnEl = document.getElementById('skiavkPerappWarning');
+        if (!_warnEl) {
+            const _qglRow = document.getElementById('qglPerappRow');
+            if (_qglRow) {
+                const _w = document.createElement('div');
+                _w.id = 'skiavkPerappWarning';
+                _w.className = 'alert alert-warning';
+                _w.textContent = currentTranslations?.skiavkPerappWarning || '⚠️ skiavk + Per-App QGL Off: Apps launched before boot_completed+3s receive NO QGL config at Vulkan init time.';
+                _qglRow.parentNode.insertBefore(_w, _qglRow.nextSibling);
+            }
+        }
+    }
 }
 
 // Apply current render mode props RIGHT NOW via resetprop — no reboot needed.
@@ -2544,13 +2575,14 @@ async function saveConfig() {
 
     const plt           = getValue('PLT');
     const qgl           = getValue('QGL');
+    const qglPerapp     = getValue('QGL_PERAPP');
     const arm           = getValue('ARM64_OPT');
     const verbose       = getValue('VERBOSE');
     const forceThreaded = getValue('FORCE_SKIAVKTHREADED_BACKEND');
     const theme         = currentTheme || 'purple';
 
     const writeConfig = (path) =>
-        exec(`printf 'PLT=%s\\nQGL=%s\\nARM64_OPT=%s\\nVERBOSE=%s\\nRENDER_MODE=%s\\nFORCE_SKIAVKTHREADED_BACKEND=%s\\nTHEME=%s\\n' '${plt}' '${qgl}' '${arm}' '${verbose}' '${finalRenderMode}' '${forceThreaded}' '${theme}' > "${path}" 2>/dev/null`);
+        exec(`printf 'PLT=%s\\nQGL=%s\\nQGL_PERAPP=%s\\nARM64_OPT=%s\\nVERBOSE=%s\\nRENDER_MODE=%s\\nFORCE_SKIAVKTHREADED_BACKEND=%s\\nTHEME=%s\\n' '${plt}' '${qgl}' '${qglPerapp}' '${arm}' '${verbose}' '${finalRenderMode}' '${forceThreaded}' '${theme}' > "${path}" 2>/dev/null`);
 
     await writeConfig(`${SD_CONFIG}/adreno_config.txt`);
     await writeConfig(`${MOD_PATH}/adreno_config.txt`);
@@ -2964,6 +2996,15 @@ function updateQGLLineCount() {
     const counter = document.getElementById('qglLineCount');
     if (editor && counter) {
         counter.textContent = (editor.value.match(/\n/g) || []).length + 1;
+    }
+}
+
+function updateAppProfileLineCount() {
+    const editor = document.getElementById('appProfileEditor');
+    const counter = document.getElementById('appProfileLineCount');
+    if (editor && counter) {
+        const lines = editor.value ? (editor.value.match(/\n/g) || []).length + 1 : 0;
+        counter.textContent = lines;
     }
 }
 
@@ -4699,6 +4740,37 @@ document.addEventListener('DOMContentLoaded', async () => {
         syncSettingRowState(cb);
         cb.addEventListener('change', () => syncSettingRowState(cb));
     });
+
+    // QGL toggle: show/hide QGL_PERAPP row
+    document.getElementById('QGL')?.addEventListener('change', (e) => {
+        const _qpr = document.getElementById('qglPerappRow');
+        if (_qpr) _qpr.style.display = e.target.checked ? '' : 'none';
+    });
+
+    // skiavk + QGL_PERAPP=n warning
+    function _checkSkiavkPerappWarning() {
+        const _qgl = document.getElementById('QGL')?.checked || false;
+        const _qpa = document.getElementById('QGL_PERAPP')?.checked || false;
+        const _rm = document.getElementById('RENDER_MODE')?.value || 'normal';
+        const _warnId = 'skiavkPerappWarning';
+        let _existing = document.getElementById(_warnId);
+        if (_qgl && !_qpa && _rm === 'skiavk') {
+            if (!_existing) {
+                _existing = document.createElement('div');
+                _existing.id = _warnId;
+                _existing.className = 'alert alert-warning';
+                _existing.setAttribute('data-i18n', 'skiavkPerappWarning');
+                _existing.textContent = currentTranslations?.skiavkPerappWarning || '⚠️ skiavk + Per-App QGL Off: Apps launched before boot_completed+3s receive NO QGL config at Vulkan init time.';
+                const _qglRow = document.getElementById('qglPerappRow');
+                if (_qglRow) _qglRow.parentNode.insertBefore(_existing, _qglRow.nextSibling);
+            }
+        } else if (_existing) {
+            _existing.remove();
+        }
+    }
+    document.getElementById('QGL_PERAPP')?.addEventListener('change', _checkSkiavkPerappWarning);
+    document.getElementById('RENDER_MODE')?.addEventListener('change', _checkSkiavkPerappWarning);
+
     // Re-sync after config loads
     const _origLoadConfig = loadConfig;
     // (sync triggered in loadConfig via setToggle calls — covered by change events)
@@ -4877,7 +4949,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (confirmed) {
             setLoading(true);
             try {
-                const defaults = `PLT=n\nQGL=n\nARM64_OPT=n\nVERBOSE=n\nRENDER_MODE=normal\nTHEME=purple`;
+                const defaults = `PLT=n\nQGL=n\nQGL_PERAPP=y\nARM64_OPT=n\nVERBOSE=n\nRENDER_MODE=normal\nTHEME=purple`;
                 const escapedDefaults = defaults.replace(/'/g, "'\\''");
                 await exec(`printf '%s\\n' '${escapedDefaults}' > "${SD_CONFIG}/adreno_config.txt"`);
                 await exec(`printf '%s\\n' '${escapedDefaults}' > "${MOD_PATH}/adreno_config.txt"`);
@@ -4996,13 +5068,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             const viewportHeight = window.visualViewport.height;
             const windowHeight = window.innerHeight;
             const keyboardVisible = viewportHeight < windowHeight * 0.85;
-            
-            // Apply to all modals with textareas
+
             document.querySelectorAll('.modal-container').forEach(container => {
                 if (keyboardVisible) {
                     container.classList.add('keyboard-visible');
-                    container.style.maxHeight = `${viewportHeight * 0.75}px`;
-                    container.style.height = `${viewportHeight * 0.75}px`;
+                    container.style.maxHeight = `${viewportHeight * 0.85}px`;
+                    container.style.height = `${viewportHeight * 0.85}px`;
                 } else {
                     container.classList.remove('keyboard-visible');
                     container.style.maxHeight = '';
@@ -5012,6 +5083,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         };
         window.visualViewport.addEventListener('resize', keyboardHandler);
         window.visualViewport.addEventListener('scroll', keyboardHandler);
+    }
+
+    // ── App Profile Editor: scroll textarea into view on focus (extra safety for WebView IME) ──
+    const _appEditor = document.getElementById('appProfileEditor');
+    if (_appEditor) {
+        _appEditor.addEventListener('focus', () => {
+            setTimeout(() => {
+                _appEditor.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }, 300);
+        });
     }
 
     // Render mode description updater
@@ -5143,6 +5224,55 @@ function initPerAppQGL() {
 
     // Save app profile
     document.getElementById('btnSaveAppProfile')?.addEventListener('click', saveAppProfile);
+
+    // ── App Profile Editor: Format button ──
+    document.getElementById('btnFormatAppProfile')?.addEventListener('click', () => {
+        const el = document.getElementById('appProfileEditor');
+        if (!el) return;
+        const raw = el.value || '';
+        if (!raw.trim()) {
+            showToast('⚠️ Nothing to format — editor is empty');
+            return;
+        }
+        const entries = new Map();
+        raw.split('\n').forEach(line => {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) return;
+            const eqIdx = trimmed.indexOf('=');
+            if (eqIdx > 0) {
+                const k = trimmed.slice(0, eqIdx).trim();
+                const v = trimmed.slice(eqIdx + 1).trim();
+                if (k) entries.set(k, v);
+            }
+        });
+        const sorted = [...entries.entries()].sort(([a], [b]) => a.localeCompare(b));
+        const formatted = sorted.map(([k, v]) => `${k}=${v}`).join('\n');
+        el.value = formatted;
+        updateAppProfileLineCount();
+        const dupesSaved = (raw.split('\n').filter(l => l.includes('=')).length) - sorted.length;
+        showToast(`✅ Formatted — ${sorted.length} keys${dupesSaved > 0 ? `, ${dupesSaved} duplicate(s) removed` : ''}`);
+    });
+
+    // ── App Profile Editor: Reset button ──
+    document.getElementById('btnResetAppProfile')?.addEventListener('click', () => {
+        const el = document.getElementById('appProfileEditor');
+        if (!el || !_currentEditPkg) return;
+        const profile = _currentEditPkg === '__global__'
+            ? _qglProfilesCache?.global
+            : _qglProfilesCache?.apps?.[_currentEditPkg];
+        if (profile && profile.keys) {
+            el.value = profile.keys.join('\n');
+            updateAppProfileLineCount();
+            showToast('♻️ Reset to last saved state');
+        } else {
+            el.value = '';
+            updateAppProfileLineCount();
+            showToast('♻️ Cleared (no saved state)');
+        }
+    });
+
+    // ── App Profile Editor: Live line counter ──
+    document.getElementById('appProfileEditor')?.addEventListener('input', updateAppProfileLineCount);
 
     // App picker search
     document.getElementById('appPickerSearch')?.addEventListener('input', (e) => filterAppPicker(e.target.value));
@@ -5323,6 +5453,7 @@ async function openAppProfileEditor(pkg) {
     pkgInput.readOnly = true;
     enabledToggle.checked = profile.enabled;
     editor.value = profile.keys.join('\n');
+    updateAppProfileLineCount();
 
     modal.style.display = 'flex';
     editor.focus();

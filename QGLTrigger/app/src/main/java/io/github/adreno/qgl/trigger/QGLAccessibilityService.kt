@@ -4,8 +4,6 @@ import android.accessibilityservice.AccessibilityService
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
-import android.content.Intent
 import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -42,7 +40,11 @@ class QGLAccessibilityService : AccessibilityService() {
 
     private var lastAppPackage: String? = null
     private var lastSwitchTime: Long = 0L
-    private var currentForegroundPackage: String? = null
+
+    @Volatile private var persistentShell: Process? = null
+    @Volatile private var shellStdin: DataOutputStream? = null
+    private val shellLock = Any()
+
     private val scriptExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "QGL-ScriptExecutor").apply { isDaemon = true }
     }
@@ -51,6 +53,7 @@ class QGLAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         Log.d(TAG, "AccessibilityService connected")
         startForegroundNotification()
+        getOrCreateShell()
         Log.d(TAG, "QGL Accessibility Service started and ready to monitor app switches")
     }
 
@@ -77,14 +80,9 @@ class QGLAccessibilityService : AccessibilityService() {
             return
         }
 
-        if (packageName == currentForegroundPackage) {
-            return
-        }
-
         Log.d(TAG, "App switch detected: $packageName")
         lastAppPackage = packageName
         lastSwitchTime = now
-        currentForegroundPackage = packageName
 
         handleAppSwitch(packageName)
     }
@@ -100,69 +98,73 @@ class QGLAccessibilityService : AccessibilityService() {
         executeQGLScript(packageName, keys)
     }
 
+    private fun getOrCreateShell(): DataOutputStream? {
+        synchronized(shellLock) {
+            val shell = persistentShell
+            if (shell != null && shell.isAlive) {
+                return shellStdin
+            }
+            return try {
+                val p = Runtime.getRuntime().exec("su")
+                persistentShell = p
+                val stdin = DataOutputStream(p.outputStream)
+                shellStdin = stdin
+                Log.d(TAG, "Persistent root shell created")
+                stdin
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to create persistent root shell", e)
+                persistentShell = null
+                shellStdin = null
+                null
+            }
+        }
+    }
+
+    private fun writeToShell(stdin: DataOutputStream, cmds: List<String>): Boolean {
+        return try {
+            for (cmd in cmds) {
+                stdin.writeBytes("$cmd\n")
+            }
+            stdin.flush()
+            true
+        } catch (e: IOException) {
+            Log.w(TAG, "Shell write failed, will respawn on next switch", e)
+            synchronized(shellLock) {
+                persistentShell?.destroyForcibly()
+                persistentShell = null
+                shellStdin = null
+            }
+            false
+        }
+    }
+
     private fun executeQGLScript(packageName: String, keys: List<String>) {
         scriptExecutor.execute {
-            var process: Process? = null
-            var os: DataOutputStream? = null
-            try {
-                process = Runtime.getRuntime().exec("su")
-                os = DataOutputStream(process.outputStream)
+            val stdin = getOrCreateShell() ?: run {
+                Log.e(TAG, "No root shell available for $packageName")
+                return@execute
+            }
 
-                val magicHeader = "0x0=0x8675309"
+            val magicHeader = "0x0=0x8675309"
+            val cmds = mutableListOf<String>()
 
-                // Atomic write: printf content to temp file, then mv to target.
-                // printf > tmp && mv tmp target is atomic on ext4/f2fs (rename syscall).
-                // The heredoc approach (cat > tmp <<'EOF') is NOT atomic — cat truncates
-                // the file first, then writes. If the su process is killed between
-                // truncate and write completion (OOM killer, timeout), the temp file
-                // is left empty/partial and mv moves corrupted data to the target.
-                //
-                // Keys are written via a heredoc to the temp file, but the heredoc
-                // feeds into printf which writes to the temp file in a single shell
-                // operation. The subsequent mv is the atomic boundary.
-                os.writeBytes("mkdir -p $QGL_DIR 2>/dev/null\n")
-                os.writeBytes("{\n")
-                os.writeBytes("printf '%s\\n' '$magicHeader'\n")
-                for (key in keys) {
-                    val escaped = key.replace("'", "'\\''")
-                    os.writeBytes("printf '%s\\n' '$escaped'\n")
-                }
-                os.writeBytes("} > ${QGL_TARGET}.tmp 2>/dev/null && ")
-                os.writeBytes("mv -f ${QGL_TARGET}.tmp $QGL_TARGET 2>/dev/null\n")
-                os.writeBytes("chcon $SELINUX_CONTEXT $QGL_DIR 2>/dev/null || true\n")
-                os.writeBytes("chcon $SELINUX_CONTEXT $QGL_TARGET 2>/dev/null || true\n")
-                os.writeBytes("exit\n")
-                os.flush()
-                // Do NOT close os before waitFor — let the shell exit naturally
-                // after reading "exit". Closing stdin prematurely can cause SIGPIPE
-                // if the shell is mid-read from its input stream.
+            cmds.add("mkdir -p $QGL_DIR 2>/dev/null")
+            cmds.add("chcon $SELINUX_CONTEXT $QGL_DIR 2>/dev/null || true")
 
-                val finished = process.waitFor(5, TimeUnit.SECONDS)
-                if (!finished) {
-                    process.destroyForcibly()
-                    process.waitFor(2, TimeUnit.SECONDS)
-                    Log.w(TAG, "su process timed out and was force-destroyed for $packageName")
-                }
+            val tmpFile = "${QGL_TARGET}.tmp"
+            cmds.add("{")
+            cmds.add("printf '%s\\n' '$magicHeader'")
+            for (key in keys) {
+                val escaped = key.replace("'", "'\\''")
+                cmds.add("printf '%s\\n' '$escaped'")
+            }
+            cmds.add("} > $tmpFile 2>/dev/null && mv -f $tmpFile $QGL_TARGET 2>/dev/null")
+            cmds.add("chcon $SELINUX_CONTEXT $QGL_TARGET 2>/dev/null || true")
 
-                val exitCode = process.exitValue()
-                if (exitCode != 0) {
-                    Log.e(TAG, "su process exited with code $exitCode for $packageName")
-                } else {
-                    Log.d(TAG, "QGL config written directly for $packageName (${keys.size} keys)")
-                }
-            } catch (e: IOException) {
-                Log.e(TAG, "Failed to execute su for $packageName", e)
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Root access denied for $packageName", e)
-            } finally {
-                try {
-                    os?.close()
-                } catch (_: IOException) {
-                }
-                try {
-                    process?.destroy()
-                } catch (_: Exception) {
-                }
+            if (writeToShell(stdin, cmds)) {
+                Log.d(TAG, "QGL config queued for $packageName (${keys.size} keys)")
+            } else {
+                Log.w(TAG, "Failed to write QGL config for $packageName, shell will respawn")
             }
         }
     }
@@ -172,7 +174,17 @@ class QGLAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
-        Log.w(TAG, "AccessibilityService destroyed — Android will restart it")
+        Log.w(TAG, "AccessibilityService destroyed — closing persistent shell")
+        synchronized(shellLock) {
+            try {
+                shellStdin?.writeBytes("exit\n")
+                shellStdin?.flush()
+            } catch (_: IOException) {
+            }
+            persistentShell?.destroyForcibly()
+            persistentShell = null
+            shellStdin = null
+        }
         scriptExecutor.shutdown()
         try {
             if (!scriptExecutor.awaitTermination(3, TimeUnit.SECONDS)) {

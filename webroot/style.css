@@ -1560,6 +1560,20 @@ input:focus-visible + .modern-slider {
 }
 #qglEditor::placeholder { color: var(--text-4); }
 
+/* ── App Profile Editor (Per-App / Global QGL Profile modal) ── */
+#appProfileEditor {
+    flex: 1; background: rgba(0,0,0,0.65); border: none;
+    padding: var(--s-4) var(--s-5); color: var(--accent-2);
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 13px; line-height: 1.90; resize: none; outline: none; caret-color: var(--accent);
+    min-height: 0; overflow-y: auto;
+}
+#appProfileEditor::placeholder { color: var(--text-4); }
+
+.app-profile-fields .input-glass {
+    width: 100%; margin-top: var(--s-1);
+}
+
 /* ── KEYBOARD FIX: When soft keyboard appears, modal scrolls to keep textarea visible ── */
 .modal-container.keyboard-visible {
     max-height: 60vh !important;
@@ -1572,7 +1586,18 @@ input:focus-visible + .modern-slider {
     overflow-y: auto !important;
 }
 .modal-container.keyboard-visible .editor-container {
-    min-height: 200px;
+    min-height: 0;
+}
+.modal-container.keyboard-visible #appProfileEditor,
+.modal-container.keyboard-visible #qglEditor {
+    min-height: 120px;
+}
+.modal-container.keyboard-visible .editor-container {
+    min-height: 0;
+}
+.modal-container.keyboard-visible #appProfileEditor,
+.modal-container.keyboard-visible #qglEditor {
+    min-height: 120px;
 }
 /* Ensure textarea is always visible when focused on mobile */
 @media (max-height: 500px) {

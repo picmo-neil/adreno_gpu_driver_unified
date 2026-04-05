@@ -360,7 +360,28 @@
                     </label>
                 </div>
             </div>
-            
+
+            <div class="divider elegant-divider"></div>
+
+            <div class="setting-item ripple-target hover-lift" id="qglPerappRow" style="display:none;">
+                <div class="text-col">
+                    <div class="setting-header">
+                        <div class="setting-title" data-i18n="qglPerappName">Per-App QGL</div>
+                        <div class="info-tooltip" data-tooltip="QGLTrigger APK monitors app switches and applies per-app profiles from qgl_profiles.json">
+                            <span class="tooltip-icon">ℹ️</span>
+                        </div>
+                    </div>
+                    <div class="setting-desc" data-i18n="qglPerappDesc">APK applies matching QGL profile at each app launch (like LYB). Off = single static config at boot.</div>
+                </div>
+                <label class="switch modern-switch" aria-label="Per-App QGL Toggle">
+                    <input type="checkbox" id="QGL_PERAPP" role="switch">
+                    <span class="slider modern-slider">
+                        <span class="slider-text off">OFF</span>
+                        <span class="slider-text on">ON</span>
+                    </span>
+                </label>
+            </div>
+
             <div class="divider elegant-divider"></div>
 
             <div class="setting-item ripple-target hover-lift">
@@ -914,13 +935,26 @@
 </div>
 
 <!-- Per-App QGL Profile Editor Modal -->
+<!--
+  ARCHITECTURE NOTE: This modal edits per-profile QGL keys stored in
+  qgl_profiles.json — delivered at RUNTIME by the QGL Trigger APK
+  (AccessibilityService) when each app launches. These keys are NOT
+  written to /data/vendor/gpu/qgl_config.txt at boot.
+
+  Contrast with the Normal QGL Editor (qglModal) which edits the raw
+  qgl_config.txt written to /data/vendor/gpu/ at boot time via
+  boot-completed.sh — applies globally to all Vulkan/GL apps at driver
+  init time, before any app-specific profiles are active.
+
+  These are complementary but independent mechanisms.
+-->
 <div id="appProfileModal" class="modal" role="dialog" aria-labelledby="appProfileModalTitle" aria-modal="true" style="display:none;">
     <div class="modal-overlay" id="appProfileOverlay"></div>
     <div class="modal-container modal-animate">
         <div class="modal-header">
             <div>
                 <h2 id="appProfileModalTitle" data-i18n="appProfileModalTitle">App QGL Profile</h2>
-                <p class="modal-subtitle" id="appProfileSubtitle" data-i18n="appProfileModalSub">Configure QGL for this app</p>
+                <p class="modal-subtitle" id="appProfileSubtitle" data-i18n="appProfileModalSub">Runtime QGL keys applied per app-launch by the QGL Trigger APK — NOT the boot-time config.</p>
             </div>
             <div class="modal-actions">
                 <button class="btn-text ripple-effect" id="btnSaveAppProfile">
@@ -931,14 +965,25 @@
             </div>
         </div>
         <div class="editor-container">
-            <div style="padding: 16px;">
-                <div class="setting-item" style="margin-bottom: 16px;">
+            <div class="editor-toolbar">
+                <button class="editor-btn ripple-effect" id="btnFormatAppProfile" title="Format Keys">
+                    <span>📐</span> <span data-i18n="qglFormat">Format</span>
+                </button>
+                <button class="editor-btn ripple-effect" id="btnResetAppProfile" title="Reset to Saved">
+                    <span>♻️</span> <span data-i18n="qglReset">Reset</span>
+                </button>
+                <div class="editor-info">
+                    <span class="line-count"><span data-i18n="qglLines">Lines:</span> <span id="appProfileLineCount">0</span></span>
+                </div>
+            </div>
+            <div class="app-profile-fields" style="padding: var(--s-4) var(--s-5); flex-shrink: 0;">
+                <div class="setting-item" style="margin-bottom: var(--s-3);">
                     <div class="text-col">
                         <div class="setting-title" data-i18n="packageName">Package Name</div>
                     </div>
                     <input type="text" id="appProfilePkg" class="input-glass premium-input" placeholder="com.example.app" readonly style="opacity: 0.7;">
                 </div>
-                <div class="setting-item" style="margin-bottom: 16px;">
+                <div class="setting-item" style="margin-bottom: 0;">
                     <div class="text-col">
                         <div class="setting-title" data-i18n="enableProfile">Enable Profile</div>
                     </div>
@@ -950,9 +995,9 @@
                         </span>
                     </label>
                 </div>
-                <div class="setting-item" style="margin-bottom: 8px;">
-                    <div class="setting-title" data-i18n="qglKeysLabel">QGL Keys (one per line, format: key=value)</div>
-                </div>
+            </div>
+            <div class="setting-item" style="padding: 0 var(--s-5) var(--s-2); flex-shrink: 0;">
+                <div class="setting-title" data-i18n="qglKeysLabel">QGL Keys (one per line, format: key=value)</div>
             </div>
             <textarea id="appProfileEditor"
                       spellcheck="false"
@@ -961,8 +1006,7 @@
                       aria-label="App QGL Profile Editor"
                       autocomplete="off"
                       autocorrect="off"
-                      autocapitalize="off"
-                      style="flex: 1; min-height: 200px;"></textarea>
+                      autocapitalize="off"></textarea>
         </div>
     </div>
 </div>

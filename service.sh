@@ -36,6 +36,7 @@ safe_read() {
 VERBOSE="n"
 ARM64_OPT="n"
 QGL="n"
+QGL_PERAPP="n"
 PLT="n"
 RENDER_MODE="normal"
 FORCE_SKIAVKTHREADED_BACKEND="n"
@@ -57,6 +58,7 @@ fi
 [ "$VERBOSE" != "y" ]   && VERBOSE="n"
 [ "$ARM64_OPT" != "y" ] && ARM64_OPT="n"
 [ "$QGL" != "y" ]       && QGL="n"
+[ "$QGL_PERAPP" != "y" ] && QGL_PERAPP="n"
 [ "$PLT" != "y" ]       && PLT="n"
 [ -z "$RENDER_MODE" ]   && RENDER_MODE="normal"
 # BUG7 FIX: Normalize RENDER_MODE to lowercase so case statements match
@@ -206,7 +208,13 @@ else
   log_service "No config file found, using defaults"
 fi
 
-log_service "Configuration: ARM64_OPT=$ARM64_OPT, QGL=$QGL, PLT=$PLT, RENDER_MODE=$RENDER_MODE, FORCE_SKIAVKTHREADED_BACKEND=$FORCE_SKIAVKTHREADED_BACKEND"
+log_service "Configuration: ARM64_OPT=$ARM64_OPT, QGL=$QGL, QGL_PERAPP=$QGL_PERAPP, PLT=$PLT, RENDER_MODE=$RENDER_MODE, FORCE_SKIAVKTHREADED_BACKEND=$FORCE_SKIAVKTHREADED_BACKEND"
+
+# ── skiavk + QGL_PERAPP=n warning ────────────────────────────────────────
+if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "n" ] && [ "$RENDER_MODE" = "skiavk" ]; then
+  log_service "[WARN] skiavk + QGL_PERAPP=n: apps launched before boot_completed+3s receive NO QGL config at Vulkan init time"
+  log_service "[WARN] This directly degrades benchmark scores. Set QGL_PERAPP=y in adreno_config.txt to fix."
+fi
 
 # Unconditional kmsg checkpoint: confirms service.sh reached this point and
 # is visible in `dmesg | grep ADRENO-SVC` regardless of VERBOSE=n.
@@ -287,21 +295,45 @@ log_service "System services stabilization delay complete (2s; was 5s)"
 # Cache clearing is handled EXCLUSIVELY by post-fs-data.sh (before Zygote starts).
 # service.sh does NOT touch QGL — no chmod, no chcon, no cp, no cache clearing.
 
-# ── Install QGL Trigger APK if bundled ───────────────────────────────────
+# ── Install QGL Trigger APK if bundled and QGL_PERAPP=y ──────────────────
 # The APK provides the AccessibilityService that detects app switches and
 # applies per-app QGL configs via apply_qgl.sh <package_name>.
+# Only installs when QGL=y AND QGL_PERAPP=y. Uses pm install -g to grant
+# all declared permissions (including BIND_ACCESSIBILITY_SERVICE).
+# Root/superuser is granted by the user via their root manager UI on first use.
 # This matches LYB Kernel Manager's exact behavior.
-if [ -f "$MODDIR/QGLTrigger.apk" ]; then
+if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ] && [ -f "$MODDIR/QGLTrigger.apk" ]; then
   _qgl_apk_pkg="io.github.adreno.qgl.trigger"
-  _qgl_apk_installed=$(pm list packages "$_qgl_apk_pkg" 2>/dev/null)
-  if [ -n "$_qgl_apk_installed" ]; then
-    log_service "[OK] QGL Trigger APK already installed"
+  _qgl_apk_version=$(dumpsys package "$_qgl_apk_pkg" 2>/dev/null | grep versionName | head -1 | sed 's/.*versionName=//;s/ .*//' | tr -d ' \r\n')
+  if [ -n "$_qgl_apk_version" ]; then
+    log_service "[QGL] QGLTrigger APK already installed (v$_qgl_apk_version)"
   else
-    pm install "$MODDIR/QGLTrigger.apk" 2>/dev/null && \
-      log_service "[OK] QGL Trigger APK installed — enable in Settings > Accessibility" || \
-      log_service "[!] QGL Trigger APK install failed (user can install manually)"
+    log_service "[QGL] Installing QGLTrigger APK..."
+    pm install -g --user 0 "$MODDIR/QGLTrigger.apk" 2>/dev/null && \
+      log_service "[QGL] QGLTrigger APK installed — enabling accessibility service..." || \
+      log_service "[QGL] QGLTrigger APK install FAILED — user must install manually"
   fi
-  unset _qgl_apk_pkg _qgl_apk_installed
+
+  # Enable Accessibility Service from root shell
+  _acc_comp="io.github.adreno.qgl.trigger/.QGLAccessibilityService"
+  _current=$(settings get secure enabled_accessibility_services 2>/dev/null || true)
+  case "$_current" in
+    *"$_acc_comp"*)
+      log_service "[QGL] Accessibility service already enabled"
+      ;;
+    ""|null)
+      settings put secure enabled_accessibility_services "$_acc_comp" 2>/dev/null && \
+        log_service "[QGL] Accessibility service enabled (first service)" || \
+        log_service "[QGL] Could not enable accessibility — user must enable manually in Settings > Accessibility"
+      ;;
+    *)
+      settings put secure enabled_accessibility_services "${_current}:${_acc_comp}" 2>/dev/null && \
+        log_service "[QGL] Accessibility service appended to enabled list" || \
+        log_service "[QGL] Could not append accessibility service"
+      ;;
+  esac
+  settings put secure accessibility_enabled 1 2>/dev/null || true
+  unset _qgl_apk_pkg _qgl_apk_version _acc_comp _current
 fi
 
 # CRITICAL FIX: Reset the boot_attempts counter HERE — immediately after

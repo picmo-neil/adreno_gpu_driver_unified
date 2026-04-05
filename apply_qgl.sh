@@ -50,6 +50,7 @@ esac
 
 # ── Check QGL enabled in adreno_config.txt ───────────────────────────────
 _qgl_enabled="n"
+_qgl_perapp="n"
 for _cfg in \
     "/sdcard/Adreno_Driver/Config/adreno_config.txt" \
     "/data/local/tmp/adreno_config.txt" \
@@ -58,6 +59,7 @@ for _cfg in \
   while IFS='= ' read -r _k _v; do
     case "$_k" in
       QGL) case "$_v" in [Yy]*|1) _qgl_enabled="y" ;; esac ;;
+      QGL_PERAPP) case "$_v" in [Yy]*|1) _qgl_perapp="y" ;; esac ;;
     esac
   done < "$_cfg"
   [ "$_qgl_enabled" = "y" ] && break
@@ -69,8 +71,9 @@ if [ "$_qgl_enabled" != "y" ]; then
   exit 0
 fi
 
-# ── Ensure QGL directory exists ──────────────────────────────────────────
+# ── Ensure QGL directory exists with correct SELinux context FIRST ───────
 mkdir -p "$QGL_DIR" 2>/dev/null
+chcon u:object_r:same_process_hal_file:s0 "$QGL_DIR" 2>/dev/null || true
 
 # ══════════════════════════════════════════════════════════════════════════
 # BOOT MODE: Use bundled qgl_config.txt (legacy compatibility)
@@ -94,13 +97,11 @@ if [ "$MODE" = "boot" ]; then
   _qtmp="${QGL_TARGET}.tmp.$$"
   _qtmp2="${QGL_TARGET}.tmp2.$$"
   if cp -f "$_qsrc" "$_qtmp" 2>/dev/null && mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
-    chcon u:object_r:same_process_hal_file:s0 "$QGL_DIR" 2>/dev/null || true
     chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
     log_qgl "[BOOT] QGL applied successfully ($(wc -l < "$_qsrc" 2>/dev/null || echo '?') lines)"
   else
     rm -f "$_qtmp" 2>/dev/null || true
     if cp -f "$_qsrc" "$_qtmp2" 2>/dev/null && mv -f "$_qtmp2" "$QGL_TARGET" 2>/dev/null; then
-      chcon u:object_r:same_process_hal_file:s0 "$QGL_DIR" 2>/dev/null || true
       chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
       log_qgl "[BOOT] QGL applied (fallback atomic path)"
     else
@@ -282,7 +283,6 @@ fi
 
 # ── Atomic commit: mv is atomic on ext4/f2fs ─────────────────────────────
 if mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
-  chcon u:object_r:same_process_hal_file:s0 "$QGL_DIR" 2>/dev/null || true
   chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
   _line_count=$(wc -l < "$QGL_TARGET" 2>/dev/null || echo '?')
   log_qgl "[APP] QGL applied for $PKG ($_line_count keys)"

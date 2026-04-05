@@ -48,7 +48,7 @@ command_exists() {
 #
 # BUG-11 NOTE: This function must stay in sync with load_config() in common.sh.
 # Any new config key added to load_config() must be added here too.
-# Keys currently handled: VERBOSE, ARM64_OPT, QGL, PLT, RENDER_MODE,
+# Keys currently handled: VERBOSE, ARM64_OPT, QGL, QGL_PERAPP, PLT, RENDER_MODE,
 # FORCE_SKIAVKTHREADED_BACKEND.
 parse_config() {
   local cfg="$1" _k _v
@@ -60,7 +60,7 @@ parse_config() {
     case "$_k" in '#'*|'') continue ;; esac
     _v="${_v%"$_CR"}"
     case "$_k" in
-      VERBOSE|ARM64_OPT|QGL|PLT|FORCE_SKIAVKTHREADED_BACKEND)
+      VERBOSE|ARM64_OPT|QGL|QGL_PERAPP|PLT|FORCE_SKIAVKTHREADED_BACKEND)
         case "$_v" in
           [Yy]|[Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee]) _v='y' ;;
           *) _v='n' ;;
@@ -82,6 +82,7 @@ parse_config() {
       VERBOSE)     VERBOSE="$_v" ;;
       ARM64_OPT)   ARM64_OPT="$_v" ;;
       QGL)         QGL="$_v" ;;
+      QGL_PERAPP)  QGL_PERAPP="$_v" ;;
       PLT)         PLT="$_v" ;;
       RENDER_MODE) RENDER_MODE="$_v" ;;
       FORCE_SKIAVKTHREADED_BACKEND) FORCE_SKIAVKTHREADED_BACKEND="$_v" ;;
@@ -97,6 +98,7 @@ parse_config() {
 VERBOSE="n"
 ARM64_OPT="n"
 QGL="n"
+QGL_PERAPP="n"
 PLT="n"
 RENDER_MODE="normal"
 FORCE_SKIAVKTHREADED_BACKEND="n"
@@ -983,10 +985,23 @@ RESTORED_CONFIGS="$CONFIG_FOUND"
 ui_print "Configuration:"
 ui_print "  - PLT: $PLT"
 ui_print "  - QGL: $QGL"
+if [ "$QGL" = "y" ]; then
+  ui_print "  - QGL Per-App: $QGL_PERAPP"
+fi
 if [ "$IS_ARM64" = "true" ]; then
   ui_print "  - ARM64 Opt: $ARM64_OPT"
 fi
 ui_print "  - Render: $RENDER_MODE"
+
+# ── skiavk + QGL_PERAPP=n warning ────────────────────────────────────────
+if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "n" ] && [ "$RENDER_MODE" = "skiavk" ]; then
+  ui_print " "
+  ui_print "⚠️  WARNING: skiavk + QGL_PERAPP=n"
+  ui_print "   Apps launched before boot_completed+3s receive NO QGL config"
+  ui_print "   at Vulkan init time. This directly degrades benchmark scores."
+  ui_print "   Set QGL_PERAPP=y in adreno_config.txt to fix."
+  ui_print " "
+fi
 
 log_only "Final config: PLT=$PLT, QGL=$QGL, ARM64_OPT=$ARM64_OPT, VERBOSE=$VERBOSE, RENDER_MODE=$RENDER_MODE"
 
