@@ -46,7 +46,9 @@ case "$1" in
     ;;
 esac
 
-[ -z "$PKG" ] && exit 1
+[ -z "$PKG" ] && { log_qgl "[FATAL] No package argument — exiting"; exit 1; }
+
+log_qgl "[START] apply_qgl.sh MODE=$MODE PKG=$PKG"
 
 # ── Check QGL enabled in adreno_config.txt ───────────────────────────────
 _qgl_enabled="n"
@@ -56,6 +58,7 @@ for _cfg in \
     "/data/local/tmp/adreno_config.txt" \
     "$MODDIR/adreno_config.txt"; do
   [ -f "$_cfg" ] || continue
+  log_qgl "[CFG] Checking $_cfg"
   while IFS='= ' read -r _k _v; do
     case "$_k" in
       QGL) case "$_v" in [Yy]*|1) _qgl_enabled="y" ;; esac ;;
@@ -66,51 +69,105 @@ for _cfg in \
 done
 unset _cfg _k _v
 
+log_qgl "[CFG] QGL=$_qgl_enabled QGL_PERAPP=$_qgl_perapp"
+
 if [ "$_qgl_enabled" != "y" ]; then
   log_qgl "[SKIP] QGL disabled in adreno_config.txt"
   exit 0
 fi
 
 # ── Ensure QGL directory exists with correct SELinux context FIRST ───────
-mkdir -p "$QGL_DIR" 2>/dev/null
+log_qgl "[DIR] Ensuring $QGL_DIR exists with correct context"
+if ! mkdir -p "$QGL_DIR" 2>/dev/null; then
+  log_qgl "[FATAL] mkdir -p $QGL_DIR failed"
+  exit 1
+fi
 chcon u:object_r:same_process_hal_file:s0 "$QGL_DIR" 2>/dev/null || true
+log_qgl "[DIR] $QGL_DIR ready"
 
 # ══════════════════════════════════════════════════════════════════════════
-# BOOT MODE: Use bundled qgl_config.txt (legacy compatibility)
-# ══════════════════════════════════════════════════════════════════════════
+# BOOT MODE: Use qgl_profiles.json first (unified config), fallback to legacy qgl_config.txt
+# This ensures the single source of truth (qgl_profiles.json) is used when available
 if [ "$MODE" = "boot" ]; then
   _qsrc=""
+  _qtmp="${QGL_TARGET}.tmp.$$"
+  _qtmp2="${QGL_TARGET}.tmp2.$$"
+  
+  # Priority 1: qgl_profiles.json (unified single source)
+  if [ -f "$PROFILE_PATH" ]; then
+    _json=$(cat "$PROFILE_PATH" 2>/dev/null)
+    if [ -n "$_json" ]; then
+      _keys=$(_extract_section_keys "global" "$_json" 2>/dev/null)
+      if [ -n "$_keys" ]; then
+        log_qgl "[BOOT] Using qgl_profiles.json as unified config source"
+        
+        # Build qgl_config.txt content from JSON keys
+        _has_magic="n"
+        _first_line=$(printf '%s\n' "$_keys" | head -1)
+        case "$_first_line" in "0x0=0x8675309") _has_magic="y" ;; esac
+        
+        {
+          if [ "$_has_magic" != "y" ]; then
+            printf '0x0=0x8675309\n'
+          fi
+          printf '%s\n' "$_keys"
+        } > "$_qtmp" 2>/dev/null
+        
+        if [ -s "$_qtmp" ]; then
+          if mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
+            chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
+            _lines=$(wc -l < "$QGL_TARGET" 2>/dev/null || echo '?')
+            log_qgl "[BOOT] QGL applied from qgl_profiles.json ($_lines lines)"
+            exit 0
+          fi
+          rm -f "$_qtmp" 2>/dev/null || true
+        fi
+      fi
+    fi
+  fi
+  
+  # Priority 2: Legacy qgl_config.txt sources
   for _q in \
       "/sdcard/Adreno_Driver/Config/qgl_config.txt" \
+      "/sdcard/Adreno_Driver/qgl_config.txt" \
       "/data/local/tmp/qgl_config.txt" \
       "$MODDIR/qgl_config.txt"; do
     [ -f "$_q" ] && { _qsrc="$_q"; break; }
   done
 
   if [ -z "$_qsrc" ]; then
-    log_qgl "[BOOT] ERROR: No qgl_config.txt source found in any of:"
-    log_qgl "[BOOT]   /sdcard/Adreno_Driver/Config/qgl_config.txt"
-    log_qgl "[BOOT]   /data/local/tmp/qgl_config.txt"
-    log_qgl "[BOOT]   $MODDIR/qgl_config.txt"
-    log_qgl "[BOOT] QGL will NOT be applied. Ensure qgl_config.txt exists in one of these paths."
+    log_qgl "[BOOT] ERROR: No QGL config source found"
+    log_qgl "[BOOT] Tried: qgl_profiles.json, then qgl_config.txt sources"
     exit 1
   fi
 
   log_qgl "[BOOT] Applying QGL from $_qsrc"
-
-  _qtmp="${QGL_TARGET}.tmp.$$"
-  _qtmp2="${QGL_TARGET}.tmp2.$$"
-  if cp -f "$_qsrc" "$_qtmp" 2>/dev/null && mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
+  
+  # Step 1: cp source to temp
+  log_qgl "[BOOT] cp $_qsrc → $_qtmp"
+  if ! cp -f "$_qsrc" "$_qtmp" 2>/dev/null; then
+    log_qgl "[BOOT] FAILED: cp to temp file"
+    rm -f "$_qtmp" 2>/dev/null || true
+    exit 1
+  fi
+  
+  # Step 2: atomic mv temp to target
+  log_qgl "[BOOT] mv $_qtmp → $QGL_TARGET"
+  if mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
+    # Step 3: set SELinux context
     chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
-    log_qgl "[BOOT] QGL applied successfully ($(wc -l < "$_qsrc" 2>/dev/null || echo '?') lines)"
+    _lines=$(wc -l < "$QGL_TARGET" 2>/dev/null || echo '?')
+    log_qgl "[BOOT] QGL applied successfully ($_lines lines)"
   else
     rm -f "$_qtmp" 2>/dev/null || true
+    # Fallback atomic path
+    log_qgl "[BOOT] Primary mv failed, trying fallback path"
     if cp -f "$_qsrc" "$_qtmp2" 2>/dev/null && mv -f "$_qtmp2" "$QGL_TARGET" 2>/dev/null; then
       chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
       log_qgl "[BOOT] QGL applied (fallback atomic path)"
     else
       rm -f "$_qtmp2" 2>/dev/null || true
-      log_qgl "[BOOT] FAILED to apply QGL"
+      log_qgl "[BOOT] FAILED to apply QGL (both mv paths failed)"
       exit 1
     fi
   fi
@@ -252,13 +309,15 @@ if [ -z "$_json" ]; then
   log_qgl "[APP] Failed to read qgl_profiles.json"
   exit 0
 fi
+log_qgl "[APP] qgl_profiles.json loaded ($(printf '%s' "$_json" | wc -c | tr -d ' ') bytes)"
 
 # ── Extract keys for this package ────────────────────────────────────────
 _keys=$(extract_keys "$PKG" "$_json")
 if [ -z "$_keys" ]; then
-  log_qgl "[APP] No profile for $PKG (no app-specific or global keys)"
+  log_qgl "[APP] No profile for $PKG (no app-specific or global keys found)"
   exit 0
 fi
+log_qgl "[APP] Found keys for $PKG"
 
 # ── Build qgl_config.txt content ─────────────────────────────────────────
 # The first line MUST be 0x0=0x8675309 (magic header for SDM845+ hash support).
@@ -286,6 +345,7 @@ if [ ! -s "$_qtmp" ]; then
 fi
 
 # ── Atomic commit: mv is atomic on ext4/f2fs ─────────────────────────────
+log_qgl "[APP] Committing $_qtmp → $QGL_TARGET"
 if mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
   chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
   _line_count=$(wc -l < "$QGL_TARGET" 2>/dev/null || echo '?')

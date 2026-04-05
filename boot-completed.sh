@@ -45,19 +45,25 @@ for _cfg in \
   [ "$QGL" = "y" ] && break
 done
 unset _cfg _k _v
-[ "$QGL" = "y" ] || exit 0
+log_only "[BOOT] Config loaded: QGL=$QGL QGL_PERAPP=$QGL_PERAPP"
+[ "$QGL" = "y" ] || { log_only "[BOOT] QGL=n in config — skipping QGL activation"; exit 0; }
 
 # ══════════════════════════════════════════════════════════════════════════
 # STEP 1: WAIT FOR BOOT COMPLETED
 # ══════════════════════════════════════════════════════════════════════════
 
+log_only "[BOOT] Waiting for sys.boot_completed=1..."
 _boot_wait=0
 while [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ] && [ $_boot_wait -lt 120 ]; do
   sleep 1
   _boot_wait=$((_boot_wait + 1))
 done
 unset _boot_wait
-[ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ] && exit 0
+if [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ]; then
+  log_only "[BOOT] sys.boot_completed never reached — exiting"
+  exit 0
+fi
+log_only "[BOOT] sys.boot_completed=1 confirmed"
 
 # ══════════════════════════════════════════════════════════════════════════
 # STEP 2: SAFETY MARGIN (Vulkan pipeline settle)
@@ -67,6 +73,7 @@ unset _boot_wait
 # BOOT_COMPLETED. The BroadcastReceiver system provides enough delay
 # (typically 1-2s from broadcast to onReceive execution).
 sleep 3
+log_only "[BOOT] 3s stabilization delay complete"
 
 # ══════════════════════════════════════════════════════════════════════════
 # STEP 3: WRITE BOOT BASELINE FLAG (for APK coordination)
@@ -78,87 +85,9 @@ sleep 3
 # window between boot_completed and the global baseline write.
 _QGL_BASELINE_FLAG="/data/vendor/gpu/.qgl_boot_baseline_ready"
 mkdir -p /data/vendor/gpu 2>/dev/null
+chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu 2>/dev/null || true
 touch "$_QGL_BASELINE_FLAG" 2>/dev/null || true
-
-# ══════════════════════════════════════════════════════════════════════════
-# STEP 3b: BOOT 2+ FAST EXIT (ADR-005)
-# ══════════════════════════════════════════════════════════════════════════
-# If qgl_config.txt already exists with correct same_process_hal_file context,
-# the global baseline is already in place from a previous boot. LYB never
-# rewrites on boot 2+ — skip entirely to avoid races with the APK.
-_QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
-if [ -f "$_QGL_TARGET" ]; then
-  _qgl_ctx=$(ls -Z "$_QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "")
-  case "$_qgl_ctx" in
-    *same_process_hal_file*)
-      log_only "[OK] QGL boot 2+ fast exit: file exists with correct context ($_qgl_ctx)"
-      unset _qgl_ctx _QGL_TARGET _QGL_BASELINE_FLAG
-      exit 0
-      ;;
-  esac
-  log_only "[BOOT] QGL file exists but wrong context ($_qgl_ctx) — will re-apply"
-fi
-unset _qgl_ctx _QGL_TARGET
-
-# ══════════════════════════════════════════════════════════════════════════
-# STEP 3b: BOOT 2+ FAST EXIT (ADR-005)
-# ══════════════════════════════════════════════════════════════════════════
-# If qgl_config.txt already exists with correct same_process_hal_file context,
-# the global baseline is already in place from a previous boot. LYB never
-# rewrites on boot 2+ — skip entirely to avoid races with the APK.
-_QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
-if [ -f "$_QGL_TARGET" ]; then
-  _qgl_ctx=$(ls -Z "$_QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "")
-  case "$_qgl_ctx" in
-    *same_process_hal_file*)
-      log_only "[OK] QGL boot 2+ fast exit: file exists with correct context ($_qgl_ctx)"
-      unset _qgl_ctx _QGL_TARGET _QGL_BASELINE_FLAG
-      exit 0
-      ;;
-  esac
-  log_only "[BOOT] QGL file exists but wrong context ($_qgl_ctx) — will re-apply"
-fi
-unset _qgl_ctx _QGL_TARGET
-
-# ══════════════════════════════════════════════════════════════════════════
-# STEP 3b: BOOT 2+ FAST EXIT (ADR-005)
-# ══════════════════════════════════════════════════════════════════════════
-# If qgl_config.txt already exists with correct same_process_hal_file context,
-# the global baseline is already in place from a previous boot. LYB never
-# rewrites on boot 2+ — skip entirely to avoid races with the APK.
-_QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
-if [ -f "$_QGL_TARGET" ]; then
-  _qgl_ctx=$(ls -Z "$_QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "")
-  case "$_qgl_ctx" in
-    *same_process_hal_file*)
-      log_only "[OK] QGL boot 2+ fast exit: file exists with correct context ($_qgl_ctx)"
-      unset _qgl_ctx _QGL_TARGET _QGL_BASELINE_FLAG
-      exit 0
-      ;;
-  esac
-  log_only "[BOOT] QGL file exists but wrong context ($_qgl_ctx) — will re-apply"
-fi
-unset _qgl_ctx _QGL_TARGET
-
-# ══════════════════════════════════════════════════════════════════════════
-# STEP 3b: BOOT 2+ FAST EXIT (ADR-005)
-# ══════════════════════════════════════════════════════════════════════════
-# If qgl_config.txt already exists with correct same_process_hal_file context,
-# the global baseline is already in place from a previous boot. LYB never
-# rewrites on boot 2+ — skip entirely to avoid races with the APK.
-_QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
-if [ -f "$_QGL_TARGET" ]; then
-  _qgl_ctx=$(ls -Z "$_QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "")
-  case "$_qgl_ctx" in
-    *same_process_hal_file*)
-      log_only "[OK] QGL boot 2+ fast exit: file exists with correct context ($_qgl_ctx)"
-      unset _qgl_ctx _QGL_TARGET _QGL_BASELINE_FLAG
-      exit 0
-      ;;
-  esac
-  log_only "[BOOT] QGL file exists but wrong context ($_qgl_ctx) — will re-apply"
-fi
-unset _qgl_ctx _QGL_TARGET
+log_only "[BOOT] Baseline flag written at $_QGL_BASELINE_FLAG"
 
 # ══════════════════════════════════════════════════════════════════════════
 # STEP 3b: BOOT 2+ FAST EXIT (ADR-005)
@@ -188,7 +117,7 @@ if [ "$QGL_PERAPP" = "y" ]; then
   # ── Per-app mode: apply global profile as baseline ─────────────────────
   # The QGL Trigger APK (AccessibilityService) handles per-app overrides
   # as apps are opened. This boot apply provides the global baseline.
-  log_only "[BOOT] Applying QGL global baseline (per-app mode)"
+  log_only "[BOOT] Applying QGL global baseline (per-app mode) → exec apply_qgl.sh --boot"
   exec "$MODDIR/apply_qgl.sh" --boot
 else
   # ── Static mode: old code retry+verify install from bundled qgl_config.txt
@@ -208,6 +137,8 @@ else
     log_only "[!] QGL static: qgl_config.txt not found in module — skipping"
     exit 0
   fi
+
+  log_only "[BOOT] Static mode: installing qgl_config.txt from module"
 
   QGL_INSTALL_SUCCESS="false"
   MAX_RETRIES=5

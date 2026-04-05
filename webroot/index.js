@@ -2973,7 +2973,32 @@ async function saveQGL() {
         await exec(`printf '%s' '${safeContent}' > "${userSave}"`);
         logToTerminal(`User QGL saved to Adreno folder: ${userSave}`, 'success');
 
-        // --- 3) Copy user's saved file into the module (overwrite module config) ---
+        // --- 3) DUAL-WRITE: Also sync to qgl_profiles.json for per-app QGL ---
+        // Parse content into keys array and update global profile
+        const qglKeys = content.split('\n').filter(l => {
+            const t = l.trim();
+            return t && !t.startsWith('#');
+        });
+        try {
+            const profileRes = await exec(`cat "${QGL_PROFILES_PATH}" 2>/dev/null`);
+            let profiles = { global: { keys: [], enabled: true }, apps: {} };
+            if (profileRes && profileRes.stdout && profileRes.stdout.trim()) {
+                profiles = JSON.parse(profileRes.stdout.trim());
+            }
+            profiles.global = profiles.global || { keys: [], enabled: true };
+            profiles.apps = profiles.apps || {};
+            profiles.global.keys = qglKeys;
+            profiles.global.enabled = true;
+            const json = JSON.stringify(profiles, null, 2);
+            const jsonSafe = json.replace(/'/g, "'\\''");
+            const tmpPath = QGL_PROFILES_PATH + '.tmp';
+            await exec(`printf '%s' '${jsonSafe}' > "${tmpPath}" && mv -f "${tmpPath}" "${QGL_PROFILES_PATH}"`);
+            logToTerminal(`📱 Synced to qgl_profiles.json (global profile)`, 'success');
+        } catch (e) {
+            logToTerminal(`⚠️ Failed to sync to qgl_profiles.json: ${e.message || e}`, 'warn');
+        }
+
+        // --- 4) Copy user's saved file into the module (overwrite module config) ---
         // Prefer cp; if cp can't write, fallback to printf into module path
         await exec(`cp "${userSave}" "${moduleFile}" 2>/dev/null || printf '%s' '${safeContent}' > "${moduleFile}"`);
         logToTerminal(`Module QGL updated: ${moduleFile}`, 'success');
@@ -5062,18 +5087,27 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // ── KEYBOARD FIX: When soft keyboard appears on mobile, adjust modal to keep textarea visible ──
-    // Android WebView fires visualViewport resize when keyboard appears/disappears
+    // Uses visualViewport API + initial height baseline for reliable detection across Android WebView versions
+    // Works with interactive-widget=resizes-content meta tag
     if (window.visualViewport) {
-        const keyboardHandler = () => {
-            const viewportHeight = window.visualViewport.height;
-            const windowHeight = window.innerHeight;
-            const keyboardVisible = viewportHeight < windowHeight * 0.85;
+        const _kb = { initialHeight: window.visualViewport.height, activeModal: null };
+
+        const _applyKeyboardFix = () => {
+            const viewportH = window.visualViewport.height;
+            const keyboardVisible = viewportH < _kb.initialHeight * 0.88;
 
             document.querySelectorAll('.modal-container').forEach(container => {
                 if (keyboardVisible) {
                     container.classList.add('keyboard-visible');
-                    container.style.maxHeight = `${viewportHeight * 0.85}px`;
-                    container.style.height = `${viewportHeight * 0.85}px`;
+                    container.style.maxHeight = `${viewportH * 0.92}px`;
+                    container.style.height = `${viewportH * 0.92}px`;
+                    // Scroll focused textarea into view
+                    const focused = document.activeElement;
+                    if (focused && (focused.id === 'qglEditor' || focused.id === 'appProfileEditor')) {
+                        setTimeout(() => {
+                            focused.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        }, 150);
+                    }
                 } else {
                     container.classList.remove('keyboard-visible');
                     container.style.maxHeight = '';
@@ -5081,8 +5115,25 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             });
         };
-        window.visualViewport.addEventListener('resize', keyboardHandler);
-        window.visualViewport.addEventListener('scroll', keyboardHandler);
+
+        // Track which modal is open to scroll its textarea
+        const _origOpenQGL = window.openQGLEditor;
+        const _origOpenApp = window.openAppProfileEditor;
+
+        window.visualViewport.addEventListener('resize', _applyKeyboardFix);
+        window.visualViewport.addEventListener('scroll', _applyKeyboardFix);
+
+        // Update baseline on modal open
+        const _observeModals = () => {
+            const observer = new MutationObserver(() => {
+                _kb.initialHeight = window.visualViewport.height;
+            });
+            ['qglModal', 'appProfileModal'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) observer.observe(el, { attributes: true, attributeFilter: ['style'] });
+            });
+        };
+        _observeModals();
     }
 
     // ── App Profile Editor: scroll textarea into view on focus (extra safety for WebView IME) ──
@@ -5091,6 +5142,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         _appEditor.addEventListener('focus', () => {
             setTimeout(() => {
                 _appEditor.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }, 300);
+        });
+    }
+
+    // ── QGL Editor: scroll textarea into view on focus (same fix) ──
+    const _qglEditor = document.getElementById('qglEditor');
+    if (_qglEditor) {
+        _qglEditor.addEventListener('focus', () => {
+            setTimeout(() => {
+                _qglEditor.scrollIntoView({ behavior: 'smooth', block: 'center' });
             }, 300);
         });
     }
