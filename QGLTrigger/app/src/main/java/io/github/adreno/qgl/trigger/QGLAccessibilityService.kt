@@ -88,6 +88,23 @@ class QGLAccessibilityService : AccessibilityService() {
     }
 
     private fun handleAppSwitch(packageName: String) {
+        // BUG ALPHA FIX: Wait for boot baseline flag before writing per-app configs.
+        // boot-completed.sh writes /data/vendor/gpu/.qgl_boot_baseline_ready BEFORE
+        // applying the global QGL baseline. If this flag is absent, the global baseline
+        // hasn't been written yet — writing a per-app config now would create a mixed
+        // KGSL context race condition → cascade crash → bootloop.
+        // Poll with 500ms intervals for up to 15s (covers slow boot scenarios).
+        val baselineFlag = java.io.File("/data/vendor/gpu/.qgl_boot_baseline_ready")
+        var waited = 0L
+        while (!baselineFlag.exists() && waited < 15000L) {
+            Thread.sleep(500)
+            waited += 500
+        }
+        if (!baselineFlag.exists()) {
+            Log.w(TAG, "Boot baseline flag not found after ${waited}ms — skipping QGL for $packageName to prevent mixed-context crash")
+            return
+        }
+
         val keys = ProfileManager.getKeysForPackage(packageName)
         if (keys.isNullOrEmpty()) {
             Log.d(TAG, "No QGL profile configured for $packageName, skipping")

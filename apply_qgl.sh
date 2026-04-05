@@ -88,8 +88,12 @@ if [ "$MODE" = "boot" ]; then
   done
 
   if [ -z "$_qsrc" ]; then
-    log_qgl "[BOOT] No qgl_config.txt source found, skipping"
-    exit 0
+    log_qgl "[BOOT] ERROR: No qgl_config.txt source found in any of:"
+    log_qgl "[BOOT]   /sdcard/Adreno_Driver/Config/qgl_config.txt"
+    log_qgl "[BOOT]   /data/local/tmp/qgl_config.txt"
+    log_qgl "[BOOT]   $MODDIR/qgl_config.txt"
+    log_qgl "[BOOT] QGL will NOT be applied. Ensure qgl_config.txt exists in one of these paths."
+    exit 1
   fi
 
   log_qgl "[BOOT] Applying QGL from $_qsrc"

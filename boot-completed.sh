@@ -12,8 +12,13 @@
 #   apply_qgl.sh <package_name> which writes the app-specific profile.
 #   This matches LYB Kernel Manager's exact behavior.
 #
-# TIMING: Wait for boot_completed + launcher PID + 3s safety → apply global.
-#   The APK then overrides with per-app configs as apps are opened.
+# TIMING FIX (BUG ALPHA): LYB's onboot BroadcastReceiver applies QGL
+#   IMMEDIATELY at BOOT_COMPLETED — NO launcher PID wait. The "wait for
+#   launcher" step created a 3-60s window where qgl_config.txt was absent,
+#   allowing the APK to write a per-app config BEFORE the global baseline.
+#   This caused mixed KGSL contexts → cascade crash → bootloop.
+#   Fix: removed launcher PID polling. Apply at boot_completed+3s (matches
+#   LYB's implicit BroadcastReceiver timing).
 
 MODDIR="${0%/*}"
 
@@ -55,29 +60,125 @@ unset _boot_wait
 [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ] && exit 0
 
 # ══════════════════════════════════════════════════════════════════════════
-# STEP 2: WAIT FOR LAUNCHER PID
+# STEP 2: SAFETY MARGIN (Vulkan pipeline settle)
 # ══════════════════════════════════════════════════════════════════════════
-
-# Common launcher packages across OEM ROMs
-_LAUNCHER_PKGS="com.android.launcher3 com.google.android.apps.nexuslauncher com.sec.android.app.launcher com.miui.home com.oppo.launcher com.vivo.launcher com.huawei.android.launcher com.lge.launcher3 com.htc.launcher com.oneplus.launcher com.samsung.android.app.homelauncher"
-
-_lp=0
-while [ $_lp -lt 60 ]; do
-  for _pkg in $_LAUNCHER_PKGS; do
-    if pidof "$_pkg" >/dev/null 2>&1; then
-      _lp=999
-      break 2
-    fi
-  done
-  sleep 1
-  _lp=$((_lp + 1))
-done
-unset _lp _pkg _LAUNCHER_PKGS
-
-# ══════════════════════════════════════════════════════════════════════════
-# STEP 3: SAFETY MARGIN (Vulkan pipeline settle)
-# ══════════════════════════════════════════════════════════════════════════
+# 3s stabilization — matches LYB BroadcastReceiver implicit timing.
+# LYB does NOT wait for launcher PID; it applies QGL immediately at
+# BOOT_COMPLETED. The BroadcastReceiver system provides enough delay
+# (typically 1-2s from broadcast to onReceive execution).
 sleep 3
+
+# ══════════════════════════════════════════════════════════════════════════
+# STEP 3: WRITE BOOT BASELINE FLAG (for APK coordination)
+# ══════════════════════════════════════════════════════════════════════════
+# BUG ALPHA FIX: Write a flag file BEFORE applying QGL. The APK checks this
+# flag before writing per-app configs. If absent, the APK skips the write
+# and lets boot-completed.sh establish the global baseline first.
+# This prevents the race where the APK writes a per-app config during the
+# window between boot_completed and the global baseline write.
+_QGL_BASELINE_FLAG="/data/vendor/gpu/.qgl_boot_baseline_ready"
+mkdir -p /data/vendor/gpu 2>/dev/null
+touch "$_QGL_BASELINE_FLAG" 2>/dev/null || true
+
+# ══════════════════════════════════════════════════════════════════════════
+# STEP 3b: BOOT 2+ FAST EXIT (ADR-005)
+# ══════════════════════════════════════════════════════════════════════════
+# If qgl_config.txt already exists with correct same_process_hal_file context,
+# the global baseline is already in place from a previous boot. LYB never
+# rewrites on boot 2+ — skip entirely to avoid races with the APK.
+_QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
+if [ -f "$_QGL_TARGET" ]; then
+  _qgl_ctx=$(ls -Z "$_QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "")
+  case "$_qgl_ctx" in
+    *same_process_hal_file*)
+      log_only "[OK] QGL boot 2+ fast exit: file exists with correct context ($_qgl_ctx)"
+      unset _qgl_ctx _QGL_TARGET _QGL_BASELINE_FLAG
+      exit 0
+      ;;
+  esac
+  log_only "[BOOT] QGL file exists but wrong context ($_qgl_ctx) — will re-apply"
+fi
+unset _qgl_ctx _QGL_TARGET
+
+# ══════════════════════════════════════════════════════════════════════════
+# STEP 3b: BOOT 2+ FAST EXIT (ADR-005)
+# ══════════════════════════════════════════════════════════════════════════
+# If qgl_config.txt already exists with correct same_process_hal_file context,
+# the global baseline is already in place from a previous boot. LYB never
+# rewrites on boot 2+ — skip entirely to avoid races with the APK.
+_QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
+if [ -f "$_QGL_TARGET" ]; then
+  _qgl_ctx=$(ls -Z "$_QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "")
+  case "$_qgl_ctx" in
+    *same_process_hal_file*)
+      log_only "[OK] QGL boot 2+ fast exit: file exists with correct context ($_qgl_ctx)"
+      unset _qgl_ctx _QGL_TARGET _QGL_BASELINE_FLAG
+      exit 0
+      ;;
+  esac
+  log_only "[BOOT] QGL file exists but wrong context ($_qgl_ctx) — will re-apply"
+fi
+unset _qgl_ctx _QGL_TARGET
+
+# ══════════════════════════════════════════════════════════════════════════
+# STEP 3b: BOOT 2+ FAST EXIT (ADR-005)
+# ══════════════════════════════════════════════════════════════════════════
+# If qgl_config.txt already exists with correct same_process_hal_file context,
+# the global baseline is already in place from a previous boot. LYB never
+# rewrites on boot 2+ — skip entirely to avoid races with the APK.
+_QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
+if [ -f "$_QGL_TARGET" ]; then
+  _qgl_ctx=$(ls -Z "$_QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "")
+  case "$_qgl_ctx" in
+    *same_process_hal_file*)
+      log_only "[OK] QGL boot 2+ fast exit: file exists with correct context ($_qgl_ctx)"
+      unset _qgl_ctx _QGL_TARGET _QGL_BASELINE_FLAG
+      exit 0
+      ;;
+  esac
+  log_only "[BOOT] QGL file exists but wrong context ($_qgl_ctx) — will re-apply"
+fi
+unset _qgl_ctx _QGL_TARGET
+
+# ══════════════════════════════════════════════════════════════════════════
+# STEP 3b: BOOT 2+ FAST EXIT (ADR-005)
+# ══════════════════════════════════════════════════════════════════════════
+# If qgl_config.txt already exists with correct same_process_hal_file context,
+# the global baseline is already in place from a previous boot. LYB never
+# rewrites on boot 2+ — skip entirely to avoid races with the APK.
+_QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
+if [ -f "$_QGL_TARGET" ]; then
+  _qgl_ctx=$(ls -Z "$_QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "")
+  case "$_qgl_ctx" in
+    *same_process_hal_file*)
+      log_only "[OK] QGL boot 2+ fast exit: file exists with correct context ($_qgl_ctx)"
+      unset _qgl_ctx _QGL_TARGET _QGL_BASELINE_FLAG
+      exit 0
+      ;;
+  esac
+  log_only "[BOOT] QGL file exists but wrong context ($_qgl_ctx) — will re-apply"
+fi
+unset _qgl_ctx _QGL_TARGET
+
+# ══════════════════════════════════════════════════════════════════════════
+# STEP 3b: BOOT 2+ FAST EXIT (ADR-005)
+# ══════════════════════════════════════════════════════════════════════════
+# If qgl_config.txt already exists with correct same_process_hal_file context,
+# the global baseline is already in place from a previous boot. LYB never
+# rewrites on boot 2+ — skip entirely to avoid races with the APK.
+_QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
+if [ -f "$_QGL_TARGET" ]; then
+  _qgl_ctx=$(ls -Z "$_QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "")
+  case "$_qgl_ctx" in
+    *same_process_hal_file*)
+      log_only "[OK] QGL boot 2+ fast exit: file exists with correct context ($_qgl_ctx)"
+      unset _qgl_ctx _QGL_TARGET _QGL_BASELINE_FLAG
+      exit 0
+      ;;
+  esac
+  log_only "[BOOT] QGL file exists but wrong context ($_qgl_ctx) — will re-apply"
+fi
+unset _qgl_ctx _QGL_TARGET
 
 # ══════════════════════════════════════════════════════════════════════════
 # STEP 4: APPLY QGL (branch on QGL_PERAPP)
@@ -87,6 +188,7 @@ if [ "$QGL_PERAPP" = "y" ]; then
   # ── Per-app mode: apply global profile as baseline ─────────────────────
   # The QGL Trigger APK (AccessibilityService) handles per-app overrides
   # as apps are opened. This boot apply provides the global baseline.
+  log_only "[BOOT] Applying QGL global baseline (per-app mode)"
   exec "$MODDIR/apply_qgl.sh" --boot
 else
   # ── Static mode: old code retry+verify install from bundled qgl_config.txt

@@ -715,9 +715,42 @@ log_boot "VERBOSE: $VERBOSE (read fresh from config each boot — no sync needed
 #   Phase 2 (boot-completed.sh): Re-apply QGL after launcher Vulkan init
 if [ "$QGL" = "y" ]; then
   if [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
-    rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null && \
-      log_boot "[OK] QGL: removed stale config (will be re-applied at boot-completed)" || \
-      log_boot "[!] QGL: failed to remove stale config (may cause bootloop)"
+    # CRITICAL FIX: Retry rm up to 3 times with 0.5s delays.
+    # The rm can fail if the file is held open by a dying process from the
+    # previous boot, or if SELinux context hasn't propagated yet.
+    # If rm fails, the stale QGL config causes VkDevice corruption →
+    # SystemUI crash → black screen → watchdog reboot (bootloop).
+    _qgl_rm_ok=false
+    _qgl_rm_try=0
+    while [ $_qgl_rm_try -lt 3 ] && [ "$_qgl_rm_ok" = "false" ]; do
+      if rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null; then
+        # Verify the file is actually gone
+        if [ ! -f "/data/vendor/gpu/qgl_config.txt" ]; then
+          _qgl_rm_ok=true
+        fi
+      fi
+      if [ "$_qgl_rm_ok" = "false" ]; then
+        _qgl_rm_try=$((_qgl_rm_try + 1))
+        if [ $_qgl_rm_try -lt 3 ]; then
+          sleep 0.5
+        fi
+      fi
+    done
+    if [ "$_qgl_rm_ok" = "true" ]; then
+      log_boot "[OK] QGL: removed stale config (will be re-applied at boot-completed)"
+    else
+      log_boot "[!] CRITICAL: QGL rm failed after 3 attempts — stale config will cause bootloop!"
+      log_boot "[!] Attempting forced removal via unlink..."
+      # Last resort: try to truncate + unlink
+      : > "/data/vendor/gpu/qgl_config.txt" 2>/dev/null || true
+      rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null || true
+      if [ ! -f "/data/vendor/gpu/qgl_config.txt" ]; then
+        log_boot "[OK] QGL: forced removal succeeded"
+      else
+        log_boot "[!] FATAL: QGL config still present — bootloop is likely imminent"
+      fi
+    fi
+    unset _qgl_rm_ok _qgl_rm_try
   else
     log_boot "QGL: no stale config found (clean boot)"
   fi
@@ -725,9 +758,27 @@ if [ "$QGL" = "y" ]; then
 else
   # QGL=n: ensure no QGL file exists
   if [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
-    rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null && \
-      log_boot "[OK] QGL: disabled → removed existing config" || \
-      log_boot "[!] QGL: disabled → failed to remove config"
+    _qgl_rm_ok=false
+    _qgl_rm_try=0
+    while [ $_qgl_rm_try -lt 3 ] && [ "$_qgl_rm_ok" = "false" ]; do
+      if rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null; then
+        if [ ! -f "/data/vendor/gpu/qgl_config.txt" ]; then
+          _qgl_rm_ok=true
+        fi
+      fi
+      if [ "$_qgl_rm_ok" = "false" ]; then
+        _qgl_rm_try=$((_qgl_rm_try + 1))
+        if [ $_qgl_rm_try -lt 3 ]; then
+          sleep 0.5
+        fi
+      fi
+    done
+    if [ "$_qgl_rm_ok" = "true" ]; then
+      log_boot "[OK] QGL: disabled → removed existing config"
+    else
+      log_boot "[!] QGL: disabled → failed to remove config after 3 attempts"
+    fi
+    unset _qgl_rm_ok _qgl_rm_try
   fi
   rm -f "/data/vendor/gpu/.adreno_qgl_owner" 2>/dev/null || true
 fi
