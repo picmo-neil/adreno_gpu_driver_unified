@@ -241,18 +241,12 @@ PLT="n"
 RENDER_MODE="normal"
 FORCE_SKIAVKTHREADED_BACKEND="n"
 
-CONFIG_FILE="/sdcard/Adreno_Driver/Config/adreno_config.txt"
-# /data/local/tmp path: readable at post-fs-data (unlike /sdcard which is FUSE-mounted
-# later). service.sh can mirror the SD config here for next-boot pickup.
-DATA_CONFIG="/data/local/tmp/adreno_config.txt"
-ALT_CONFIG="$MODDIR/adreno_config.txt"
-
 # Priority: /data/local/tmp (always accessible at post-fs-data) →
 #           /sdcard (may not be mounted yet, usually skipped here) →
 #           $MODDIR (module bundled defaults)
-if ! load_config "$DATA_CONFIG"; then
-  if ! load_config "$CONFIG_FILE"; then
-    load_config "$ALT_CONFIG" || true
+if ! load_config "$ADRENO_CONFIG_DATA"; then
+  if ! load_config "$ADRENO_CONFIG_SD"; then
+    load_config "$ADRENO_CONFIG_MOD" || true
   fi
 fi
 
@@ -1483,16 +1477,15 @@ log_boot "Selected render mode: $RENDER_MODE"
 SYSTEM_PROP_FILE="$MODDIR/system.prop"
 
 # Always strip old render + SF + stability props first, then write the correct set
-_RENDER_PROPS='debug\.hwui\.renderer=|debug\.renderengine\.backend=|debug\.sf\.latch_unsignaled=|debug\.sf\.auto_latch_unsignaled=|debug\.sf\.disable_backpressure=|debug\.sf\.enable_hwc_vds=|debug\.sf\.enable_transaction_tracing=|debug\.sf\.client_composition_cache_size=|ro\.sf\.disable_triple_buffer=|ro\.surface_flinger\.use_context_priority=|ro\.surface_flinger\.max_frame_buffer_acquired_buffers=|ro\.surface_flinger\.force_hwc_copy_for_virtual_displays=|debug\.hwui\.use_buffer_age=|debug\.hwui\.use_partial_updates=|debug\.hwui\.use_gpu_pixel_buffers=|renderthread\.skia\.reduceopstasksplitting=|debug\.hwui\.skip_empty_damage=|debug\.hwui\.webview_overlays_enabled=|debug\.hwui\.skia_tracing_enabled=|debug\.hwui\.skia_use_perfetto_track_events=|debug\.hwui\.capture_skp_enabled=|debug\.hwui\.skia_atrace_enabled=|debug\.hwui\.use_hint_manager=|debug\.hwui\.target_cpu_time_percent=|com\.qc\.hardware=|persist\.sys\.force_sw_gles=|debug\.vulkan\.layers=|debug\.vulkan\.dev\.layers=|ro\.hwui\.use_vulkan=|debug\.hwui\.recycled_buffer_cache_size=|debug\.hwui\.overdraw=|debug\.hwui\.profile=|debug\.hwui\.show_dirty_regions=|graphics\.gpu\.profiler\.support=|ro\.egl\.blobcache\.multifile=|ro\.egl\.blobcache\.multifile_limit=|debug\.hwui\.fps_divisor=|debug\.hwui\.render_thread=|debug\.hwui\.render_dirty_regions=|debug\.hwui\.show_layers_updates=|debug\.hwui\.filter_test_overhead=|debug\.hwui\.nv_profiling=|debug\.hwui\.clip_surfaceviews=|debug\.hwui\.8bit_hdr_headroom=|debug\.hwui\.skip_eglmanager_telemetry=|debug\.hwui\.initialize_gl_always=|debug\.hwui\.level=|debug\.hwui\.disable_vsync=|hwui\.disable_vsync=|debug\.vulkan\.layers\.enable=|persist\.device_config\.runtime_native\.usap_pool_enabled=|debug\.gralloc\.enable_fb_ubwc=|vendor\.gralloc\.enable_fb_ubwc=|persist\.sys\.perf\.topAppRenderThreadBoost\.enable=|persist\.sys\.gpu\.working_thread_priority=|debug\.sf\.early_phase_offset_ns=|debug\.sf\.early_app_phase_offset_ns=|debug\.sf\.early_gl_phase_offset_ns=|debug\.sf\.early_gl_app_phase_offset_ns=|debug\.hwui\.use_skia_graphite=|ro\.surface_flinger\.supports_background_blur=|persist\.sys\.sf\.disable_blurs=|ro\.sf\.blurs_are_expensive=|ro\.config\.vulkan\.enabled=|persist\.vendor\.vulkan\.enable=|persist\.graphics\.vulkan\.disable_pre_rotation=|debug\.sf\.use_phase_offsets_as_durations=|debug\.hwui\.texture_cache_size=|debug\.hwui\.layer_cache_size=|debug\.hwui\.path_cache_size=|debug\.hwui\.force_dark=|ro\.hwui\.text_small_cache_width=|ro\.hwui\.text_small_cache_height=|ro\.hwui\.text_large_cache_width=|ro\.hwui\.text_large_cache_height=|ro\.hwui\.drop_shadow_cache_size=|ro\.hwui\.gradient_cache_size=|persist\.sys\.sf\.native_mode=|debug\.sf\.treat_170m_as_sRGB=|debug\.egl\.debug_proc=|debug\.sf\.hw=|persist\.sys\.ui\.hw=|debug\.egl\.hw=|debug\.egl\.profiler=|debug\.egl\.trace=|persist\.graphics\.vulkan\.validation_enable=|debug\.hwui\.drawing_enabled='
 if [ -f "$SYSTEM_PROP_FILE" ]; then
-  awk -v pat="$_RENDER_PROPS" '{ if ($0 ~ pat) next; print }' \
+  awk -v pat="$RENDER_PROPS_REGEX" '{ if ($0 ~ pat) next; print }' \
     "$SYSTEM_PROP_FILE" > "${SYSTEM_PROP_FILE}.tmp" 2>/dev/null && \
     mv "${SYSTEM_PROP_FILE}.tmp" "$SYSTEM_PROP_FILE" 2>/dev/null || \
     rm -f "${SYSTEM_PROP_FILE}.tmp" 2>/dev/null
 else
   touch "$SYSTEM_PROP_FILE" 2>/dev/null || true
 fi
-unset _RENDER_PROPS
+
 
 # ── FIRST BOOT SAFETY CHECK: REMOVED (Q7 decision) ───────────────────────────
 # First-boot deferral removed. Renderer is now always applied on first boot.
@@ -1650,6 +1643,10 @@ if [ "$QGL" = "y" ]; then
   done
   unset _cs_qsrc
 fi
+
+# Rotate QGL logs if they exist
+rotate_log "$QGL_TRIGGER_LOG"
+rotate_log "$QGL_DIAG_LOG"
 
 # Build reason string — empty means no clear needed.
 _CS_REASON=""

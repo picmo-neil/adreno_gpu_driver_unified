@@ -19,16 +19,81 @@
 #   This caused mixed KGSL contexts → cascade crash → bootloop.
 #   Fix: removed launcher PID polling. Apply at boot_completed+3s (matches
 #   LYB's implicit BroadcastReceiver timing).
+#
+# LYB COMPAT: Uses touch + chcon (same_process_hal_file), NO chmod, NO chown.
+#   Matches LYB r1.m6493b() exact sequence (see apply_qgl.sh header).
+#
+# LOGGING: All operations logged to /sdcard/Adreno_Driver/qgl_trigger.log
+#   and /sdcard/Adreno_Driver/qgl_diagnostics.log for diagnostics.
 
 MODDIR="${0%/*}"
+LOG_FILE="/sdcard/Adreno_Driver/qgl_trigger.log"
+DIAG_FILE="/sdcard/Adreno_Driver/qgl_diagnostics.log"
+QGL_DIR="/data/vendor/gpu"
+QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
+BASELINE_FLAG="/data/vendor/gpu/.qgl_boot_baseline_ready"
 
-# ── Logging helper ───────────────────────────────────────────────────────
-log_only() {
-  printf '[%s] %s\n' "$(date +%H:%M:%S)" "$1" >> /dev/kmsg 2>/dev/null || true
-  printf '[%s] %s\n' "$(date +%H:%M:%S)" "$1" >> /sdcard/Adreno_Driver/qgl_trigger.log 2>/dev/null || true
+# ══════════════════════════════════════════════════════════════════════════
+# LOGGING HELPERS (same as apply_qgl.sh)
+# ══════════════════════════════════════════════════════════════════════════
+
+_qgl_log() {
+  _ts=$(date +%H:%M:%S 2>/dev/null || echo '?')
+  printf '[%s] %s\n' "$_ts" "$1" >> "$LOG_FILE" 2>/dev/null || true
+  printf '[%s] %s\n' "$_ts" "$1" > /dev/kmsg 2>/dev/null || true
 }
 
-# ── Load config ──────────────────────────────────────────────────────────
+_qgl_diag() {
+  _ts=$(date +%Y-%m-%d_%H:%M:%S 2>/dev/null || echo '?')
+  printf '[%s] [BOOT-DIAG] %s\n' "$_ts" "$1" >> "$DIAG_FILE" 2>/dev/null || true
+}
+
+_qgl_state_capture() {
+  _label="$1"
+  _qgl_diag "=== STATE CAPTURE: $_label ==="
+  
+  if [ -f "$QGL_TARGET" ]; then
+    _qgl_diag "QGL_FILE: EXISTS"
+    _ls=$(ls -laZ "$QGL_TARGET" 2>/dev/null || echo 'ls_failed')
+    _qgl_diag "QGL_FILE_LS: $_ls"
+    _ctx=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo 'unknown')
+    _qgl_diag "QGL_FILE_CONTEXT: $_ctx"
+    _size=$(wc -c < "$QGL_TARGET" 2>/dev/null || echo '0')
+    _qgl_diag "QGL_FILE_SIZE: $_size bytes"
+  else
+    _qgl_diag "QGL_FILE: ABSENT"
+  fi
+  
+  if [ -d "$QGL_DIR" ]; then
+    _qgl_diag "QGL_DIR: EXISTS"
+    _dirctx=$(ls -dZ "$QGL_DIR" 2>/dev/null | awk '{print $1}' || echo 'unknown')
+    _qgl_diag "QGL_DIR_CONTEXT: $_dirctx"
+  else
+    _qgl_diag "QGL_DIR: ABSENT"
+  fi
+  
+  _enforce=$(getenforce 2>/dev/null || echo 'unknown')
+  _qgl_diag "SELINUX_MODE: $_enforce"
+  
+  _avc=$(dmesg 2>/dev/null | grep -E 'avc.*qgl|avc.*same_process_hal' | tail -5 | tr '\n' '|' || echo 'none')
+  _qgl_diag "QGL_AVC_DENIALS: $_avc"
+  
+  _qgl_diag "=== END STATE CAPTURE ==="
+}
+
+# Ensure log directory exists
+mkdir -p /sdcard/Adreno_Driver 2>/dev/null || true
+
+_qgl_diag "========================================"
+_qgl_diag "BOOT-COMPLETED.SH STARTED"
+_qgl_diag "PID: $$"
+_qgl_diag "TIME: $(date 2>/dev/null || echo 'unknown')"
+_qgl_diag "========================================"
+
+# ══════════════════════════════════════════════════════════════════════════
+# LOAD CONFIG
+# ══════════════════════════════════════════════════════════════════════════
+
 QGL="n"
 QGL_PERAPP="n"
 for _cfg in \
@@ -45,166 +110,252 @@ for _cfg in \
   [ "$QGL" = "y" ] && break
 done
 unset _cfg _k _v
-log_only "[BOOT] Config loaded: QGL=$QGL QGL_PERAPP=$QGL_PERAPP"
-[ "$QGL" = "y" ] || { log_only "[BOOT] QGL=n in config — skipping QGL activation"; exit 0; }
+
+_qgl_log "[BOOT] Config loaded: QGL=$QGL QGL_PERAPP=$QGL_PERAPP"
+_qgl_diag "CONFIG_QGL: $QGL"
+_qgl_diag "CONFIG_QGL_PERAPP: $QGL_PERAPP"
+
+if [ "$QGL" != "y" ]; then
+  _qgl_log "[BOOT] QGL=n in config — skipping QGL activation"
+  _qgl_diag "EXIT: QGL disabled in config"
+  exit 0
+fi
+
+# Capture initial state
+_qgl_state_capture "BEFORE_BOOT_QGL"
 
 # ══════════════════════════════════════════════════════════════════════════
 # STEP 1: WAIT FOR BOOT COMPLETED
 # ══════════════════════════════════════════════════════════════════════════
 
-log_only "[BOOT] Waiting for sys.boot_completed=1..."
+_qgl_log "[BOOT] Waiting for sys.boot_completed=1..."
+_qgl_diag "WAIT: For sys.boot_completed=1"
+
 _boot_wait=0
 while [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ] && [ $_boot_wait -lt 120 ]; do
   sleep 1
   _boot_wait=$((_boot_wait + 1))
 done
 unset _boot_wait
+
 if [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ]; then
-  log_only "[BOOT] sys.boot_completed never reached — exiting"
+  _qgl_log "[BOOT] sys.boot_completed never reached — exiting"
+  _qgl_diag "EXIT: boot_completed never reached"
   exit 0
 fi
-log_only "[BOOT] sys.boot_completed=1 confirmed"
+
+_qgl_log "[BOOT] sys.boot_completed=1 confirmed"
+_qgl_diag "WAIT: OK - boot_completed=1"
 
 # ══════════════════════════════════════════════════════════════════════════
 # STEP 2: SAFETY MARGIN (Vulkan pipeline settle)
 # ══════════════════════════════════════════════════════════════════════════
-# 3s stabilization — matches LYB BroadcastReceiver implicit timing.
-# LYB does NOT wait for launcher PID; it applies QGL immediately at
-# BOOT_COMPLETED. The BroadcastReceiver system provides enough delay
-# (typically 1-2s from broadcast to onReceive execution).
+
+_qgl_log "[BOOT] 3s stabilization delay (matches LYB BroadcastReceiver timing)"
+_qgl_diag "STABILIZE: 3s delay started"
 sleep 3
-log_only "[BOOT] 3s stabilization delay complete"
+_qgl_log "[BOOT] 3s stabilization delay complete"
+_qgl_diag "STABILIZE: 3s delay complete"
 
 # ══════════════════════════════════════════════════════════════════════════
-# STEP 3: WRITE BOOT BASELINE FLAG (for APK coordination)
+# STEP 3: PREPARE DIRECTORY AND WRITE BASELINE FLAG
 # ══════════════════════════════════════════════════════════════════════════
-# BUG ALPHA FIX: Write a flag file BEFORE applying QGL. The APK checks this
-# flag before writing per-app configs. If absent, the APK skips the write
-# and lets boot-completed.sh establish the global baseline first.
-# This prevents the race where the APK writes a per-app config during the
-# window between boot_completed and the global baseline write.
-_QGL_BASELINE_FLAG="/data/vendor/gpu/.qgl_boot_baseline_ready"
-mkdir -p /data/vendor/gpu 2>/dev/null
-chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu 2>/dev/null || true
-touch "$_QGL_BASELINE_FLAG" 2>/dev/null || true
-log_only "[BOOT] Baseline flag written at $_QGL_BASELINE_FLAG"
+
+_qgl_log "[BOOT] Preparing $QGL_DIR"
+_qgl_diag "DIR_OP: Creating $QGL_DIR"
+
+mkdir -p "$QGL_DIR" 2>/dev/null || true
+_qgl_diag "DIR_OP: mkdir done"
+
+# Set SELinux context on directory (LYB: chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu)
+_qgl_log "[BOOT] Setting context on directory"
+_qgl_diag "SELINUX_OP: chcon u:object_r:same_process_hal_file:s0 $QGL_DIR"
+
+_chcon_out=$(chcon u:object_r:same_process_hal_file:s0 "$QGL_DIR" 2>&1)
+_chcon_rc=$?
+
+if [ $_chcon_rc -eq 0 ]; then
+  _qgl_log "[BOOT] Directory context set"
+  _qgl_diag "SELINUX_OP: chcon dir succeeded"
+else
+  _qgl_log "[WARN] chcon directory failed: $_chcon_out"
+  _qgl_diag "SELINUX_OP: chcon dir failed: $_chcon_out"
+fi
+
+# Verify directory context
+_dir_ctx=$(ls -dZ "$QGL_DIR" 2>/dev/null | awk '{print $1}' || echo 'unknown')
+_qgl_log "[BOOT] Directory context: $_dir_ctx"
+_qgl_diag "SELINUX_VERIFY: Dir context: $_dir_ctx"
+
+case "$_dir_ctx" in
+  *same_process_hal_file*)
+    _qgl_log "[BOOT] Directory context VERIFIED"
+    _qgl_diag "SELINUX_VERIFY: OK - Dir context correct"
+    ;;
+  *)
+    _qgl_log "[WARN] Directory context NOT same_process_hal_file"
+    _qgl_diag "SELINUX_VERIFY: WARN - Dir context unexpected: $_dir_ctx"
+    ;;
+esac
+
+# Write baseline flag BEFORE applying QGL (signals APK to wait)
+_qgl_log "[BOOT] Writing baseline flag at $BASELINE_FLAG"
+_qgl_diag "FLAG_OP: Creating baseline flag"
+
+touch "$BASELINE_FLAG" 2>/dev/null || true
+
+if [ -f "$BASELINE_FLAG" ]; then
+  _qgl_log "[BOOT] Baseline flag written"
+  _qgl_diag "FLAG_OP: OK - Baseline flag created"
+else
+  _qgl_log "[WARN] Failed to write baseline flag"
+  _qgl_diag "FLAG_OP: WARN - Baseline flag creation failed"
+fi
 
 # ══════════════════════════════════════════════════════════════════════════
 # STEP 3b: BOOT 2+ FAST EXIT (ADR-005)
 # ══════════════════════════════════════════════════════════════════════════
-# If qgl_config.txt already exists with correct same_process_hal_file context,
-# the global baseline is already in place from a previous boot. LYB never
-# rewrites on boot 2+ — skip entirely to avoid races with the APK.
-_QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
-if [ -f "$_QGL_TARGET" ]; then
-  _qgl_ctx=$(ls -Z "$_QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "")
+
+if [ -f "$QGL_TARGET" ]; then
+  _qgl_ctx=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "")
   case "$_qgl_ctx" in
     *same_process_hal_file*)
-      log_only "[OK] QGL boot 2+ fast exit: file exists with correct context ($_qgl_ctx)"
-      unset _qgl_ctx _QGL_TARGET _QGL_BASELINE_FLAG
+      _qgl_log "[OK] QGL boot 2+ fast exit: file exists with correct context ($_qgl_ctx)"
+      _qgl_diag "FAST_EXIT: OK - File already exists with correct context"
+      _qgl_state_capture "BOOT2_FAST_EXIT"
+      unset _qgl_ctx
       exit 0
       ;;
   esac
-  log_only "[BOOT] QGL file exists but wrong context ($_qgl_ctx) — will re-apply"
+  _qgl_log "[BOOT] QGL file exists but wrong context ($_qgl_ctx) — will re-apply"
+  _qgl_diag "FAST_EXIT: NO - File exists but wrong context: $_qgl_ctx"
+  unset _qgl_ctx
 fi
-unset _qgl_ctx _QGL_TARGET
 
 # ══════════════════════════════════════════════════════════════════════════
 # STEP 4: APPLY QGL (branch on QGL_PERAPP)
 # ══════════════════════════════════════════════════════════════════════════
 
 if [ "$QGL_PERAPP" = "y" ]; then
-  # ── Per-app mode: apply global profile as baseline ─────────────────────
-  # The QGL Trigger APK (AccessibilityService) handles per-app overrides
-  # as apps are opened. This boot apply provides the global baseline.
-  log_only "[BOOT] Applying QGL global baseline (per-app mode) → exec apply_qgl.sh --boot"
+  # ── Per-app mode: delegate to apply_qgl.sh for global baseline ──────────
+  _qgl_log "[BOOT] Per-app mode: applying global baseline → exec apply_qgl.sh --boot"
+  _qgl_diag "MODE: PER-APP - Delegating to apply_qgl.sh --boot"
+  _qgl_state_capture "BEFORE_EXEC_APPLY_QGL"
   exec "$MODDIR/apply_qgl.sh" --boot
 else
-  # ── Static mode: old code retry+verify install from bundled qgl_config.txt
-  # No APK. No per-app switching. One config for everything.
-
-  QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
+  # ── Static mode: apply bundled qgl_config.txt ────────────────────────────
+  # LYB COMPAT: touch + chcon, NO chmod, NO chown (ADR-008)
+  
+  _qgl_log "[BOOT] Static mode: installing from bundled qgl_config.txt"
+  _qgl_diag "MODE: STATIC - Installing bundled config"
+  
   QGL_OWNER_MARKER="/data/vendor/gpu/.adreno_qgl_owner"
-
-  # Safety check: if qgl_config.txt exists but has no owner marker,
-  # it belongs to another manager (e.g. LYB). Respect that and skip.
+  
+  # Safety check: if qgl_config.txt exists but no owner marker, skip
   if [ -f "$QGL_TARGET" ] && [ ! -f "$QGL_OWNER_MARKER" ]; then
-    log_only "[!] QGL static: qgl_config.txt exists but NOT owned by this module — skipping"
+    _qgl_log "[!] QGL static: qgl_config.txt exists but NOT owned by this module — skipping"
+    _qgl_diag "STATIC: SKIP - File exists but not owned by module"
     exit 0
   fi
-
+  
   if [ ! -f "$MODDIR/qgl_config.txt" ]; then
-    log_only "[!] QGL static: qgl_config.txt not found in module — skipping"
+    _qgl_log "[!] QGL static: qgl_config.txt not found in module"
+    _qgl_diag "STATIC: SKIP - No bundled qgl_config.txt"
     exit 0
   fi
-
-  log_only "[BOOT] Static mode: installing qgl_config.txt from module"
-
+  
+  _qgl_log "[BOOT] Proceeding with static install"
+  _qgl_diag "STATIC: Starting install"
+  
   QGL_INSTALL_SUCCESS="false"
   MAX_RETRIES=5
   RETRY_COUNT=0
   QGL_TEMP=""
-
+  
   while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$QGL_INSTALL_SUCCESS" = "false" ]; do
     sleep 1
-
-    # Verify /data is writable
+    _qgl_diag "STATIC_RETRY: Attempt $((RETRY_COUNT + 1))/$MAX_RETRIES"
+    
     if touch /data/.adreno_test 2>/dev/null && rm /data/.adreno_test 2>/dev/null; then
-      # Create directory with correct SELinux context FIRST
-      if mkdir -p /data/vendor/gpu 2>/dev/null; then
-        chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu 2>/dev/null || \
-          chcon u:object_r:vendor_data_file:s0 /data/vendor/gpu 2>/dev/null || true
-
-        QGL_TEMP="/data/vendor/gpu/.qgl_config.txt.tmp.$$"
-
-        # Write to temp file
-        if cp -f "$MODDIR/qgl_config.txt" "$QGL_TEMP" 2>/dev/null; then
-          if [ -f "$QGL_TEMP" ] && [ -s "$QGL_TEMP" ]; then
-            chmod 0644 "$QGL_TEMP" 2>/dev/null
-            chown 0:1000 "$QGL_TEMP" 2>/dev/null
-
-            # Atomic rename
-            if mv -f "$QGL_TEMP" "$QGL_TARGET" 2>/dev/null; then
-              if [ -f "$QGL_TARGET" ] && [ -s "$QGL_TARGET" ]; then
-                chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || \
-                  chcon u:object_r:vendor_data_file:s0 "$QGL_TARGET" 2>/dev/null || true
-
-                EXPECTED_SIZE=$(stat -c%s "$MODDIR/qgl_config.txt" 2>/dev/null || echo 0)
-                ACTUAL_SIZE=$(stat -c%s "$QGL_TARGET" 2>/dev/null || echo 0)
-
-                if [ "$EXPECTED_SIZE" -eq "$ACTUAL_SIZE" ] 2>/dev/null && [ "$ACTUAL_SIZE" -gt 0 ] 2>/dev/null; then
-                  QGL_INSTALL_SUCCESS="true"
-                  touch "$QGL_OWNER_MARKER" 2>/dev/null || true
-                  log_only "[OK] QGL static install verified: $ACTUAL_SIZE bytes"
-                  break
-                else
-                  log_only "[!] QGL static size mismatch: expected=$EXPECTED_SIZE actual=$ACTUAL_SIZE"
-                fi
+      # Directory already created above with correct context
+      
+      QGL_TEMP="${QGL_TARGET}.tmp.$$"
+      _qgl_diag "FILE_OP: Temp file: $QGL_TEMP"
+      
+      # Copy to temp (atomic write pattern)
+      if cp -f "$MODDIR/qgl_config.txt" "$QGL_TEMP" 2>/dev/null; then
+        if [ -f "$QGL_TEMP" ] && [ -s "$QGL_TEMP" ]; then
+          _qgl_diag "FILE_OP: cp succeeded, size: $(wc -c < "$QGL_TEMP" 2>/dev/null || echo '?') bytes"
+          
+          # LYB COMPAT: touch (NO chmod, NO chown per ADR-008)
+          touch "$QGL_TEMP" 2>/dev/null || true
+          
+          # Atomic rename
+          if mv -f "$QGL_TEMP" "$QGL_TARGET" 2>/dev/null; then
+            if [ -f "$QGL_TARGET" ] && [ -s "$QGL_TARGET" ]; then
+              _qgl_log "[BOOT] File renamed successfully"
+              _qgl_diag "FILE_OP: mv succeeded"
+              
+              # Touch again on final location (LYB)
+              touch "$QGL_TARGET" 2>/dev/null || true
+              
+              # Set SELinux context (LYB: chcon file)
+              _qgl_log "[BOOT] Setting context on file"
+              _chcon_file=$(chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>&1)
+              if [ $? -eq 0 ]; then
+                _qgl_diag "SELINUX_OP: chcon file succeeded"
+              else
+                _qgl_diag "SELINUX_OP: chcon file failed: $_chcon_file"
               fi
-            else
-              log_only "[!] QGL static atomic rename failed, retrying..."
-              rm -f "$QGL_TEMP" 2>/dev/null || true
+              
+              # Verify
+              EXPECTED_SIZE=$(stat -c%s "$MODDIR/qgl_config.txt" 2>/dev/null || echo 0)
+              ACTUAL_SIZE=$(stat -c%s "$QGL_TARGET" 2>/dev/null || echo 0)
+              
+              if [ "$EXPECTED_SIZE" -eq "$ACTUAL_SIZE" ] 2>/dev/null && [ "$ACTUAL_SIZE" -gt 0 ] 2>/dev/null; then
+                QGL_INSTALL_SUCCESS="true"
+                touch "$QGL_OWNER_MARKER" 2>/dev/null || true
+                _qgl_log "[OK] QGL static install verified: $ACTUAL_SIZE bytes"
+                _qgl_diag "STATIC_RESULT: SUCCESS - $ACTUAL_SIZE bytes"
+                break
+              else
+                _qgl_log "[!] QGL static size mismatch: expected=$EXPECTED_SIZE actual=$ACTUAL_SIZE"
+                _qgl_diag "STATIC: WARN - Size mismatch"
+              fi
             fi
           else
-            log_only "[!] QGL static temp file empty or missing"
+            _qgl_log "[!] QGL static atomic rename failed"
+            _qgl_diag "FILE_OP: mv failed"
             rm -f "$QGL_TEMP" 2>/dev/null || true
           fi
+        else
+          _qgl_log "[!] QGL static temp file empty"
+          _qgl_diag "FILE_OP: Temp file empty"
+          rm -f "$QGL_TEMP" 2>/dev/null || true
         fi
       fi
     fi
-
+    
     RETRY_COUNT=$((RETRY_COUNT + 1))
     if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-      log_only "QGL static install attempt $RETRY_COUNT failed, retrying in $((RETRY_COUNT * 2))s..."
-      sleep $((RETRY_COUNT * 2))
+      _delay=$((RETRY_COUNT * 2))
+      _qgl_log "[BOOT] Retry $RETRY_COUNT in ${_delay}s..."
+      sleep $_delay
     fi
   done
-
+  
   rm -f "$QGL_TEMP" 2>/dev/null || true
-
+  
   if [ "$QGL_INSTALL_SUCCESS" = "false" ]; then
-    log_only "[FAIL] QGL static install failed after $MAX_RETRIES attempts"
+    _qgl_log "[FAIL] QGL static install failed after $MAX_RETRIES attempts"
+    _qgl_diag "STATIC_RESULT: FAIL - Max retries exceeded"
   fi
-
+  
+  _qgl_state_capture "AFTER_STATIC_INSTALL"
   unset QGL_TARGET QGL_OWNER_MARKER QGL_TEMP QGL_INSTALL_SUCCESS MAX_RETRIES RETRY_COUNT EXPECTED_SIZE ACTUAL_SIZE
 fi
+
+_qgl_log "[END] boot-completed.sh finished"
+_qgl_diag "========================================"
+_qgl_diag "BOOT-COMPLETED.SH FINISHED"
+_qgl_diag "========================================"

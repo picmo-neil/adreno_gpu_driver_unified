@@ -16,6 +16,57 @@
 # Source with: . "$MODDIR/common.sh"
 
 # ============================================================
+# CENTRALIZED PATHS AND CONSTANTS
+# ============================================================
+# Centralized definitions to ensure all scripts use the same paths.
+
+# Config files
+ADRENO_CONFIG_SD="/sdcard/Adreno_Driver/Config/adreno_config.txt"
+ADRENO_CONFIG_DATA="/data/local/tmp/adreno_config.txt"
+ADRENO_CONFIG_MOD="$MODDIR/adreno_config.txt"
+
+QGL_CONFIG_SD="/sdcard/Adreno_Driver/Config/qgl_config.txt"
+QGL_CONFIG_DATA="/data/local/tmp/qgl_config.txt"
+QGL_CONFIG_MOD="$MODDIR/qgl_config.txt"
+
+QGL_PROFILES_JSON="/sdcard/Adreno_Driver/Config/qgl_profiles.json"
+QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
+QGL_DIR="/data/vendor/gpu"
+
+# Log files
+QGL_TRIGGER_LOG="/sdcard/Adreno_Driver/qgl_trigger.log"
+QGL_DIAG_LOG="/sdcard/Adreno_Driver/qgl_diagnostics.log"
+
+# State files
+VK_COMPAT_FILE="/data/local/tmp/adreno_vk_compat"
+VK_SCORE_FILE="/data/local/tmp/adreno_vk_compat_score"
+VK_FULL_STATE_FILE="/data/local/tmp/adreno_vk_compat_full"
+DEGRADE_MARKER="/data/local/tmp/adreno_skiavk_degraded"
+LAST_STATE_FILE="/data/local/tmp/adreno_last_cleared_state"
+BOOT_ATTEMPTS_FILE="/data/local/tmp/adreno_boot_attempts"
+WATCHDOG_PID_FILE="/data/local/tmp/adreno_watchdog_pid"
+
+# system.prop strip regex — covers all module-managed render/SF/perf properties.
+# BUG-FIX: added debug.hwui.pipeline to coverage.
+RENDER_PROPS_REGEX='debug\.hwui\.renderer=|debug\.renderengine\.backend=|debug\.sf\.latch_unsignaled=|debug\.sf\.auto_latch_unsignaled=|debug\.sf\.disable_backpressure=|debug\.sf\.enable_hwc_vds=|debug\.sf\.enable_transaction_tracing=|debug\.sf\.client_composition_cache_size=|ro\.sf\.disable_triple_buffer=|ro\.surface_flinger\.use_context_priority=|ro\.surface_flinger\.max_frame_buffer_acquired_buffers=|ro\.surface_flinger\.force_hwc_copy_for_virtual_displays=|debug\.hwui\.use_buffer_age=|debug\.hwui\.use_partial_updates=|debug\.hwui\.use_gpu_pixel_buffers=|renderthread\.skia\.reduceopstasksplitting=|debug\.hwui\.skip_empty_damage=|debug\.hwui\.webview_overlays_enabled=|debug\.hwui\.skia_tracing_enabled=|debug\.hwui\.skia_use_perfetto_track_events=|debug\.hwui\.capture_skp_enabled=|debug\.hwui\.skia_atrace_enabled=|debug\.hwui\.use_hint_manager=|debug\.hwui\.target_cpu_time_percent=|com\.qc\.hardware=|persist\.sys\.force_sw_gles=|debug\.vulkan\.layers=|debug\.vulkan\.dev\.layers=|ro\.hwui\.use_vulkan=|debug\.hwui\.recycled_buffer_cache_size=|debug\.hwui\.overdraw=|debug\.hwui\.profile=|debug\.hwui\.show_dirty_regions=|graphics\.gpu\.profiler\.support=|ro\.egl\.blobcache\.multifile=|ro\.egl\.blobcache\.multifile_limit=|debug\.hwui\.fps_divisor=|debug\.hwui\.render_thread=|debug\.hwui\.render_dirty_regions=|debug\.hwui\.show_layers_updates=|debug\.hwui\.filter_test_overhead=|debug\.hwui\.nv_profiling=|debug\.hwui\.clip_surfaceviews=|debug\.hwui\.8bit_hdr_headroom=|debug\.hwui\.skip_eglmanager_telemetry=|debug\.hwui\.initialize_gl_always=|debug\.hwui\.level=|debug\.hwui\.disable_vsync=|hwui\.disable_vsync=|debug\.vulkan\.layers\.enable=|persist\.device_config\.runtime_native\.usap_pool_enabled=|debug\.gralloc\.enable_fb_ubwc=|vendor\.gralloc\.enable_fb_ubwc=|persist\.sys\.perf\.topAppRenderThreadBoost\.enable=|persist\.sys\.gpu\.working_thread_priority=|debug\.sf\.early_phase_offset_ns=|debug\.sf\.early_app_phase_offset_ns=|debug\.sf\.early_gl_phase_offset_ns=|debug\.sf\.early_gl_app_phase_offset_ns=|debug\.sf\.use_phase_offsets_as_durations=|debug\.hwui\.use_skia_graphite=|ro\.surface_flinger\.supports_background_blur=|persist\.sys\.sf\.disable_blurs=|ro\.sf\.blurs_are_expensive=|persist\.sys\.sf\.native_mode=|debug\.sf\.treat_170m_as_sRGB=|ro\.config\.vulkan\.enabled=|persist\.vendor\.vulkan\.enable=|persist\.graphics\.vulkan\.disable_pre_rotation=|ro\.hwui\.text_small_cache_width=|ro\.hwui\.text_small_cache_height=|ro\.hwui\.text_large_cache_width=|ro\.hwui\.text_large_cache_height=|ro\.hwui\.drop_shadow_cache_size=|ro\.hwui\.gradient_cache_size=|debug\.hwui\.texture_cache_size=|debug\.hwui\.layer_cache_size=|debug\.hwui\.path_cache_size=|debug\.hwui\.pipeline='
+
+# ============================================================
+# LOG ROTATION HELPER
+# ============================================================
+# Rotates a log file if it exceeds the specified size (in bytes).
+# Keeps 1 .old copy.
+rotate_log() {
+  local _log="$1"
+  local _max_size="${2:-524288}" # 512KB default
+  [ -f "$_log" ] || return 0
+  local _sz
+  _sz=$(wc -c < "$_log" 2>/dev/null || echo 0)
+  if [ "$_sz" -gt "$_max_size" ] 2>/dev/null; then
+    mv -f "$_log" "${_log}.old" 2>/dev/null || true
+  fi
+}
+
+# ============================================================
 # STRUCTURED LOGGING HELPERS (verbose=y)
 # ============================================================
 # Provides section headers, status markers, and system state dumps
