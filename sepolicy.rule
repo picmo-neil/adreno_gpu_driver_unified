@@ -22,7 +22,7 @@
 #      receive the 'unlabeled' label. The unlabeled rules below fix failure paths.
 #   4. [SAME_PROCESS_HAL_FILE LIFECYCLE FIX] After activation, subsequent boots
 #      must be able to manage the file.
-#   5. [DIRECTORY CHCON FIX — ROOT CAUSE OF QGL NOT LOADING]
+#   5. [DIRECTORY CHCON FIX  --- ROOT CAUSE OF QGL NOT LOADING]
 #      The Adreno driver validates the SELinux context of BOTH the directory
 #      (/data/vendor/gpu/) AND the file (qgl_config.txt) before reading the config.
 # =========================================================

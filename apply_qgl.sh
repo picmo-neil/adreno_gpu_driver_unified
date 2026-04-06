@@ -275,6 +275,79 @@ case "$_dir_ctx" in
 esac
 
 # ══════════════════════════════════════════════════════════════════════════
+# LIGHTWEIGHT JSON KEY EXTRACTOR FOR POSIX SH
+# Must be defined before boot mode block (called at boot mode line ~294)
+# ══════════════════════════════════════════════════════════════════════════
+
+_extract_section_keys() {
+  _section="$1"
+  _data="$2"
+  
+  printf '%s\n' "$_data" | awk -v section="\"$_section\"" '
+    BEGIN { in_section=0; in_keys=0; brace_depth=0; enabled=1 }
+    {
+      line = $0
+      
+      if (!in_section && index(line, section ":") > 0) {
+        in_section = 1
+        brace_depth = 0
+        enabled = 1
+      }
+      
+      if (in_section) {
+        for (i = 1; i <= length(line); i++) {
+          c = substr(line, i, 1)
+          if (c == "{") brace_depth++
+          if (c == "}") {
+            brace_depth--
+            if (brace_depth == 0) {
+              in_section = 0
+              break
+            }
+          }
+        }
+        
+        if (index(line, "\"enabled\"") > 0 && index(line, "false") > 0) {
+          enabled = 0
+        }
+        
+        if (in_keys == 0 && index(line, "\"keys\"") > 0 && index(line, "[") > 0) {
+          in_keys = 1
+          sub(/.*\[/, "", line)
+        }
+        
+        if (in_keys) {
+          while (1) {
+            q1 = index(line, "\"")
+            if (q1 == 0) break
+            rest = substr(line, q1 + 1)
+            q2 = 0
+            for (ci = 1; ci <= length(rest); ci++) {
+              ch = substr(rest, ci, 1)
+              if (ch == "\\") { ci++; continue }
+              if (ch == "\"") { q2 = ci; break }
+            }
+            if (q2 == 0) break
+            val = substr(rest, 1, q2 - 1)
+            gsub(/\\"/, "\"", val)
+            if (index(val, "=") > 0) {
+              print val
+            }
+            line = substr(rest, q2 + 1)
+          }
+          if (index(line, "]") > 0) {
+            in_keys = 0
+          }
+        }
+      }
+    }
+    END {
+      if (enabled == 0) exit 1
+    }
+  '
+}
+
+# ══════════════════════════════════════════════════════════════════════════
 # BOOT MODE: Use qgl_profiles.json first, fallback to legacy qgl_config.txt
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -304,7 +377,7 @@ if [ "$MODE" = "boot" ]; then
         
         {
           if [ "$_has_magic" != "y" ]; then
-            printf '0x0=0x865309\n'
+            printf '0x0=0x8675309\n'
           fi
           printf '%s\n' "$_keys"
         } > "$_qtmp" 2>/dev/null
@@ -402,8 +475,17 @@ if [ "$MODE" = "boot" ]; then
     touch "$QGL_TARGET" 2>/dev/null || true
     
     # Set SELinux context (LYB: chcon file)
-    _qgl_log "[BOOT] Setting SELinux context on file"
-    chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
+    _qgl_log "[BOOT] Setting SELinux context on file (legacy path)"
+    _chcon_leg_out=$(chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>&1)
+    _chcon_leg_rc=$?
+    if [ $_chcon_leg_rc -eq 0 ]; then
+      _qgl_log "[BOOT] File SELinux context set (legacy path)"
+      _qgl_diag "SELINUX_OP: chcon file succeeded (legacy)"
+    else
+      _qgl_log "[WARN] chcon file failed (legacy path, rc=$_chcon_leg_rc): $_chcon_leg_out"
+      _qgl_diag "SELINUX_OP: chcon file failed (legacy): $_chcon_leg_out"
+    fi
+    unset _chcon_leg_out _chcon_leg_rc
     
     _lines=$(wc -l < "$QGL_TARGET" 2>/dev/null || echo '?')
     _qgl_log "[BOOT] QGL applied successfully ($_lines lines)"
@@ -435,78 +517,7 @@ if [ ! -f "$PROFILE_PATH" ]; then
   _qgl_diag "APP_RESULT: SKIP - No profiles file"
   exit 0
 fi
-
-# ══════════════════════════════════════════════════════════════════════════
-# LIGHTWEIGHT JSON KEY EXTRACTOR FOR POSIX SH
-# ══════════════════════════════════════════════════════════════════════════
-
-_extract_section_keys() {
-  _section="$1"
-  _data="$2"
-  
-  printf '%s\n' "$_data" | awk -v section="\"$_section\"" '
-    BEGIN { in_section=0; in_keys=0; brace_depth=0; enabled=1 }
-    {
-      line = $0
       
-      if (!in_section && index(line, section ":") > 0) {
-        in_section = 1
-        brace_depth = 0
-        enabled = 1
-      }
-      
-      if (in_section) {
-        for (i = 1; i <= length(line); i++) {
-          c = substr(line, i, 1)
-          if (c == "{") brace_depth++
-          if (c == "}") {
-            brace_depth--
-            if (brace_depth == 0) {
-              in_section = 0
-              break
-            }
-          }
-        }
-        
-        if (index(line, "\"enabled\"") > 0 && index(line, "false") > 0) {
-          enabled = 0
-        }
-        
-        if (in_keys == 0 && index(line, "\"keys\"") > 0 && index(line, "[") > 0) {
-          in_keys = 1
-          sub(/.*\[/, "", line)
-        }
-        
-        if (in_keys) {
-          while (1) {
-            q1 = index(line, "\"")
-            if (q1 == 0) break
-            rest = substr(line, q1 + 1)
-            q2 = 0
-            for (ci = 1; ci <= length(rest); ci++) {
-              ch = substr(rest, ci, 1)
-              if (ch == "\\") { ci++; continue }
-              if (ch == "\"") { q2 = ci; break }
-            }
-            if (q2 == 0) break
-            val = substr(rest, 1, q2 - 1)
-            gsub(/\\\"/, "\"", val)
-            if (index(val, "=") > 0) {
-              print val
-            }
-            line = substr(rest, q2 + 1)
-          }
-          if (index(line, "]") > 0) {
-            in_keys = 0
-          }
-        }
-      }
-    }
-    END {
-      if (enabled == 0) exit 1
-    }
-  '
-}
 
 extract_keys() {
   _pkg="$1"
@@ -591,7 +602,16 @@ if mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
   
   # Set SELinux context (LYB: chcon file)
   _qgl_log "[APP] Setting SELinux context"
-  chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
+  _chcon_app_out=$(chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>&1)
+  _chcon_app_rc=$?
+  if [ $_chcon_app_rc -eq 0 ]; then
+    _qgl_log "[APP] File SELinux context set"
+    _qgl_diag "SELINUX_OP: chcon file succeeded (app mode)"
+  else
+    _qgl_log "[WARN] chcon file failed for $PKG (rc=$_chcon_app_rc): $_chcon_app_out"
+    _qgl_diag "SELINUX_OP: chcon file failed (app mode): $_chcon_app_out"
+  fi
+  unset _chcon_app_out _chcon_app_rc
   
   _line_count=$(wc -l < "$QGL_TARGET" 2>/dev/null || echo '?')
   _qgl_log "[APP] QGL applied for $PKG ($_line_count keys)"

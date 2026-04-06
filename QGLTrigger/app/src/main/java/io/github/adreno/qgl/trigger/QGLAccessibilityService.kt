@@ -94,25 +94,32 @@ class QGLAccessibilityService : AccessibilityService() {
         // hasn't been written yet — writing a per-app config now would create a mixed
         // KGSL context race condition → cascade crash → bootloop.
         // Poll with 500ms intervals for up to 15s (covers slow boot scenarios).
-        val baselineFlag = java.io.File("/data/vendor/gpu/.qgl_boot_baseline_ready")
-        var waited = 0L
-        while (!baselineFlag.exists() && waited < 15000L) {
-            Thread.sleep(500)
-            waited += 500
-        }
-        if (!baselineFlag.exists()) {
-            Log.w(TAG, "Boot baseline flag not found after ${waited}ms — skipping QGL for $packageName to prevent mixed-context crash")
-            return
-        }
+        //
+        // THREAD SAFETY: The entire body — including Thread.sleep — runs on
+        // scriptExecutor (a dedicated single-thread executor), NOT on the
+        // accessibility event callback thread. Blocking the callback thread for
+        // up to 15s would trigger an ANR. Moving here eliminates that risk.
+        scriptExecutor.execute {
+            val baselineFlag = java.io.File("/data/vendor/gpu/.qgl_boot_baseline_ready")
+            var waited = 0L
+            while (!baselineFlag.exists() && waited < 15000L) {
+                Thread.sleep(500)
+                waited += 500
+            }
+            if (!baselineFlag.exists()) {
+                Log.w(TAG, "Boot baseline flag not found after ${waited}ms — skipping QGL for $packageName to prevent mixed-context crash")
+                return@execute
+            }
 
-        val keys = ProfileManager.getKeysForPackage(packageName)
-        if (keys.isNullOrEmpty()) {
-            Log.d(TAG, "No QGL profile configured for $packageName, skipping")
-            return
-        }
+            val keys = ProfileManager.getKeysForPackage(packageName)
+            if (keys.isNullOrEmpty()) {
+                Log.d(TAG, "No QGL profile configured for $packageName, skipping")
+                return@execute
+            }
 
-        Log.d(TAG, "Applying QGL config for $packageName with ${keys.size} keys")
-        executeQGLScript(packageName, keys)
+            Log.d(TAG, "Applying QGL config for $packageName with ${keys.size} keys")
+            executeQGLScript(packageName, keys)
+        }
     }
 
     private fun getOrCreateShell(): DataOutputStream? {
