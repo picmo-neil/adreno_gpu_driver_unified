@@ -232,7 +232,7 @@ if [ -f "$TMPDIR/adreno_config.txt" ]; then
     case "$_k" in
       '#'*|'') continue ;;
       VERBOSE)
-        _v="${_v%$(printf '\r')}"
+        _v="${_v%$'\r'}"
         case "$_v" in [Yy]|[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|1) VERBOSE="y" ;; esac
         break ;;
     esac
@@ -256,9 +256,6 @@ if $BOOTMODE; then
   ui_print " "
 
   MODPATH="$NVBASE/modules/$MODID"
-
-  [ -d "$NVBASE/modules" ] || mkdir -p "$NVBASE/modules" 2>/dev/null
-  chmod 755 "$NVBASE" "$NVBASE/modules" 2>/dev/null
 
   rm -rf "$MODPATH" 2>/dev/null || true
   mkdir -p "$MODPATH" || abort "Failed to create module directory"
@@ -582,7 +579,7 @@ else
   if [ -f "$TMPDIR/adreno_config.txt" ]; then
     while IFS='= ' read -r _k _v; do
       case "$_k" in '#'*|'') continue ;; esac
-      _v="${_v%$(printf '\r')}"
+      _v="${_v%$'\r'}"
       case "$_k" in
         PLT)       case "$_v" in [Yy]|[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|1) PLT="y" ;;       esac ;;
         QGL)       case "$_v" in [Yy]|[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|1) QGL="y" ;;       esac ;;
@@ -677,7 +674,6 @@ ${ACTUAL_SYSTEM_PATH}/bin/linker
 /sbin/linker
 /apex/com.android.runtime/bin/linker
 /apex/com.android.art/bin/linker
-/apex/com.android.virt/bin/linker
 /system/apex/com.android.runtime/bin/linker
 /system/apex/com.android.art/bin/linker
 /system_root/system/apex/com.android.runtime/bin/linker
@@ -1266,19 +1262,14 @@ export DETECTION_REASON
   ui_print "✓ App shader caches cleaned"
 
   rm -rf /data/system/graphicsstats/* 2>/dev/null || true
+  rm -rf /data/dalvik-cache/* 2>/dev/null || true
   rm -rf /data/cache/* 2>/dev/null || true
   rm -rf /data/system/package_cache/* 2>/dev/null || true
   rm -rf /data/resource-cache/* 2>/dev/null || true
 
   ui_print "✓ System caches cleaned"
 
-  # Only clean cache/code_cache subdirs inside camera app data dirs — NEVER delete
-  # the top-level app dir which contains databases, shared_prefs, and user photos.
-  find /data/data -maxdepth 3 -type d \( \
-    -path '*camera*/cache'      -o -path '*camera*/code_cache'   -o \
-    -path '*snapcam*/cache'     -o -path '*snapcam*/code_cache'  -o \
-    -path '*gcam*/cache'        -o -path '*gcam*/code_cache' \
-  \) -exec rm -rf {} + 2>/dev/null || true
+  find /data/data/* -type d \( -iname "*camera*" -o -iname "*snapcam*" \) -exec sh -c 'rm -rf "$1"/*' _ {} \; 2>/dev/null || true
 
   ui_print "✓ All caches cleaned"
 

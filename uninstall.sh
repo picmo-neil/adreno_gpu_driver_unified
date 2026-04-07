@@ -19,66 +19,57 @@ echo "========================================"
 echo ""
 echo "Cleaning GPU caches..."
 
-# Clean QGL config — remove ALL files FIRST, then rmdir the empty directory
-rm -f /data/vendor/gpu/qgl_config.txt 2>/dev/null || true
-rm -f /data/vendor/gpu/.adreno_qgl_owner 2>/dev/null || true
-rmdir /data/vendor/gpu 2>/dev/null || true
-
 # Function to clean caches safely
 clean_caches() {
-  # User DE caches — use specific GPU-related cache names only.
-  # Avoid overly broad patterns like '*shader*' which match non-GPU dirs
-  # (e.g., webview shader caches, audio shader caches, etc.).
+  # User DE caches
   find /data/user_de -type d \( \
-    -name 'app_skia_pipeline_cache' -o \
-    -name 'com.android.opengl.shaders_cache' -o \
-    -name 'com.android.skia.shaders_cache' -o \
-    -name 'gpucache' -o \
-    -name 'graphitecache' \
+    -iname '*shader*' -o \
+    -iname '*gpucache*' -o \
+    -iname '*graphitecache*' -o \
+    -iname '*pipeline*' \
   \) -exec rm -rf {} + 2>/dev/null || true
 
   find /data/user_de -type f \( \
-    -name '*.shader_journal' -o \
-    -name '*gpu*cache*' \
+    -iname '*shader*' -o \
+    -iname '*gpu*cache*' \
   \) -exec rm -f {} + 2>/dev/null || true
 
   # App data caches
   find /data/data -type d \( \
-    -name 'app_skia_pipeline_cache' -o \
-    -name 'com.android.opengl.shaders_cache' -o \
-    -name 'com.android.skia.shaders_cache' -o \
-    -name 'gpucache' -o \
-    -name 'graphitecache' \
+    -iname '*shader*' -o \
+    -iname '*gpucache*' -o \
+    -iname '*graphitecache*' -o \
+    -iname '*pipeline*' -o \
+    -iname '*program*cache*' \
   \) -exec rm -rf {} + 2>/dev/null || true
 
   find /data/data -type f \( \
-    -name '*.shader_journal' -o \
-    -name '*gpu*cache*' \
+    -iname '*shader*' -o \
+    -iname '*gpu*cache*' \
   \) -exec rm -f {} + 2>/dev/null || true
 
   # Data mirror caches (data_ce = Credential Encrypted, data_de = Device Encrypted)
   for mirror in /data_mirror/data_ce /data_mirror/data_de; do
     if [ -d "$mirror" ]; then
       find "$mirror" -type d \( \
-        -name 'app_skia_pipeline_cache' -o \
-        -name 'com.android.opengl.shaders_cache' -o \
-        -name 'com.android.skia.shaders_cache' -o \
-        -name 'gpucache' -o \
-        -name 'graphitecache' \
+        -iname '*shader*' -o \
+        -iname '*gpucache*' -o \
+        -iname '*graphitecache*' -o \
+        -iname '*pipeline*' \
       \) -exec rm -rf {} + 2>/dev/null || true
 
       find "$mirror" -type f \( \
-        -name '*.shader_journal' -o \
-        -name '*gpu*cache*' \
+        -iname '*shader*' -o \
+        -iname '*gpu*cache*' \
       \) -exec rm -f {} + 2>/dev/null || true
     fi
   done
 
-  # User-specific caches — only GPU-related code_cache dirs
+  # User-specific caches
   find /data/user -type d \( \
-    -name 'app_skia_pipeline_cache' -o \
-    -name 'gpucache' -o \
-    -name 'graphitecache' \
+    -iname '*shader*' -o \
+    -iname '*gpucache*' -o \
+    -iname '*code_cache*' \
   \) -exec rm -rf {} + 2>/dev/null || true
 
   # Camera app caches — match the cache/code_cache subdirectory inside any camera package dir
@@ -151,7 +142,6 @@ rm -f  /data/local/tmp/adreno_skiavk_force_override 2>/dev/null || true  # user-
 rm -f  /data/local/tmp/adreno_vk_compat             2>/dev/null || true  # prop_only/incompatible flag — Vulkan compat state
 rm -f  /data/local/tmp/adreno_config.txt            2>/dev/null || true  # SD mirror read by next post-fs-data boot
 rm -f  /data/local/tmp/adreno_early_log_buffer.*    2>/dev/null || true  # leftover early log buffers
-rm -f  /data/local/tmp/adreno_watchdog_pid          2>/dev/null || true  # old-vendor watchdog PID file
 echo "✓ Temp files removed"
 echo ""
 

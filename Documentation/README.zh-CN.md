@@ -446,16 +446,14 @@ adreno_gpu_driver_unified/
 - 写入持久性 `system.prop` 条目
 - 可选强制停止第三方应用（适用于 `skiavk_all` 模式）
 
-### Vulkan 兼容性安全门控
+### 首次启动安全机制
 
-渲染器在所有启动时（包括安装后的首次启动）立即应用。安全机制由 `post-fs-data.sh` 中的结构性 Vulkan 兼容性检查提供：
-
-1. `post-fs-data.sh` 检查设备上是否存在有效的 Vulkan ICD（可安装客户端驱动）。
-2. 如果未找到 Vulkan ICD，渲染模式会从 `skiavk` **自动降级**为 `skiagl`——这是真正的结构性回退，而非时间延迟。
-3. 当渲染模式发生变化时，管道缓存在 Zygote 启动前被清除，防止陈旧缓存导致的崩溃。
-4. `service.sh` 确认启动成功并写入 `.boot_success` 标记，该标记在后续启动时控制 `skiavkthreaded` 后端的提升。
-
-此方法提供真正的 Vulkan 能力检测，而非将渲染器推迟到第二次启动。
+安装模块后不会立即激活 Vulkan 渲染：
+1. 安装程序创建 `.first_boot_pending` 标记文件
+2. `post-fs-data.sh` 检测到此标记后 **推迟所有渲染器配置**
+3. 创建 `.service_skip_render` 标记
+4. `service.sh` 检测到跳过标记后也跳过渲染器配置
+5. **第二次启动**时，`post-fs-data.sh` 正常应用配置的渲染模式
 
 <a name="property-management"></a>
 ## 11. 属性管理系统

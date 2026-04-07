@@ -446,16 +446,14 @@ adreno_gpu_driver_unified/
 - 寫入持久性 `system.prop` 條目
 - 可選強制停止第三方應用程式（適用於 `skiavk_all` 模式）
 
-### Vulkan 相容性安全閘道
+### 首次啟動安全機制
 
-算繪器在所有啟動時（包括安裝後的首次啟動）立即套用。安全性由 `post-fs-data.sh` 中的結構性 Vulkan 相容性檢查提供：
-
-1. `post-fs-data.sh` 檢查裝置上是否存在有效的 Vulkan ICD（可安裝用戶端驅動程式）。
-2. 如果未找到 Vulkan ICD，算繪模式會從 `skiavk` **自動降級**為 `skiagl`——這是真正的結構性回退，而非時間延遲。
-3. 當算繪模式變更時，管線快取在 Zygote 啟動前被清除，防止過期快取導致的當機。
-4. `service.sh` 確認啟動成功並寫入 `.boot_success` 標記，該標記在後續啟動時控制 `skiavkthreaded` 後端的提升。
-
-此方法提供真正的 Vulkan 能力偵測，而非將算繪器推遲到第二次啟動。
+安裝模組後不會立即啟用 Vulkan 算繪：
+1. 安裝程式建立 `.first_boot_pending` 標記檔案
+2. `post-fs-data.sh` 偵測到此標記後**推遲所有算繪器設定**
+3. 建立 `.service_skip_render` 標記
+4. `service.sh` 偵測到跳過標記後也跳過算繪器設定
+5. **第二次啟動**時，`post-fs-data.sh` 正常套用設定的算繪模式
 
 <a name="property-management"></a>
 ## 11. 屬性管理系統

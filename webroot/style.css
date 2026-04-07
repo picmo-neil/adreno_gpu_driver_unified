@@ -1547,12 +1547,6 @@ input:focus-visible + .modern-slider {
 
 .editor-container { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .editor-toolbar { display: flex; align-items: center; gap: var(--s-2); padding: var(--s-2) var(--s-5); border-bottom: 1px solid var(--border-1); background: rgba(0,0,0,0.25); flex-shrink: 0; }
-
-/* KEYBOARD-FIX: Make editor-container scrollable when modal is keyboard-visible */
-.modal-container.keyboard-visible .editor-container {
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-}
 .editor-btn { display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; border-radius: var(--r-xs); border: 1px solid var(--border-1); background: transparent; color: var(--text-2); font-family: inherit; font-size: 11px; font-weight: 500; cursor: pointer; transition: background var(--t-1), color var(--t-1); }
 .editor-btn:hover { background: var(--bg-hover); color: var(--text-1); }
 .editor-info { margin-left: auto; }
@@ -1565,65 +1559,6 @@ input:focus-visible + .modern-slider {
     font-size: 13px; line-height: 1.90; resize: none; outline: none; caret-color: var(--accent);
 }
 #qglEditor::placeholder { color: var(--text-4); }
-
-/* ── App Profile Editor (Per-App / Global QGL Profile modal) ── */
-#appProfileEditor {
-    flex: 1; background: rgba(0,0,0,0.65); border: none;
-    padding: var(--s-4) var(--s-5); color: var(--accent-2);
-    font-family: 'IBM Plex Mono', ui-monospace, monospace;
-    font-size: 13px; line-height: 1.90; resize: none; outline: none; caret-color: var(--accent);
-    min-height: 0; overflow-y: auto;
-}
-#appProfileEditor::placeholder { color: var(--text-4); }
-
-.app-profile-fields .input-glass {
-    width: 100%; margin-top: var(--s-1);
-}
-
-/* ── KEYBOARD FIX: When soft keyboard appears, modal scrolls to keep textarea visible ── */
-/* Option A — CSS env(keyboard-inset-height) for modern Android WebView */
-.modal-container {
-    padding-bottom: env(keyboard-inset-height, 0px);
-    transition: padding-bottom 0.25s ease;
-}
-
-.modal-container.keyboard-visible {
-    max-height: 60vh !important;
-    height: 60vh !important;
-    bottom: auto !important;
-    top: 50% !important;
-    transform: translateY(-50%) !important;
-    border-radius: var(--r-2xl) !important;
-    border-bottom: 1px solid var(--border-2) !important;
-    overflow-y: auto !important;
-}
-.modal-container.keyboard-visible .editor-container {
-    min-height: 0;
-}
-.modal-container.keyboard-visible #appProfileEditor,
-.modal-container.keyboard-visible #qglEditor {
-    min-height: 160px;
-}
-/* Ensure textarea is always visible when focused on mobile */
-@media (max-height: 500px) {
-    .modal-container {
-        max-height: 85vh !important;
-        height: 85vh !important;
-    }
-}
-
-/* ── KEYBOARD FIX: Textarea sizing for QGL editors ── */
-#qglEditor,
-#appProfileEditor {
-    min-height: 200px;
-    max-height: 40vh;
-    resize: vertical;
-    font-family: 'Courier New', Courier, monospace;
-    font-size: 13px;
-    line-height: 1.6;
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-}
 
 .doc-container { flex: 1; overflow-y: auto; padding: var(--s-5); }
 .markdown-body, .markdown-content { color: var(--text-2); font-size: 13px; line-height: 1.8; }

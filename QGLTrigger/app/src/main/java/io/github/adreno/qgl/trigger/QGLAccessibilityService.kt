@@ -33,7 +33,13 @@ private val SYSTEM_UI_PACKAGES = setOf(
     "com.google.android.googlequicksearchbox",
     "com.google.android.apps.nexuslauncher",
     "android",
-    "com.android.settings"
+    "com.android.settings",
+    "com.google.android.gms",
+    "com.google.android.gsf",
+    "com.facebook.katana",
+    "com.facebook.orca",
+    "com.instagram.android",
+    "com.whatsapp"
 )
 
 class QGLAccessibilityService : AccessibilityService() {
@@ -88,17 +94,6 @@ class QGLAccessibilityService : AccessibilityService() {
     }
 
     private fun handleAppSwitch(packageName: String) {
-        // BUG ALPHA FIX: Wait for boot baseline flag before writing per-app configs.
-        // boot-completed.sh writes /data/vendor/gpu/.qgl_boot_baseline_ready BEFORE
-        // applying the global QGL baseline. If this flag is absent, the global baseline
-        // hasn't been written yet — writing a per-app config now would create a mixed
-        // KGSL context race condition → cascade crash → bootloop.
-        // Poll with 500ms intervals for up to 15s (covers slow boot scenarios).
-        //
-        // THREAD SAFETY: The entire body — including Thread.sleep — runs on
-        // scriptExecutor (a dedicated single-thread executor), NOT on the
-        // accessibility event callback thread. Blocking the callback thread for
-        // up to 15s would trigger an ANR. Moving here eliminates that risk.
         scriptExecutor.execute {
             val baselineFlag = java.io.File("/data/vendor/gpu/.qgl_boot_baseline_ready")
             var waited = 0L
@@ -107,7 +102,7 @@ class QGLAccessibilityService : AccessibilityService() {
                 waited += 500
             }
             if (!baselineFlag.exists()) {
-                Log.w(TAG, "Boot baseline flag not found after ${waited}ms — skipping QGL for $packageName to prevent mixed-context crash")
+                Log.w(TAG, "Boot baseline flag not found after ${waited}ms — skipping QGL for $packageName")
                 return@execute
             }
 
@@ -175,30 +170,36 @@ class QGLAccessibilityService : AccessibilityService() {
             cmds.add("mkdir -p $QGL_DIR 2>/dev/null")
             cmds.add("chcon $SELINUX_CONTEXT $QGL_DIR 2>/dev/null || true")
 
-            val tmpFile = "${QGL_TARGET}.tmp"
+            val tmpFile = "${QGL_TARGET}.tmp.$$"
             cmds.add("{")
-            cmds.add("printf '%s\\n' '$magicHeader'")
+            cmds.add("echo '$magicHeader'")
             for (key in keys) {
                 val escaped = key.replace("'", "'\\''")
-                cmds.add("printf '%s\\n' '$escaped'")
+                cmds.add("echo '$escaped'")
             }
-            cmds.add("} > $tmpFile 2>/dev/null && mv -f $tmpFile $QGL_TARGET 2>/dev/null")
-            cmds.add("chcon $SELINUX_CONTEXT $QGL_TARGET 2>/dev/null || true")
+            cmds.add("} > $tmpFile 2>/dev/null")
+            cmds.add("if [ -s \"$tmpFile\" ]; then")
+            cmds.add("  chmod 0644 \"$tmpFile\"")
+            cmds.add("  chcon $SELINUX_CONTEXT \"$tmpFile\" 2>/dev/null")
+            cmds.add("  mv -f \"$tmpFile\" \"$QGL_TARGET\"")
+            // Architecture Decision: Outcome B - Driver caches config, force-stop required
+            // Invariant 4: 150ms throttle
+            cmds.add("  am force-stop \"$packageName\" 2>/dev/null")
+            cmds.add("  sleep 0.15")
+            cmds.add("fi")
 
             if (writeToShell(stdin, cmds)) {
-                Log.d(TAG, "QGL config queued for $packageName (${keys.size} keys)")
+                Log.d(TAG, "QGL config application queued for $packageName")
             } else {
-                Log.w(TAG, "Failed to write QGL config for $packageName, shell will respawn")
+                Log.w(TAG, "Failed to queue QGL config for $packageName")
             }
         }
     }
 
     override fun onInterrupt() {
-        Log.w(TAG, "AccessibilityService interrupted")
     }
 
     override fun onDestroy() {
-        Log.w(TAG, "AccessibilityService destroyed — closing persistent shell")
         synchronized(shellLock) {
             try {
                 shellStdin?.writeBytes("exit\n")
@@ -210,13 +211,6 @@ class QGLAccessibilityService : AccessibilityService() {
             shellStdin = null
         }
         scriptExecutor.shutdown()
-        try {
-            if (!scriptExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
-                scriptExecutor.shutdownNow()
-            }
-        } catch (_: InterruptedException) {
-            scriptExecutor.shutdownNow()
-        }
         super.onDestroy()
     }
 
@@ -244,7 +238,6 @@ class QGLAccessibilityService : AccessibilityService() {
 
         try {
             startForeground(NOTIFICATION_ID, notification)
-            Log.d(TAG, "Foreground notification started")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start foreground service", e)
         }
