@@ -13,150 +13,16 @@ ro.zygote.disable_gl_preload=true
 # ========================================
 # Hardware Acceleration — Always Active (All Render Modes)
 # ========================================
-# These props are safe and beneficial regardless of render mode (skiavk/skiagl/normal).
-# Many OEM ROMs (Samsung/One UI, Xiaomi/MIUI/HyperOS, OPPO/ColorOS, Realme/RealmeUI,
-# Vivo/FuntouchOS, OnePlus/OxygenOS) gate hardware acceleration behind these legacy
-# props even in modern Android 12-15. Setting them here ensures the correct hardware
-# acceleration path is taken before any process reads GPU-related properties.
-#
-# NOTE: Render-mode-specific props (debug.hwui.renderer, debug.renderengine.backend,
-# all SF/HWUI tuning props) are NEVER written here — they are managed dynamically
-# by post-fs-data.sh and service.sh based on the configured RENDER_MODE.
-
-# EGL hardware path — forces EGL to use hardware acceleration entry point.
-# Older OEM ROMs (Android 9-13 era Samsung, MIUI 12-13, older ColorOS) may default
-# to software EGL in certain boot states. Software EGL init conflicts with Vulkan
-# surface creation (vkCreateAndroidSurfaceKHR calls ANativeWindow APIs that expect
-# the hardware EGL context to already be initialized). Without this, skiavk HWUI
-# can fail at window surface creation → app crash on open.
+# Fix B: Reduced to critical boot-time properties ONLY.
+# All other tuning is moved to resetprop in post-fs-data.sh.
+# Total lines in system.prop: 10 (Target ≤ 15).
 debug.egl.hw=1
-
-# SurfaceFlinger hardware compositor — forces HW compositing path in SF.
-# Many OEM ROMs (MIUI/HyperOS, ColorOS/RealmeUI, One UI, FuntouchOS) still check
-# this legacy Qualcomm/OEM prop at SF init time. Without it, some ROM variants fall
-# back to software composition which is incompatible with custom Adreno driver buffer
-# formats (gralloc allocates UBWC buffers that only the HW compositor can consume).
-# Failure symptom: black screen or SF crash when custom driver is active.
 debug.sf.hw=1
-
-# Hardware UI acceleration — OEM-specific gate for hardware-accelerated UI paths.
-# ColorOS (OPPO/OnePlus), RealmeUI, FuntouchOS, and some MIUI/HyperOS builds gate
-# their hardware UI acceleration behind this prop. Without it, UI compositing may
-# use software paths that conflict with the custom Adreno driver's buffer layouts.
 persist.sys.ui.hw=1
-
-# EGL profiler/trace disable — OEM hooks (MIUI/HyperOS, ColorOS, One UI) attach to
-# the EGL context via these hooks. On custom Adreno drivers the hook intercepts
-# eglCreateWindowSurface() with mismatched internal ABI → EGLSurface corrupted before
-# Vulkan swapchain creation → SIGSEGV at vkCreateAndroidSurfaceKHR. Disabling at the
-# earliest possible stage (system.prop) prevents the hook from attaching at all.
-debug.egl.profiler=0
-debug.egl.trace=0
-
-# HWUI Force Dark global disable — OEM ROMs (MIUI, HyperOS, ColorOS, One UI) set
-# debug.hwui.force_dark=true in their own build.prop to invert colors for dark mode.
-# Force Dark adds a per-draw-call Vulkan compute pass (GPU-accelerated color inversion
-# shader) to every HWUI frame. Custom Adreno driver shader compiler may reject or
-# miscompile this compute shader → silent init failure → app crashes immediately on open.
-# Also: Force Dark + skiavk doubles Vulkan command buffer allocation per frame on legacy
-# Adreno 5xx/6xx → OOM within seconds of opening any app.
-# Must be in always-applied system.prop to override OEM build.prop before Zygote starts.
-debug.hwui.force_dark=false
-
-# ========================================
-# NOTE: debug.hwui.renderer / debug.renderengine.backend are NOT hardcoded here.
-#
-# These are managed dynamically:
-#   • post-fs-data.sh  — sets them via resetprop at early boot (current session)
-#                        AND writes them to system.prop (when FIRST_BOOT_PENDING=false)
-#   • service.sh       — persists them to system.prop AFTER confirming boot succeeded
-#                        (skiavk only after Vulkan is confirmed working)
-#
-# HWUI text atlas, shadow/gradient cache sizes, SF native_mode, and
-# debug.sf.treat_170m_as_sRGB are similarly NOT set here:
-#   - Text atlas 512×256 causes CJK glyph cache misses in messengers/e-readers
-#     when using GL or normal mode.
-#   - persist.sys.sf.native_mode=0 disables native HDR globally.
-#   - debug.sf.treat_170m_as_sRGB=1 breaks color accuracy in GL/normal modes.
-#
-# All mode-specific props are written by post-fs-data.sh and service.sh.
-# ========================================
-
-# ========================================
-# SurfaceFlinger — Protected Content & Frame Pacing
-# ========================================
-# Protected content hardware path — enables DRM-protected layer composition
-# through the display hardware engine rather than a software copy path.
-# Safe on all Android versions; no-op on devices without HW protected content.
 ro.surface_flinger.protected_contents=true
-
-# Explicit full-framerate rendering — override any OEM build.prop that might
-# set fps_divisor > 1 to artificially throttle HWUI render rate.
-debug.hwui.fps_divisor=1
-
-# ========================================
-# OEM EGL Debug Hook Clear — Vulkan Surface Corruption Fix
-# ========================================
-# debug.egl.debug_proc (empty) — Clear OEM EGL debug process hooks.
-# MIUI/HyperOS and some ColorOS builds inject EGL trace hooks via this prop.
-# On custom Adreno drivers running skiavk, the EGL hook attaches to the Vulkan-path
-# EGL surface creation (eglCreateWindowSurface → ANativeWindow acquisition) with
-# mismatched internal ABI (hook expects stock driver struct layouts) → corrupted
-# EGLSurface → subsequent vkCreateAndroidSurfaceKHR reads bad ANativeWindow pointer
-# → SIGSEGV in libvulkan → every app crashes on open.
-# Setting to empty string clears any OEM-set value from build.prop.
-debug.egl.debug_proc=
-
-# ========================================
-# OEM Vulkan Layer Clearing — Always Active
-# ========================================
-# debug.vulkan.dev.layers — vendor-namespace Vulkan dev layers.
-# SEPARATE from debug.vulkan.layers. MIUI HyperOS 2.0+, ColorOS 14+, and
-# Samsung One UI 6+ inject vendor Vulkan layers here for telemetry/debug.
-# These layers have wrong ABI for custom Adreno drivers → vkCreateDevice fails
-# with VK_ERROR_LAYER_NOT_PRESENT → every app crashes at Vulkan init.
-# Must be cleared globally (both system.prop + resetprop in service.sh) because
-# OEM init.rc late_start services may re-enable these after Zygote starts.
-debug.vulkan.dev.layers=
-
-# Vulkan validation disable — OEM ROMs that inject Vulkan validation for telemetry.
-# Custom Adreno drivers have wrong VkLayerDispatchTable layout vs OEM validation layer
-# expectations → every intercepted Vulkan call → wrong function pointer → SIGSEGV.
-persist.graphics.vulkan.validation_enable=0
-
-# ========================================
-# HWUI Drawing State Enforcement — Always Active
-# ========================================
-# debug.hwui.drawing_enabled — HWUI global hardware-accelerated drawing gate.
-# Vivo FuntouchOS 14+ and some ColorOS builds set this to false for "protected" app
-# categories. With skiavk active, a disabled drawing state initializes the Vulkan
-# backend then tears it down mid-init → dangling VkDevice reference → crash on open.
-# Must be set in system.prop (read at Zygote time) and reinforced by resetprop.
-debug.hwui.drawing_enabled=true
-
-# ========================================
-# Memory — Purgeable Assets
-# ========================================
-# Allow the asset manager to reclaim memory-mapped assets under system memory pressure.
-# Without this flag, cached assets stay pinned in RAM indefinitely.
-# Safe on all Android versions; has no effect on devices that don't support it.
-persist.sys.purgeable_assets=1
-
-# ========================================
-# GPU Power — Quick Power-On
-# ========================================
-# Allows the GPU power domain to be restored faster after idle power-collapse.
-# Qualcomm prop; reduces first-frame latency after the GPU has been asleep.
-# Applies to all render modes; harmless on non-Qualcomm hardware.
 ro.config.hw_quickpoweron=true
-
-
-# ========================================
-# hwui.disable_vsync (NO debug prefix) — OEM-specific vsync disable.
-# Qualcomm vendor init.rc on legacy Adreno 5xx/6xx devices sets this to true to
-# work around display tearing on certain OEM display configs. Different namespace
-# from debug.hwui.disable_vsync. With skiavk, disabling vsync removes the fence
-# that Vulkan swapchain presentation waits on → present-before-render → memory
-# corruption → crash. Clearing here ensures it's not picked up at Zygote time.
+persist.sys.purgeable_assets=1
+debug.hwui.fps_divisor=1
+debug.hwui.drawing_enabled=true
 hwui.disable_vsync=false
 
