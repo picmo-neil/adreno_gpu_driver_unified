@@ -16,6 +16,20 @@ PLT=n
 # Recommended: n (only for A8xx GPUs)
 QGL=n
 
+# Per-App QGL Configuration
+# Only applies when QGL=y. Ignored entirely when QGL=n.
+#
+# y = per-app mode: QGLTrigger APK (AccessibilityService) monitors every app
+#     switch and applies the matching profile from qgl_profiles.json atomically.
+#     The APK is auto-installed and root-granted during module flash.
+#
+# n = static mode: a single qgl_config.txt is written once at boot from the
+#     bundled qgl_config.txt file (retry+verify logic, old code method).
+#     No APK. No per-app switching. One config for everything.
+#
+# Recommended: y (default)
+QGL_PERAPP=y
+
 # ========================================
 # Advanced Options
 # ========================================

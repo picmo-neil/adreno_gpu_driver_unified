@@ -1,9 +1,9 @@
 id=adreno_gpu_driver_unified
 name=Adreno GPU Driver Unified
-version=vx.x.x
-versionCode=xxxxxx
-author=@pica_pica_picachu-module template maker
-description=Unified Adreno GPU Driver module with mounting fixes for KernelSU, Magisk, and APatch. Includes SELinux policy fixes and DSP stability hardening.
+version=v1.0.0
+versionCode=250401
+author=@pica_pica_picachu
+description=Unified Adreno GPU Driver module with mounting fixes for KernelSU, Magisk, and APatch. Includes SELinux policy fixes and structural Vulkan safety gate.
 updateJson=
 banner=banner.webp
 webuiIcon=

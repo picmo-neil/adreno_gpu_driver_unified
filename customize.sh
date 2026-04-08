@@ -48,16 +48,19 @@ command_exists() {
 #
 # BUG-11 NOTE: This function must stay in sync with load_config() in common.sh.
 # Any new config key added to load_config() must be added here too.
-# Keys currently handled: VERBOSE, ARM64_OPT, QGL, PLT, RENDER_MODE,
+# Keys currently handled: VERBOSE, ARM64_OPT, QGL, QGL_PERAPP, PLT, RENDER_MODE,
 # FORCE_SKIAVKTHREADED_BACKEND.
 parse_config() {
   local cfg="$1" _k _v
   [ -f "$cfg" ] || return 1
+  # Pre-compute CR once — avoids spawning a subshell on every config line.
+  local _CR
+  _CR=$(printf '\r')
   while IFS='= ' read -r _k _v; do
     case "$_k" in '#'*|'') continue ;; esac
-    _v="${_v%"$(printf '\r')"}"
+    _v="${_v%"$_CR"}"
     case "$_k" in
-      VERBOSE|ARM64_OPT|QGL|PLT|FORCE_SKIAVKTHREADED_BACKEND)
+      VERBOSE|ARM64_OPT|QGL|QGL_PERAPP|PLT|FORCE_SKIAVKTHREADED_BACKEND)
         case "$_v" in
           [Yy]|[Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee]) _v='y' ;;
           *) _v='n' ;;
@@ -79,6 +82,7 @@ parse_config() {
       VERBOSE)     VERBOSE="$_v" ;;
       ARM64_OPT)   ARM64_OPT="$_v" ;;
       QGL)         QGL="$_v" ;;
+      QGL_PERAPP)  QGL_PERAPP="$_v" ;;
       PLT)         PLT="$_v" ;;
       RENDER_MODE) RENDER_MODE="$_v" ;;
       FORCE_SKIAVKTHREADED_BACKEND) FORCE_SKIAVKTHREADED_BACKEND="$_v" ;;
@@ -94,8 +98,10 @@ parse_config() {
 VERBOSE="n"
 ARM64_OPT="n"
 QGL="n"
+QGL_PERAPP="n"
 PLT="n"
 RENDER_MODE="normal"
+FORCE_SKIAVKTHREADED_BACKEND="n"
 CONFIG_FILE=""
 CONFIG_FOUND=false
 
@@ -411,13 +417,17 @@ detect_metamodule() {
   METAMODULE_NAME=""
   METAMODULE_ID=""
 
+  # Pre-compute CR once — avoids spawning a subshell on every line.
+  local _MCR
+  _MCR=$(printf '\r')
+
   if [ -L "/data/adb/metamodule" ]; then
     META_LINK=$(readlink -f "/data/adb/metamodule" 2>/dev/null)
     if [ -n "$META_LINK" ] && [ -f "$META_LINK/module.prop" ]; then
       while IFS='=' read -r _mk _mv; do
         case "$_mk" in
-          id)   METAMODULE_ID="${_mv%"$(printf '\r')"}" ;;
-          name) METAMODULE_NAME="${_mv%"$(printf '\r')"}" ;;
+          id)   METAMODULE_ID="${_mv%"$_MCR"}" ;;
+          name) METAMODULE_NAME="${_mv%"$_MCR"}" ;;
         esac
       done < "$META_LINK/module.prop" 2>/dev/null
       if [ ! -f "$META_LINK/disable" ] && [ ! -f "$META_LINK/remove" ]; then
@@ -447,7 +457,7 @@ detect_metamodule() {
         METAMODULE_ID="$meta_id"
         METAMODULE_NAME="$meta_id"
         while IFS='=' read -r _mk _mv; do
-          case "$_mk" in name) METAMODULE_NAME="${_mv%"$(printf '\r')"}"; break ;; esac
+          case "$_mk" in name) METAMODULE_NAME="${_mv%"$_MCR"}"; break ;; esac
         done < "$mod_dir/module.prop" 2>/dev/null
         METAMODULE_INSTALLED=true
         METAMODULE_ACTIVE=true
@@ -969,15 +979,29 @@ RESTORED_CONFIGS="$CONFIG_FOUND"
 [ "$QGL" = "y" ]       || QGL="n"
 [ "$PLT" = "y" ]       || PLT="n"
 [ "$VERBOSE" = "y" ]   || VERBOSE="n"
+[ "$FORCE_SKIAVKTHREADED_BACKEND" = "y" ] || FORCE_SKIAVKTHREADED_BACKEND="n"
 [ -n "$RENDER_MODE" ]  || RENDER_MODE="normal"
 
 ui_print "Configuration:"
 ui_print "  - PLT: $PLT"
 ui_print "  - QGL: $QGL"
+if [ "$QGL" = "y" ]; then
+  ui_print "  - QGL Per-App: $QGL_PERAPP"
+fi
 if [ "$IS_ARM64" = "true" ]; then
   ui_print "  - ARM64 Opt: $ARM64_OPT"
 fi
 ui_print "  - Render: $RENDER_MODE"
+
+# ── skiavk + QGL_PERAPP=n warning ────────────────────────────────────────
+if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "n" ] && [ "$RENDER_MODE" = "skiavk" ]; then
+  ui_print " "
+  ui_print "⚠️  WARNING: skiavk + QGL_PERAPP=n"
+  ui_print "   Apps launched before boot_completed+3s receive NO QGL config"
+  ui_print "   at Vulkan init time. This directly degrades benchmark scores."
+  ui_print "   Set QGL_PERAPP=y in adreno_config.txt to fix."
+  ui_print " "
+fi
 
 log_only "Final config: PLT=$PLT, QGL=$QGL, ARM64_OPT=$ARM64_OPT, VERBOSE=$VERBOSE, RENDER_MODE=$RENDER_MODE"
 
@@ -1282,7 +1306,7 @@ else
   log_only "WARNING: No system directory found in module package"
 fi
 
-for file in module.prop post-fs-data.sh service.sh uninstall.sh system.prop sepolicy.rule adreno_config.txt qgl_config.txt common.sh; do
+for file in module.prop post-fs-data.sh service.sh uninstall.sh system.prop sepolicy.rule adreno_config.txt qgl_config.txt common.sh boot-completed.sh apply_qgl.sh qgl_profiles.json; do
   if [ -f "$TMPDIR/$file" ]; then
     if cp -f "$TMPDIR/$file" "$MODPATH/" 2>/dev/null; then
       FILES_COPIED=$((FILES_COPIED + 1))
@@ -1293,6 +1317,17 @@ for file in module.prop post-fs-data.sh service.sh uninstall.sh system.prop sepo
     fi
   fi
 done
+
+# Install QGL Trigger APK (companion app for per-app QGL via AccessibilityService)
+if [ -f "$TMPDIR/QGLTrigger.apk" ]; then
+  if cp -f "$TMPDIR/QGLTrigger.apk" "$MODPATH/QGLTrigger.apk" 2>/dev/null; then
+    FILES_COPIED=$((FILES_COPIED + 1))
+    log_only "Copied: QGLTrigger.apk"
+  else
+    FILES_FAILED=$((FILES_FAILED + 1))
+    log_only "ERROR: Failed to copy QGLTrigger.apk"
+  fi
+fi
 
 if [ $FILES_FAILED -gt 0 ]; then
   ui_print "[!] Module files installed with $FILES_FAILED errors"
@@ -1334,7 +1369,7 @@ else
   find "$MODPATH" -type f -exec chmod 0644 {} + 2>/dev/null || PERMS_FAILED=$((PERMS_FAILED + 1))
 fi
 
-for script in post-fs-data.sh service.sh boot-completed.sh uninstall.sh common.sh; do
+for script in post-fs-data.sh service.sh boot-completed.sh uninstall.sh common.sh apply_qgl.sh; do
   if [ -f "$MODPATH/$script" ]; then
     if chmod 0755 "$MODPATH/$script" 2>/dev/null; then
       PERMS_SET=$((PERMS_SET + 1))
@@ -1555,30 +1590,22 @@ fi
 # are deliberately NOT written to system.prop here.
 #
 # Reason: system.prop is loaded by the root manager via resetprop BEFORE
-# post-fs-data.sh executes and BEFORE the first-boot safety check runs.
-# Writing skiavk/skiagl to system.prop at install time causes bootloop on the
-# FIRST boot after a fresh flash because:
-#   1. Vulkan driver validation on a pristine install (zero shader cache) can
-#      time out, crashing SurfaceFlinger.
-#   2. Vulkan driver validation takes time on first install.
+# post-fs-data.sh executes. Writing skiavk/skiagl to system.prop at install
+# time can cause issues on some OEM ROMs where early prop loading conflicts
+# with the Vulkan compatibility gate.
 #
-# Instead, render mode is applied dynamically via resetprop in post-fs-data.sh
-# AFTER the first-boot safety check. post-fs-data.sh runs before Zygote and
-# SurfaceFlinger, so the timing is correct for all non-first-boot cases.
-#
-# On the FIRST boot after install, post-fs-data.sh detects .first_boot_pending
-# and uses normal mode — preventing the bootloop. From the second boot onwards,
-# the configured render mode is applied normally.
+# Instead, render mode is applied dynamically via resetprop in post-fs-data.sh.
+# post-fs-data.sh runs before Zygote and SurfaceFlinger, so the timing is
+# correct for all boots including first boot. The Vulkan compatibility gate
+# in post-fs-data.sh auto-degrades skiavk→skiagl when no Vulkan ICD is found,
+# providing real structural safety rather than blanket first-boot deferral.
 
 if [ -n "$RENDER_MODE" ] && [ "$RENDER_MODE" != "normal" ]; then
   ui_print " "
   ui_print "Render mode configured: $RENDER_MODE"
-  ui_print "[!] NOTE: Renderer override activates from 2nd boot onwards."
-  ui_print "    First boot: system-default renderer (no debug.hwui.renderer set)."
-  ui_print "    All stability/compatibility props ARE active on first boot."
+  ui_print "    Stability/compatibility props active on all boots."
   ui_print "    Skia pipeline caches cleared pre-Zygote on mode change."
-  log_only "Render mode ($RENDER_MODE): renderer prop deferred to 2nd boot"
-  log_only "First boot: system-default renderer only. Stability props active."
+  log_only "Render mode ($RENDER_MODE): renderer applied via post-fs-data.sh"
 else
   ui_print " "
   ui_print "Render mode: normal (default)"
@@ -1710,7 +1737,6 @@ fi
 
 log_only "Cleaning system-level caches..."
 rm -rf /data/system/graphicsstats/* 2>/dev/null || true
-rm -rf /data/dalvik-cache/* 2>/dev/null || true
 rm -rf /data/cache/* 2>/dev/null || true
 rm -rf /data/system/package_cache/* 2>/dev/null || true
 rm -rf /data/resource-cache/* 2>/dev/null || true
@@ -1747,6 +1773,23 @@ if [ -f "$MODPATH/adreno_config.txt" ]; then
       log_only "Configuration backed up to SD Card" || \
       log_only "WARNING: Failed to backup configuration to SD Card"
   fi
+fi
+
+# Install default QGL profiles JSON if not already present (preserves user edits)
+if [ -f "$MODPATH/qgl_profiles.json" ]; then
+  if [ ! -f "$SD_CONFIG_DIR/qgl_profiles.json" ]; then
+    cp -f "$MODPATH/qgl_profiles.json" "$SD_CONFIG_DIR/qgl_profiles.json" 2>/dev/null && \
+      log_only "Default QGL profiles installed to SD Card" || \
+      log_only "WARNING: Failed to install default QGL profiles"
+  else
+    log_only "QGL profiles already exists on SD Card — preserving user config"
+  fi
+fi
+
+# Install QGL Trigger APK silently (user enables via Settings > Accessibility)
+if [ -f "$MODPATH/QGLTrigger.apk" ]; then
+  log_only "QGL Trigger APK bundled — install via: pm install $MODPATH/QGLTrigger.apk"
+  log_only "Then enable in Settings > Accessibility > QGL Trigger Service"
 fi
 
 # ========================================
@@ -1816,27 +1859,6 @@ Cache Categories Cleaned: $CACHE_CLEANED
 INSTALL_INFO
 
 log_only "Installation info saved to $MODPATH/.install_info"
-
-# ========================================
-# FIRST BOOT PENDING MARKER
-# ========================================
-# Tells post-fs-data.sh this is the first boot after a fresh install.
-# On first boot, post-fs-data.sh will:
-#   1. Defer the renderer prop (system-default renderer used this boot)
-#   2. Remove this marker so the 2nd boot sets the configured renderer normally
-#   3. Create .service_skip_render so service.sh also skips the renderer prop
-#
-# All HWUI/EGL/GPU stability props ARE applied on first boot — only
-# debug.hwui.renderer / debug.renderengine.backend are withheld until boot 2.
-# This is intentional: deferring Vulkan on the first boot prevents a bootloop
-# that occurs when skiavk/skiagl is forced on a pristine (empty) GPU shader cache.
-
-if touch "$MODPATH/.first_boot_pending" 2>/dev/null; then
-  log_only "First boot pending marker created: $MODPATH/.first_boot_pending"
-  log_only "(SkiaVK/SkiaGL render mode deferred to 2nd boot for stability)"
-else
-  log_only "WARNING: Could not create first boot pending marker (non-fatal)"
-fi
 
 # ========================================
 # RESET BOOTLOOP COUNTER

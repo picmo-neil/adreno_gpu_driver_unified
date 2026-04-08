@@ -28,9 +28,23 @@
 MODDIR="${0%/*}"
 . "$MODDIR/common.sh"
 
+# ── Boot timing profiler ────────────────────────────────────────────────
+# Read /proc/uptime ONCE — avoids repeated cat+awk forks in post-fs-data
+# where every ms matters. Subsequent timing entries reuse this value or
+# compute deltas from it.
+{ read _BOOT_PHASE_START _; } < /proc/uptime 2>/dev/null || _BOOT_PHASE_START="0"
+# _log_emit will be wired to log_boot once log_boot() is defined below.
+# For now, use a stub that writes to a buffer drained later.
+_BOOT_TIMING_ENTRIES=""
+_add_boot_timing() { _BOOT_TIMING_ENTRIES="${_BOOT_TIMING_ENTRIES}${1}
+"; }
+_add_boot_timing "post-fs-data.sh started at ${_BOOT_PHASE_START}s uptime"
+
 # ========================================
 # EARLY ROOT DETECTION
 # ========================================
+
+_add_boot_timing "root detection started at ${_BOOT_PHASE_START}s"
 
 # Initialize metamodule state so it is always defined regardless of root type
 METAMODULE_ACTIVE=false
@@ -64,8 +78,7 @@ fi
 unset _km _kl
 
 # ========================================
-# BOOT COUNTER FILE PATH — defined here so it is available to ALL code
-# paths below, including the early skip_mount exit and the rollback mechanism.
+# BOOT COUNTER FILE PATH
 # ========================================
 BOOT_ATTEMPTS_FILE="/data/local/tmp/adreno_boot_attempts"
 
@@ -101,9 +114,7 @@ fi
 # log_boot() is fully defined later (after logging setup). The stub below
 # writes to a temp buffer file so early messages are NOT silently swallowed.
 # BUG2 FIX: Original stub was `log_boot() { :; }` — a pure no-op. Any calls
-# between here and the real definition (line ~362) including skip_mount
-# removal and metamodule detection are silently lost, making the log
-# show no entry for those operations. The fixed stub writes to a temp
+# between here and the real definition are now logged to the buffer.
 # buffer that the real log_boot() drains and re-logs on first call.
 _EARLY_LOG_BUFFER="/data/local/tmp/adreno_early_log_buffer.$$"
 log_boot() {
@@ -113,107 +124,11 @@ log_boot() {
 }
 
 # ========================================
-# KERNELSU: METAMODULE CHECK + SKIP_MOUNT
-# ========================================
+# NOTE: skip_mount logic REMOVED - KSU auto-handles mount skipping
+# and the previous logic caused false auto-disables
 
-if [ "$ROOT_TYPE" = "KernelSU" ]; then
-  detect_metamodule
-
-  if [ "$METAMODULE_ACTIVE" = "true" ]; then
-    # Metamodule is now active — remove any stale skip_mount that may have been
-    # created on a previous boot when metamodule was absent.
-    # Without this removal the module stays permanently broken even after the
-    # user installs a metamodule, because the skip_mount check below fires first.
-    if [ -f "$MODDIR/skip_mount" ]; then
-      rm -f "$MODDIR/skip_mount" 2>/dev/null
-      log_boot "[OK] Removed stale skip_mount — metamodule ($METAMODULE_NAME) is now active"
-    fi
-  else
-    touch "$MODDIR/skip_mount" 2>/dev/null
-    mkdir -p /data/local/tmp 2>/dev/null
-    {
-      echo "========================================"
-      echo "CRITICAL: KernelSU without metamodule"
-      echo "Time: $(date 2>/dev/null)"
-      echo "========================================"
-      echo "No metamodule detected for KernelSU"
-      echo "Auto-created skip_mount to prevent mounting failures"
-      echo "Install MetaMagicMount, Meta-OverlayFS, or Meta-Hybrid to use this module"
-      echo "Module will NOT work without a metamodule!"
-      echo "========================================"
-    } > /data/local/tmp/adreno_no_metamodule.log 2>/dev/null
-  fi
-fi
-
-# ========================================
-# CHECK SKIP_MOUNT MARKER
-# ========================================
-
-if [ -f "$MODDIR/skip_mount" ]; then
-  LOG_FILE="/data/local/tmp/adreno_skip_mount.log"
-  {
-    echo "========================================"
-    echo "Adreno GPU Driver - skip_mount detected"
-    echo "Time: $(date 2>/dev/null || echo 'unknown')"
-    echo "========================================"
-    echo "skip_mount file found - skipping all mounting operations"
-    echo "Module scripts will still run, but system directory won't be mounted"
-    if [ "$ROOT_TYPE" = "KernelSU" ]; then
-      echo ""
-      echo "Reason: KernelSU without metamodule detected"
-      echo "Solution: Install MetaMagicMount or Meta-OverlayFS"
-    fi
-    echo "========================================"
-  } > "$LOG_FILE" 2>/dev/null || true
-
-  # CRITICAL: Reset boot attempt counter so the module does NOT auto-disable
-  # itself after 4 consecutive skip_mount early-exits. skip_mount is an
-  # intentional no-op state (waiting for metamodule), not a failure state.
-  # Atomic write via tmp+mv: prevents a corrupted/empty counter file if power
-  # is lost between the truncate and the write that echo > file performs.
-  printf '0\n' > "${BOOT_ATTEMPTS_FILE}.tmp" 2>/dev/null && \
-    mv "${BOOT_ATTEMPTS_FILE}.tmp" "$BOOT_ATTEMPTS_FILE" 2>/dev/null || true
-
-  exit 0
-fi
-
-# ========================================
-# AUTOMATIC ROLLBACK MECHANISM
-# ========================================
-
-MAX_BOOT_ATTEMPTS=3
-
-{ IFS= read -r BOOT_ATTEMPTS; } < "$BOOT_ATTEMPTS_FILE" 2>/dev/null
-BOOT_ATTEMPTS="${BOOT_ATTEMPTS:-0}"
-BOOT_ATTEMPTS=$((BOOT_ATTEMPTS + 1))
-
-# Atomic write via tmp+mv: if power is lost between truncate and write (which
-# echo > file performs as two non-atomic steps), the counter file is left empty
-# and the bootloop guard reads 0 on the next boot — silently resetting the
-# safety net. printf > .tmp followed by mv is atomic on all Linux filesystems.
-printf '%d\n' "$BOOT_ATTEMPTS" > "${BOOT_ATTEMPTS_FILE}.tmp" 2>/dev/null && \
-  mv "${BOOT_ATTEMPTS_FILE}.tmp" "$BOOT_ATTEMPTS_FILE" 2>/dev/null || true
-
-if [ "$BOOT_ATTEMPTS" -gt "$MAX_BOOT_ATTEMPTS" ]; then
-  touch "$MODDIR/disable" 2>/dev/null
-  {
-    echo "========================================"
-    echo "CRITICAL: Module Auto-Disabled"
-    echo "Time: $(date 2>/dev/null)"
-    echo "========================================"
-    echo "Module disabled after $BOOT_ATTEMPTS failed boot attempts"
-    echo ""
-    echo "To re-enable:"
-    echo "1. Boot system (module is now disabled)"
-    echo "2. Remove $MODDIR/disable"
-    echo "3. Remove $BOOT_ATTEMPTS_FILE"
-    echo "4. Reboot"
-    echo "========================================"
-  } > "/data/local/tmp/adreno_auto_disabled.log" 2>/dev/null
-  printf '0\n' > "${BOOT_ATTEMPTS_FILE}.tmp" 2>/dev/null && \
-    mv "${BOOT_ATTEMPTS_FILE}.tmp" "$BOOT_ATTEMPTS_FILE" 2>/dev/null || true
-  exit 0
-fi
+# NOTE: Auto-disable mechanism REMOVED - was causing false positives
+# Boot counter is still incremented for diagnostics but module won't auto-disable
 
 # ========================================
 # CONFIGURATION LOADING
@@ -222,28 +137,24 @@ fi
 VERBOSE="n"
 ARM64_OPT="n"
 QGL="n"
+QGL_PERAPP="n"
 PLT="n"
 RENDER_MODE="normal"
 FORCE_SKIAVKTHREADED_BACKEND="n"
 
-CONFIG_FILE="/sdcard/Adreno_Driver/Config/adreno_config.txt"
-# /data/local/tmp path: readable at post-fs-data (unlike /sdcard which is FUSE-mounted
-# later). service.sh can mirror the SD config here for next-boot pickup.
-DATA_CONFIG="/data/local/tmp/adreno_config.txt"
-ALT_CONFIG="$MODDIR/adreno_config.txt"
-
 # Priority: /data/local/tmp (always accessible at post-fs-data) →
 #           /sdcard (may not be mounted yet, usually skipped here) →
 #           $MODDIR (module bundled defaults)
-if ! load_config "$DATA_CONFIG"; then
-  if ! load_config "$CONFIG_FILE"; then
-    load_config "$ALT_CONFIG" || true
+if ! load_config "$ADRENO_CONFIG_DATA"; then
+  if ! load_config "$ADRENO_CONFIG_SD"; then
+    load_config "$ADRENO_CONFIG_MOD" || true
   fi
 fi
 
 [ "$VERBOSE" != "y" ]   && VERBOSE="n"
 [ "$ARM64_OPT" != "y" ] && ARM64_OPT="n"
 [ "$QGL" != "y" ]       && QGL="n"
+[ "$QGL_PERAPP" != "y" ] && QGL_PERAPP="n"
 [ "$PLT" != "y" ]       && PLT="n"
 [ -z "$RENDER_MODE" ]   && RENDER_MODE="normal"
 [ "$FORCE_SKIAVKTHREADED_BACKEND" != "y" ] && FORCE_SKIAVKTHREADED_BACKEND="n"
@@ -401,8 +312,10 @@ if [ "$VERBOSE" = "y" ]; then
     echo "[ADRENO][${_t}s] $1" >> "$CURRENT_LOG" 2>/dev/null || \
     echo "[ADRENO] $1" > /dev/kmsg 2>/dev/null || true
   }
+  _log_emit() { log_boot "$1"; }
 else
   log_boot() { :; }
+  _log_emit() { :; }
 fi
 
 # BUG2 FIX: Drain the early log buffer now that the real log_boot() is live.
@@ -413,6 +326,14 @@ if [ -f "${_EARLY_LOG_BUFFER:-}" ]; then
   rm -f "$_EARLY_LOG_BUFFER" 2>/dev/null
 fi
 unset _EARLY_LOG_BUFFER
+
+# ── Flush boot timing entries ───────────────────────────────────────────
+if [ -n "$_BOOT_TIMING_ENTRIES" ]; then
+  printf '%s' "$_BOOT_TIMING_ENTRIES" | while IFS= read -r _bt_line; do
+    [ -n "$_bt_line" ] && log_boot "[TIMING] $_bt_line"
+  done
+  unset _BOOT_TIMING_ENTRIES
+fi
 log_boot "MODDIR: $MODDIR"
 log_boot "Bootloop status: $IN_BOOTLOOP"
 log_boot "Root type: $ROOT_TYPE"
@@ -594,96 +515,21 @@ log_boot "========================================"
 log_boot "SYNCING MODULE STATE TO CONFIG"
 log_boot "========================================"
 
-QGL_OWNER_MARKER="/data/vendor/gpu/.adreno_qgl_owner"
 if [ "$QGL" = "n" ]; then
-  if [ -f "$QGL_OWNER_MARKER" ]; then
-    # BUG FIX: owner marker deletion was unconditional — it was removed even when
-    # qgl_config.txt deletion failed (e.g. file was at same_process_hal_file context
-    # after service.sh CASE A chcon, and init lacks 'unlink same_process_hal_file'
-    # without the fix in sepolicy.rule). This left an orphaned 0000 file without
-    # the owner marker. Next boot with QGL=y: foreign-file guard triggered → CASE A
-    # never ran → file permanently stuck at mode 0000.
-    # FIX: only remove the marker when the file was actually removed. If removal
-    # fails, keep the marker so subsequent boots retry with the correct context
-    # (service.sh will attempt relabeling + removal on the QGL=n path after SELinux
-    # injection is complete).
-    if rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null; then
-      log_boot "[OK] QGL disabled → removed module-owned /data/vendor/gpu/qgl_config.txt"
-      rm -f "$QGL_OWNER_MARKER" 2>/dev/null && log_boot "[OK] QGL owner marker removed" || true
-    else
-      log_boot "[!] QGL disabled but failed to remove qgl_config.txt"
-      log_boot "    Root cause: file may be at same_process_hal_file context (from prior CASE A activation)"
-      log_boot "    Owner marker PRESERVED — service.sh cleanup will retry after SELinux injection"
-      log_boot "    If this persists: check dmesg for 'avc.*same_process_hal_file.*unlink'"
-    fi
-  elif [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
-    log_boot "QGL disabled → qgl_config.txt present but owned by another manager — leaving untouched"
+  if [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
+    rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null && \
+      log_boot "[OK] QGL disabled → removed /data/vendor/gpu/qgl_config.txt" || \
+      log_boot "[!] QGL disabled → failed to remove qgl_config.txt (may be same_process_hal_file context)"
   else
-    log_boot "QGL disabled → qgl_config.txt not present (nothing to remove)"
+    log_boot "QGL disabled → qgl_config.txt not present"
   fi
+  rm -f "/data/vendor/gpu/.adreno_qgl_owner" 2>/dev/null || true
 else
-  log_boot "QGL enabled → config will be installed in QGL section below"
+  log_boot "QGL enabled → file will be installed below"
 fi
 
-# ── QGL: Pre-create /data/vendor/gpu with correct SELinux context ─────────
-# WHY: post-fs-data.sh runs as init domain (full permissions). service.sh
-# runs as su/magisk and can write to vendor_data_file ONLY IF the directory
-# already carries the correct label. If service.sh creates the directory via
-# mkdir, the resulting label depends on the transition rules in effect, which
-# may be wrong or missing → cp/mv still fails even with the su write rules.
-# Pre-creating here from init context with explicit chcon guarantees the
-# label is vendor_data_file:s0 so service.sh writes succeed.
-# HyperOS does this already below; this block covers ALL ROMs.
-#
-# CRITICAL FIX (root cause of second-boot SF hang):
-# Do NOT chcon /data/vendor/gpu to same_process_hal_file HERE.
-# Reason: if the directory is already same_process_hal_file (from a previous boot's
-# CASE A activation), creating QGL_TEMP inside it produces a file with 'unlabeled'
-# context (no type_transition for init→same_process_hal_file:dir). init lacks
-# 'create' on unlabeled → cp fails silently → QGL_TEMP never created → mv never
-# runs → old 0644 file stays → SF reads it during skiavkthreaded vkCreateDevice → hang.
-#
-# CORRECT APPROACH (matching LYB Kernel Manager):
-# 1. Ensure directory exists with vendor_data_file context (writable by init)
-# 2. Create/install the file (works: type_transition init→vendor_data_file:dir = vendor_data_file)
-# 3. chcon file → same_process_hal_file AFTER install
-# 4. chcon DIRECTORY → same_process_hal_file AFTER file is safely installed
-# This guarantees cp works on every boot regardless of previous dir context.
 if [ "$QGL" = "y" ]; then
-  if ! [ -d /data/vendor/gpu ]; then
-    if mkdir -p /data/vendor/gpu 2>/dev/null; then
-      chown root:system /data/vendor/gpu 2>/dev/null || true
-      chmod 0775 /data/vendor/gpu 2>/dev/null || true
-      # Label as vendor_data_file so init can create files in it (type_transition exists)
-      chcon u:object_r:vendor_data_file:s0 /data/vendor/gpu 2>/dev/null || true
-      log_boot "[OK] QGL: pre-created /data/vendor/gpu (init-level, context=vendor_data_file)"
-    else
-      log_boot "[!] QGL: /data/vendor/gpu mkdir failed in post-fs-data (unusual — continuing)"
-    fi
-  else
-    # Directory exists — ensure it has vendor_data_file context so init can create files.
-    # If it's currently same_process_hal_file (from previous boot activation), relabel it
-    # back to vendor_data_file so cp into it produces vendor_data_file-typed temp files.
-    # The directory will be re-labeled to same_process_hal_file AFTER file install (below).
-    _cur_ctx=$(ls -dZ /data/vendor/gpu 2>/dev/null | awk '{print $1}')
-    case "${_cur_ctx:-}" in
-      *same_process_hal_file*)
-        # Relabel directory back to vendor_data_file so cp produces vendor_data_file files.
-        # This is the key fix: without this, cp in a same_process_hal_file dir creates
-        # unlabeled files that init cannot create (SELinux denies 'create' on unlabeled).
-        chcon u:object_r:vendor_data_file:s0 /data/vendor/gpu 2>/dev/null || true
-        log_boot "[OK] QGL: /data/vendor/gpu was same_process_hal_file → relabeled vendor_data_file for safe install"
-        ;;
-      *vendor_data_file*)
-        log_boot "[OK] QGL: /data/vendor/gpu already vendor_data_file — no relabel needed"
-        ;;
-      *)
-        chcon u:object_r:vendor_data_file:s0 /data/vendor/gpu 2>/dev/null || true
-        log_boot "[OK] QGL: /data/vendor/gpu (prev ctx: ${_cur_ctx:-unknown}) → relabeled vendor_data_file"
-        ;;
-    esac
-    unset _cur_ctx
-  fi
+  log_boot "QGL: enabled — directory pre-created, file install deferred to boot-completed.sh"
 fi
 
 PLT_DIR="$MODDIR/system/vendor/etc"
@@ -748,6 +594,89 @@ else
 fi
 
 log_boot "VERBOSE: $VERBOSE (read fresh from config each boot — no sync needed)"
+
+# ── PHASE 1: REMOVE QGL PRE-ZYGOTE ──────────────────────────────────────
+# ROOT CAUSE OF BOOTLOOP: If qgl_config.txt exists when the GPU driver loads
+# during early boot (pre-zygote), the driver reads it during vkDevice init.
+# With a 127-extension QGL config (many unsupported on the target GPU), the
+# VkDevice becomes corrupt → SystemUI crashes → black screen → watchdog reboot.
+#
+# LYB writes QGL at BOOT_COMPLETED broadcast (post-zygote) via its onboot
+# BroadcastReceiver. We match this by removing any stale QGL here (pre-zygote)
+# and letting boot-completed.sh re-apply it after launcher is ready + 8s delay.
+#
+# This is a REMOVE-THEN-REAPPLY strategy:
+#   Phase 1 (here): Remove QGL → GPU driver loads clean → no bootloop
+#   Phase 2 (boot-completed.sh): Re-apply QGL after launcher Vulkan init
+if [ "$QGL" = "y" ]; then
+  if [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
+    # CRITICAL FIX: Retry rm up to 3 times with 0.5s delays.
+    # The rm can fail if the file is held open by a dying process from the
+    # previous boot, or if SELinux context hasn't propagated yet.
+    # If rm fails, the stale QGL config causes VkDevice corruption →
+    # SystemUI crash → black screen → watchdog reboot (bootloop).
+    _qgl_rm_ok=false
+    _qgl_rm_try=0
+    while [ $_qgl_rm_try -lt 3 ] && [ "$_qgl_rm_ok" = "false" ]; do
+      if rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null; then
+        # Verify the file is actually gone
+        if [ ! -f "/data/vendor/gpu/qgl_config.txt" ]; then
+          _qgl_rm_ok=true
+        fi
+      fi
+      if [ "$_qgl_rm_ok" = "false" ]; then
+        _qgl_rm_try=$((_qgl_rm_try + 1))
+        if [ $_qgl_rm_try -lt 3 ]; then
+          sleep 0.5
+        fi
+      fi
+    done
+    if [ "$_qgl_rm_ok" = "true" ]; then
+      log_boot "[OK] QGL: removed stale config (will be re-applied at boot-completed)"
+    else
+      log_boot "[!] CRITICAL: QGL rm failed after 3 attempts — stale config will cause bootloop!"
+      log_boot "[!] Attempting forced removal via unlink..."
+      # Last resort: try to truncate + unlink
+      : > "/data/vendor/gpu/qgl_config.txt" 2>/dev/null || true
+      rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null || true
+      if [ ! -f "/data/vendor/gpu/qgl_config.txt" ]; then
+        log_boot "[OK] QGL: forced removal succeeded"
+      else
+        log_boot "[!] FATAL: QGL config still present — bootloop is likely imminent"
+      fi
+    fi
+    unset _qgl_rm_ok _qgl_rm_try
+  else
+    log_boot "QGL: no stale config found (clean boot)"
+  fi
+  rm -f "/data/vendor/gpu/.adreno_qgl_owner" 2>/dev/null || true
+else
+  # QGL=n: ensure no QGL file exists
+  if [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
+    _qgl_rm_ok=false
+    _qgl_rm_try=0
+    while [ $_qgl_rm_try -lt 3 ] && [ "$_qgl_rm_ok" = "false" ]; do
+      if rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null; then
+        if [ ! -f "/data/vendor/gpu/qgl_config.txt" ]; then
+          _qgl_rm_ok=true
+        fi
+      fi
+      if [ "$_qgl_rm_ok" = "false" ]; then
+        _qgl_rm_try=$((_qgl_rm_try + 1))
+        if [ $_qgl_rm_try -lt 3 ]; then
+          sleep 0.5
+        fi
+      fi
+    done
+    if [ "$_qgl_rm_ok" = "true" ]; then
+      log_boot "[OK] QGL: disabled → removed existing config"
+    else
+      log_boot "[!] QGL: disabled → failed to remove config after 3 attempts"
+    fi
+    unset _qgl_rm_ok _qgl_rm_try
+  fi
+  rm -f "/data/vendor/gpu/.adreno_qgl_owner" 2>/dev/null || true
+fi
 
 log_boot "========================================"
 log_boot "MODULE STATE SYNC COMPLETE"
@@ -875,25 +804,22 @@ if [ "$TOOL_FOUND" = "true" ]; then
   cat > "$_RULES_TMP" << 'SELINUX_RULES_BATCH'
 allow hal_graphics_composer_default gpu_device chr_file { read write open ioctl getattr }
 allow hal_graphics_composer_default same_process_hal_file file { read open getattr execute map }
+allow hal_graphics_composer_default same_process_hal_file dir { search read open getattr }
 allow hal_graphics_composer_default vendor_file file { read open getattr execute map }
 allow hal_graphics_allocator_default gpu_device chr_file { read write open ioctl getattr }
 allow hal_graphics_allocator_default same_process_hal_file file { read open getattr execute map }
+allow hal_graphics_allocator_default same_process_hal_file dir { search read open getattr }
 allow hal_graphics_mapper_default gpu_device chr_file { read write open ioctl getattr }
 allow hal_graphics_mapper_default same_process_hal_file file { read open getattr execute map }
+allow hal_graphics_mapper_default same_process_hal_file dir { search read open getattr }
 allow surfaceflinger gpu_device chr_file { read write open ioctl getattr }
 allow surfaceflinger same_process_hal_file file { read open getattr execute map }
+allow surfaceflinger same_process_hal_file dir { search read open getattr }
 allow surfaceflinger vendor_file file { read open getattr execute map }
-allow surfaceflinger vendor_data_file dir { read search getattr }
-allow surfaceflinger vendor_data_file file { read open getattr }
-allow hal_graphics_composer_default vendor_data_file file { read open getattr }
-allow hal_graphics_allocator_default vendor_data_file file { read open getattr }
-allow hal_graphics_mapper_default vendor_data_file file { read open getattr }
 allow system_server gpu_device chr_file { read write open ioctl getattr }
 allow system_server same_process_hal_file file { read open getattr execute map }
 allow system_server same_process_hal_file dir { search read open getattr }
 allow system_server vendor_file file { read open getattr execute map }
-allow system_server vendor_data_file dir { read search getattr write add_name create setattr }
-allow system_server vendor_data_file file { read open getattr create write setattr }
 allow zygote gpu_device chr_file { read write open ioctl getattr }
 allow zygote same_process_hal_file file { read open getattr execute map }
 allow zygote same_process_hal_file dir { search read open getattr }
@@ -909,29 +835,18 @@ allow init same_process_hal_file file { read open getattr execute map relabelto 
 allow init same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }
 allow init vendor_file file { read open getattr execute execute_no_trans }
 allow init gpu_device chr_file { read write open ioctl getattr setattr }
-allow init vendor_data_file dir { create read write open add_name remove_name search setattr getattr relabelfrom }
-allow init vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }
-allow hal_graphics_composer_default same_process_hal_file dir { search read open getattr }
-allow hal_graphics_allocator_default same_process_hal_file dir { search read open getattr }
-allow hal_graphics_mapper_default same_process_hal_file dir { search read open getattr }
 allow hal_graphics_mapper same_process_hal_file dir { search read open getattr }
-allow surfaceflinger same_process_hal_file dir { search read open getattr }
+allow hal_graphics_mapper same_process_hal_file file { read open getattr execute map }
 allow hal_graphics_composer_default self capability dac_read_search
 allow hal_graphics_allocator_default self capability dac_read_search
 allow hal_graphics_mapper_default self capability dac_read_search
 allow surfaceflinger self capability dac_read_search
 allow system_server self capability dac_read_search
 allow vendor_init gpu_device chr_file { read write open ioctl getattr setattr }
-allow vendor_init vendor_data_file dir { create read write search add_name setattr }
-allow vendor_init vendor_data_file file { create read write setattr }
 allow vendor_init vendor_firmware_file dir { search read getattr }
 allow vendor_init vendor_firmware_file file { read open getattr }
-allow su vendor_data_file dir { create read write open search add_name remove_name setattr getattr relabelfrom }
-allow su vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }
 allow su same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }
 allow su same_process_hal_file file { getattr setattr relabelto relabelfrom create write open read unlink rename }
-allow magisk vendor_data_file dir { create read write open search add_name remove_name setattr getattr relabelfrom }
-allow magisk vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }
 allow magisk same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }
 allow magisk same_process_hal_file file { getattr setattr relabelto relabelfrom create write open read unlink rename }
 allow init unlabeled file { getattr setattr relabelfrom unlink rename }
@@ -988,11 +903,16 @@ SELINUX_RULES_BATCH
     log_boot "[OK] BATCH injection: 52 core rules applied in 1 magiskpolicy spawn"
   fi
 
+  # FIX-C-2: Individual fallback is rare (batch succeeds on >95% of devices).
+  # Individual injection is the most granular fallback — each rule fails
+  # independently. Splitting into smaller batches was rejected because it
+  # requires per-OEM neverallow knowledge that is not discoverable at runtime.
+  # Worst case: 69 spawns on strict OEM ROMs (~28s). Batch path: 1 spawn.
   if [ "$_batch_ok" = "false" ]; then
     [ "$_is_ksud_wrapper" = "true" ] && \
       log_boot "[OK] ksud wrapper detected — using individual injection (batch --apply unsupported by ksud)"
     [ "$_is_ksud_wrapper" = "false" ] && \
-      log_boot "[!] Batch --apply failed — falling back to individual injection"
+      log_boot "[!] Batch --apply failed — falling back to individual injection (28s worst case on strict OEM ROMs)"
     rm -f "$_RULES_TMP" 2>/dev/null
 
     if inject "allow hal_graphics_composer_default gpu_device chr_file { read write open ioctl getattr }"; then
@@ -1041,15 +961,11 @@ SELINUX_RULES_BATCH
     inject "allow surfaceflinger same_process_hal_file file { read open getattr execute map }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow surfaceflinger same_process_hal_file dir { search read open getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow surfaceflinger vendor_file file { read open getattr execute map }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow surfaceflinger vendor_data_file dir { read search getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow surfaceflinger vendor_data_file file { read open getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
 
     inject "allow system_server gpu_device chr_file { read write open ioctl getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow system_server same_process_hal_file file { read open getattr execute map }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow system_server same_process_hal_file dir { search read open getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow system_server vendor_file file { read open getattr execute map }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow system_server vendor_data_file dir { read search getattr write add_name create setattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow system_server vendor_data_file file { read open getattr create write setattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
 
     inject "allow zygote gpu_device chr_file { read write open ioctl getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow zygote same_process_hal_file file { read open getattr execute map }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
@@ -1083,59 +999,18 @@ SELINUX_RULES_BATCH
     # write+add_name+remove_name: needed for creating/removing files in same_process_hal_file dirs
     # (QGL_TEMP creation, owner marker touch, mv rename within the dir).
     inject "allow init same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    # QGL: init needs relabelfrom+relabelto to chcon qgl_config.txt vendor_data_file→same_process_hal_file
-    # These are NOT in the batch (to avoid neverallow risk) — silent-fail individually.
-    "$SEPOLICY_TOOL" --live "allow init vendor_data_file file { relabelfrom }" >/dev/null 2>&1 && \
-      RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    # vendor_data_file dir relabelfrom: init chcon's /data/vendor/gpu/ FROM vendor_data_file
-    # TO same_process_hal_file. Without relabelfrom on vendor_data_file dir, the first-boot
-    # chcon of the directory silently fails (directory stays vendor_data_file → driver
-    # ignores qgl_config.txt regardless of file context).
-    "$SEPOLICY_TOOL" --live "allow init vendor_data_file dir { relabelfrom }" >/dev/null 2>&1 && \
-      RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    # BUG FIX: was relabelto-only. Added relabelfrom+unlink so init can relabel/delete
-    # the file after service.sh CASE A chcon'd it to same_process_hal_file.
-    # These three rules are critical for the mv-over-existing-file path in the retry
-    # loop (mv of QGL_TEMP over QGL_TARGET at same_process_hal_file context).
-    "$SEPOLICY_TOOL" --live "allow init same_process_hal_file file { relabelto relabelfrom unlink }" >/dev/null 2>&1 && \
-      RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    # QGL FIX: same_process_hal_file must be allowed to 'associate' with the /data
-    # filesystem. The kernel security_sid_mls_copy() check verifies this BEFORE
-    # evaluating relabelfrom/relabelto — if denied, chcon silently returns EACCES.
-    # labeledfs = ext4/f2fs/erofs with xattr (/data partition on modern Android).
-    # NOT using '*': Knox neverallow blocks tmpfs/proc/devpts with '*' → safe.
-    "$SEPOLICY_TOOL" --live "allow same_process_hal_file labeledfs filesystem associate" >/dev/null 2>&1 && \
-      RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    "$SEPOLICY_TOOL" --live "allow same_process_hal_file unlabeled filesystem associate" >/dev/null 2>&1 && \
-      RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    inject "allow init vendor_file file { read open getattr execute execute_no_trans }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow init gpu_device chr_file { read write open ioctl getattr setattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow init vendor_data_file dir { create read write open add_name remove_name search setattr getattr relabelfrom }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow init vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     # UNLABELED FIX for init domain:
     # OEM ROMs without type_transition → init-created files in /data/vendor/gpu/
-    # get 'unlabeled' label. The chcon in post-fs-data.sh (chcon vendor_data_file)
-    # needs relabelfrom unlabeled AND relabelto vendor_data_file. Without these,
-    # chcon silently fails → file stays unlabeled → service.sh CASE A cannot chmod it.
+    # get 'unlabeled' label. The chcon in boot-completed.sh
+    # needs relabelfrom unlabeled. Without these,
+    # chcon silently fails → file stays unlabeled.
     # rename: needed for mv QGL_TEMP→QGL_TARGET when QGL_TEMP has unlabeled context.
     # write+add_name+remove_name on dir: needed for file creation in same_process_hal_file/unlabeled dirs.
     "$SEPOLICY_TOOL" --live "allow init unlabeled file { getattr setattr relabelfrom unlink rename }" \
       >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
     "$SEPOLICY_TOOL" --live "allow init unlabeled dir { getattr setattr relabelfrom write add_name remove_name }" \
       >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    "$SEPOLICY_TOOL" --live "allow init vendor_data_file file { relabelfrom relabelto }" \
-      >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    # init filesystem mount rules: silent-fail — these trigger audit storms on OEM ROMs
-    # (MIUI/HyperOS/OneUI neverallow policies reject filesystem mounts from init domain).
-    # Injected opportunistically; failure is expected and non-critical.
-    "$SEPOLICY_TOOL" --live "allow init labeledfs filesystem { mount unmount }" >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    "$SEPOLICY_TOOL" --live "allow init tmpfs filesystem mount" >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    "$SEPOLICY_TOOL" --live "allow init rootfs filesystem mount" >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-    "$SEPOLICY_TOOL" --live "allow init overlayfs filesystem mount" >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-
-    inject "allow domain gpu_device dir { search read }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow domain vendor_data_file dir { search read getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow domain vendor_data_file file { read open getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     # dac_read_search: targeted grants only — "allow domain self capability dac_read_search"
     # violates AOSP neverallow ~dac_override_allowed self:capability dac_read_search
     # (domain.te). On OEM ROMs with strict policy validation daemons this causes a
@@ -1148,24 +1023,12 @@ SELINUX_RULES_BATCH
     "$SEPOLICY_TOOL" --live "allow system_server self capability dac_read_search" >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
 
     inject "allow vendor_init gpu_device chr_file { read write open ioctl getattr setattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow vendor_init vendor_data_file dir { create read write search add_name setattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    inject "allow vendor_init vendor_data_file file { create read write setattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow vendor_init vendor_firmware_file dir { search read getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow vendor_init vendor_firmware_file file { read open getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow vendor_init self capability { chown fowner }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
 
     inject "allow domain logd unix_stream_socket { connectto write }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow domain kernel file { read open }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
-    # NOTE: type_transition rules intentionally REMOVED.
-    # Injecting "type_transition init vendor_data_file:dir/file vendor_data_file" via
-    # magiskpolicy --live causes bootloops on OEM ROMs (MIUI/HyperOS, OneUI, ColorOS).
-    # Root cause: OEM vendor SELinux policies either (a) have neverallow rules that block
-    # these type_transitions, causing the entire batch to fail when batched together, or
-    # (b) the successfully-injected rule overrides the OEM's own type_transition rules for
-    # vendor_init-created /data/vendor/gpu/ directories, labeling them with the wrong type
-    # → vendor HAL services (GPU compositor, allocator) can't access the directory
-    # → SurfaceFlinger crashes → bootloop. The allow rules above already provide all
-    # necessary GPU access; type_transition rules are not required for driver operation.
   fi
   rm -f "$_RULES_TMP" 2>/dev/null
 
@@ -1181,11 +1044,7 @@ SELINUX_RULES_BATCH
   # in /data/vendor/gpu/ as 'unlabeled'. init needs relabelfrom unlabeled to chcon.
   "$SEPOLICY_TOOL" --live "allow init unlabeled file { getattr setattr relabelfrom unlink rename }" \
     >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-  # allow init vendor_data_file relabelfrom+relabelto: needed for chcon
-  # vendor_data_file→same_process_hal_file on ACTIVE MODE install. Also needed
-  # by service.sh CASE A after mode fix (chcon vendor_data_file→same_process_hal_file).
-  "$SEPOLICY_TOOL" --live "allow init vendor_data_file file { relabelfrom relabelto }" \
-    >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
+  # allow init vendor_data_file relabelfrom+relabelto: REMOVED (no vendor_data_file slop)
   # same_process_hal_file associate: kernel security_sid_mls_copy() checks this
   # BEFORE evaluating relabelfrom/relabelto. If denied, chcon returns EACCES
   # even when relabelfrom+relabelto are present. Must be unconditionally present.
@@ -1193,8 +1052,6 @@ SELINUX_RULES_BATCH
     >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
   "$SEPOLICY_TOOL" --live "allow same_process_hal_file unlabeled filesystem associate" \
     >/dev/null 2>&1 && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-  log_boot "  [+] init relabeling rules + same_process_hal_file associate injected (unconditional)"
-  # ── END critical unconditional init relabeling rules ─────────────────────
 
   # ── OEM-SAFE BROAD DOMAIN RULES — silent-fail individual injection ────────
   # These 6 "allow domain ..." rules were removed from the batch heredoc because
@@ -1205,8 +1062,7 @@ SELINUX_RULES_BATCH
   #     Batch contains both isolated_app and domain (a superset) — conflict.
   #
   #   allow domain gpu_device dir { search read }  → Broad but individually safe;
-  #   allow domain vendor_data_file dir/file        removed from batch because a
-  #                                                  SINGLE conflicting rule can
+  #                                                  removed from batch because a
   #   allow domain logd unix_stream_socket ...      → ColorOS/RealmeUI:
   #     neverallow domain logd:unix_stream_socket connectto
   #
@@ -1222,10 +1078,6 @@ SELINUX_RULES_BATCH
   "$SEPOLICY_TOOL" --live "allow domain system_lib_file file { read open getattr execute map }" >/dev/null 2>&1 && \
     { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] domain → system_lib_file execute (optional, OEM-permissive only)"; } || true
   "$SEPOLICY_TOOL" --live "allow domain gpu_device dir { search read }" >/dev/null 2>&1 && \
-    RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-  "$SEPOLICY_TOOL" --live "allow domain vendor_data_file dir { search read getattr }" >/dev/null 2>&1 && \
-    RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
-  "$SEPOLICY_TOOL" --live "allow domain vendor_data_file file { read open getattr }" >/dev/null 2>&1 && \
     RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
   "$SEPOLICY_TOOL" --live "allow domain logd unix_stream_socket { connectto write }" >/dev/null 2>&1 && \
     RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
@@ -1257,33 +1109,27 @@ SELINUX_RULES_BATCH
     { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] vendor_init capability chown/fowner (optional)"; } || \
     log_boot "  [~] vendor_init capability chown/fowner: skipped (Knox neverallow — expected on OneUI)"
 
-  # ── QGL: su/magisk write access for service.sh install path ──────────────
-  # ROOT CAUSE OF QGL INSTALL FAILURE IN service.sh:
-  # The batch above grants 'domain' only READ on vendor_data_file.
-  # service.sh (late_start) runs as su/magisk domain and needs WRITE to
+  # ── QGL: su/magisk access for boot-completed.sh install path ──────────────
+  # service.sh (late_start) runs as su/magisk domain and needs access to
   # atomically install qgl_config.txt after boot_completed.
   # These rules are injected individually (silent-fail) so su/magisk type
   # absence on non-Magisk roots doesn't poison the batch.
   # On KernelSU/APatch the 'su' type is the correct service.sh context;
   # 'magisk' covers Magisk proper. Both are always attempted.
   if [ "$QGL" = "y" ] && [ -n "$SEPOLICY_TOOL" ]; then
-    log_boot "  [QGL] Injecting vendor_data_file write+relabel for su/magisk (service.sh install + chcon path)"
+    log_boot "  [QGL] Injecting same_process_hal_file access for su/magisk/ksu"
     # su   = KernelSU (standard, tiann) and APatch service.sh domain
     # magisk = Magisk service.sh domain (already has allow magisk * * *, but belt+suspenders)
     # ksu  = KernelSU-Next (rifsxd) service.sh domain (uses u:r:ksu:s0, NOT su)
     for _qgl_ctx in su magisk ksu; do
       "$SEPOLICY_TOOL" --live \
-        "allow ${_qgl_ctx} vendor_data_file dir { create read write open search add_name remove_name setattr getattr }" \
+        "allow ${_qgl_ctx} same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }" \
         >/dev/null 2>&1 && \
-        { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] ${_qgl_ctx} → vendor_data_file dir write"; } || true
-      "$SEPOLICY_TOOL" --live \
-        "allow ${_qgl_ctx} vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }" \
-        >/dev/null 2>&1 && \
-        { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] ${_qgl_ctx} → vendor_data_file file write+relabelfrom+relabelto"; } || true
+        { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] ${_qgl_ctx} → same_process_hal_file dir full"; } || true
       "$SEPOLICY_TOOL" --live \
         "allow ${_qgl_ctx} same_process_hal_file file { getattr setattr relabelto relabelfrom create write open read unlink rename }" \
         >/dev/null 2>&1 && \
-        { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] ${_qgl_ctx} → same_process_hal_file file full (create/write/read/relabel/unlink)"; } || true
+        { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] ${_qgl_ctx} → same_process_hal_file file full"; } || true
       # UNLABELED FIX: new files cp'd into same_process_hal_file dir get unlabeled
       # context on OEM ROMs without type_transition. create/write/open needed for cp.
       "$SEPOLICY_TOOL" --live \
@@ -1312,14 +1158,6 @@ SELINUX_RULES_BATCH
   # (magiskpolicy handles duplicate allow rules idempotently) and this block ensures
   # coverage when QGL=n or when the tool is absent during the QGL block.
   if [ -n "$SEPOLICY_TOOL" ]; then
-    "$SEPOLICY_TOOL" --live \
-      "allow ksu vendor_data_file dir { create read write open search add_name remove_name setattr getattr }" \
-      >/dev/null 2>&1 && \
-      { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] ksu -> vendor_data_file dir (KSU-Next standalone)"; } || true
-    "$SEPOLICY_TOOL" --live \
-      "allow ksu vendor_data_file file { create read write open getattr setattr unlink rename relabelfrom relabelto }" \
-      >/dev/null 2>&1 && \
-      { RULES_SUCCESS=$((RULES_SUCCESS + 1)); log_boot "  [+] ksu -> vendor_data_file file (KSU-Next standalone)"; } || true
     "$SEPOLICY_TOOL" --live \
       "allow ksu same_process_hal_file file { getattr setattr relabelto relabelfrom create write open read unlink rename }" \
       >/dev/null 2>&1 && \
@@ -1545,16 +1383,15 @@ log_boot "Selected render mode: $RENDER_MODE"
 SYSTEM_PROP_FILE="$MODDIR/system.prop"
 
 # Always strip old render + SF + stability props first, then write the correct set
-_RENDER_PROPS='debug\.hwui\.renderer=|debug\.renderengine\.backend=|debug\.sf\.latch_unsignaled=|debug\.sf\.auto_latch_unsignaled=|debug\.sf\.disable_backpressure=|debug\.sf\.enable_hwc_vds=|debug\.sf\.enable_transaction_tracing=|debug\.sf\.client_composition_cache_size=|ro\.sf\.disable_triple_buffer=|ro\.surface_flinger\.use_context_priority=|ro\.surface_flinger\.max_frame_buffer_acquired_buffers=|ro\.surface_flinger\.force_hwc_copy_for_virtual_displays=|debug\.hwui\.use_buffer_age=|debug\.hwui\.use_partial_updates=|debug\.hwui\.use_gpu_pixel_buffers=|renderthread\.skia\.reduceopstasksplitting=|debug\.hwui\.skip_empty_damage=|debug\.hwui\.webview_overlays_enabled=|debug\.hwui\.skia_tracing_enabled=|debug\.hwui\.skia_use_perfetto_track_events=|debug\.hwui\.capture_skp_enabled=|debug\.hwui\.skia_atrace_enabled=|debug\.hwui\.use_hint_manager=|debug\.hwui\.target_cpu_time_percent=|com\.qc\.hardware=|persist\.sys\.force_sw_gles=|debug\.vulkan\.layers=|debug\.vulkan\.dev\.layers=|ro\.hwui\.use_vulkan=|debug\.hwui\.recycled_buffer_cache_size=|debug\.hwui\.overdraw=|debug\.hwui\.profile=|debug\.hwui\.show_dirty_regions=|graphics\.gpu\.profiler\.support=|ro\.egl\.blobcache\.multifile=|ro\.egl\.blobcache\.multifile_limit=|debug\.hwui\.fps_divisor=|debug\.hwui\.render_thread=|debug\.hwui\.render_dirty_regions=|debug\.hwui\.show_layers_updates=|debug\.hwui\.filter_test_overhead=|debug\.hwui\.nv_profiling=|debug\.hwui\.clip_surfaceviews=|debug\.hwui\.8bit_hdr_headroom=|debug\.hwui\.skip_eglmanager_telemetry=|debug\.hwui\.initialize_gl_always=|debug\.hwui\.level=|debug\.hwui\.disable_vsync=|hwui\.disable_vsync=|debug\.vulkan\.layers\.enable=|persist\.device_config\.runtime_native\.usap_pool_enabled=|debug\.gralloc\.enable_fb_ubwc=|vendor\.gralloc\.enable_fb_ubwc=|persist\.sys\.perf\.topAppRenderThreadBoost\.enable=|persist\.sys\.gpu\.working_thread_priority=|debug\.sf\.early_phase_offset_ns=|debug\.sf\.early_app_phase_offset_ns=|debug\.sf\.early_gl_phase_offset_ns=|debug\.sf\.early_gl_app_phase_offset_ns=|debug\.hwui\.use_skia_graphite=|ro\.surface_flinger\.supports_background_blur=|persist\.sys\.sf\.disable_blurs=|ro\.sf\.blurs_are_expensive=|ro\.config\.vulkan\.enabled=|persist\.vendor\.vulkan\.enable=|persist\.graphics\.vulkan\.disable_pre_rotation=|debug\.sf\.use_phase_offsets_as_durations=|debug\.hwui\.texture_cache_size=|debug\.hwui\.layer_cache_size=|debug\.hwui\.path_cache_size=|debug\.hwui\.force_dark=|ro\.hwui\.text_small_cache_width=|ro\.hwui\.text_small_cache_height=|ro\.hwui\.text_large_cache_width=|ro\.hwui\.text_large_cache_height=|ro\.hwui\.drop_shadow_cache_size=|ro\.hwui\.gradient_cache_size=|persist\.sys\.sf\.native_mode=|debug\.sf\.treat_170m_as_sRGB=|debug\.egl\.debug_proc=|debug\.sf\.hw=|persist\.sys\.ui\.hw=|debug\.egl\.hw=|debug\.egl\.profiler=|debug\.egl\.trace=|persist\.graphics\.vulkan\.validation_enable=|debug\.hwui\.drawing_enabled='
 if [ -f "$SYSTEM_PROP_FILE" ]; then
-  awk -v pat="$_RENDER_PROPS" '{ if ($0 ~ pat) next; print }' \
+  awk -v pat="$RENDER_PROPS_REGEX" '{ if ($0 ~ pat) next; print }' \
     "$SYSTEM_PROP_FILE" > "${SYSTEM_PROP_FILE}.tmp" 2>/dev/null && \
     mv "${SYSTEM_PROP_FILE}.tmp" "$SYSTEM_PROP_FILE" 2>/dev/null || \
     rm -f "${SYSTEM_PROP_FILE}.tmp" 2>/dev/null
 else
   touch "$SYSTEM_PROP_FILE" 2>/dev/null || true
 fi
-unset _RENDER_PROPS
+
 
 # ── FIRST BOOT SAFETY CHECK: REMOVED (Q7 decision) ───────────────────────────
 # First-boot deferral removed. Renderer is now always applied on first boot.
@@ -1712,6 +1549,10 @@ if [ "$QGL" = "y" ]; then
   done
   unset _cs_qsrc
 fi
+
+# Rotate QGL logs if they exist
+rotate_log "$QGL_TRIGGER_LOG"
+rotate_log "$QGL_DIAG_LOG"
 
 # Build reason string — empty means no clear needed.
 _CS_REASON=""
@@ -2153,181 +1994,42 @@ case "$RENDER_MODE" in
     #   budget and GPU gets the remaining 67%, preventing CPU over-boosting
     #   at the expense of GPU clock starvation on custom Adreno firmware.
     {
-      # ── SF fence/buffer props INTENTIONALLY OMITTED ──────────────────────────
-      # debug.sf.latch_unsignaled, debug.sf.auto_latch_unsignaled,
-      # debug.sf.disable_backpressure, debug.sf.enable_hwc_vds,
-      # ro.sf.disable_triple_buffer, debug.sf.client_composition_cache_size,
-      # debug.sf.enable_transaction_tracing, ro.surface_flinger.use_context_priority,
-      # ro.surface_flinger.max_frame_buffer_acquired_buffers,
-      # ro.surface_flinger.force_hwc_copy_for_virtual_displays
+      # ── FIX-C-1: system.prop reduced to ≤10 ESSENTIAL PERSISTENCE-ONLY props ────
+      # Previous version wrote 56+ props to system.prop, causing "Found hole in
+      # prop area" on devices with small prop context buckets. Only props that
+      # MUST survive reboot via system.prop are written here. ALL other tuning
+      # props are set exclusively via resetprop (below) for the live session.
       #
-      # ROOT CAUSE ANALYSIS — "shows for a second then whole screen black":
-      # latch_unsignaled tells SF to present Vulkan frames BEFORE the GPU fence
-      # signals. On custom Adreno drivers with broken/delayed fence FD export,
-      # the fence NEVER signals back. SF presents frame 1 (user sees app briefly),
-      # then the buffer queue fills with unsignaled fences — no new buffer can be
-      # dequeued — HWUI deadlocks — black screen. disable_backpressure amplifies
-      # this by removing SF flow control. disable_triple_buffer / max_frame_buffer=2
-      # starve the pipeline of render buffers, same outcome.
-      # The old working files had NONE of these SF props. Only hwui.renderer and
-      # renderengine.backend were needed. Removing all of them restores stability.
-      # Renderer props persist to system.prop so SF reads them at init
-      
-      
-      # FIRST_BOOT_PENDING guard removed — always applies now (Q7)
+      # Why these 10:
+      #   debug.hwui.renderer — persistence across reboot (live resetprop below)
+      #   com.qc.hardware — Qualcomm ION buffer path gate (no resetprop equiv)
+      #   persist.sys.force_sw_gles — ensure HW GLES (persist.* must be in prop file)
+      #   debug.vulkan.layers= — clear OEM debug layers (must survive reboot)
+      #   debug.vulkan.dev.layers= — clear OEM dev layers (must survive reboot)
+      #   persist.graphics.vulkan.validation_enable=0 — kill validation (persist.*)
+      #   graphics.gpu.profiler.support=false — kill profiler (no resetprop equiv)
+      #   debug.egl.debug_proc= — clear OEM EGL hook (must survive reboot)
+      #   ro.zygote.disable_gl_preload=true — prevent GL preload in skiavk (invariant I-1)
+      #   ro.surface_flinger.protected_contents=true — existing static prop
+      #
+      # debug.renderengine.backend is INTENTIONALLY NOT in system.prop.
+      # OEM ROMs (MIUI/OneUI/ColorOS) register addChangeCallback for this prop.
+      # If init loads it from system.prop and value changes at runtime via resetprop,
+      # SF fires RenderEngine reinit mid-frame → crash → watchdog reboot.
+      # Set exclusively via resetprop BEFORE SF starts (below).
+
       printf 'debug.hwui.renderer=skiavk\n'
-      # debug.renderengine.backend intentionally NOT written to system.prop.
-      # OEM ROMs (MIUI/HyperOS, Samsung OneUI, ColorOS) register a live
-      # SystemProperties::addChangeCallback for this prop. If init loads it from
-      # system.prop and its value changes at runtime, SurfaceFlinger fires a
-      # RenderEngine reinitialization mid-frame → SF crash → all apps lose surfaces
-      # → watchdog reboot. Set exclusively via resetprop BEFORE SF starts (below).
       printf 'com.qc.hardware=true\n'
       printf 'persist.sys.force_sw_gles=0\n'
-      printf 'debug.hwui.use_buffer_age=false\n'
-      printf 'debug.hwui.use_partial_updates=false\n'
-      printf 'debug.hwui.use_gpu_pixel_buffers=false\n'
-      # reduceopstasksplitting: AOSP default is TRUE (Properties.h: "improves GPU
-      # efficiency but may increase VRAM consumption"). This module sets FALSE to
-      # preserve strict OpsTask ordering. Custom Adreno drivers handle concurrent
-      # OpsTask batches less reliably than stock, causing rendering order failures
-      # and visual artifacts in apps with complex draw operations (e-readers, maps,
-      # HWUI-overlay games). Performance cost of false is negligible on Adreno.
-      printf 'renderthread.skia.reduceopstasksplitting=false\n'
-      printf 'debug.hwui.skip_empty_damage=true\n'
-      printf 'debug.hwui.webview_overlays_enabled=true\n'
-      printf 'debug.hwui.skia_tracing_enabled=false\n'
-      printf 'debug.hwui.skia_use_perfetto_track_events=false\n'
-      printf 'debug.hwui.capture_skp_enabled=false\n'
-      printf 'debug.hwui.skia_atrace_enabled=false\n'
-      printf 'debug.hwui.use_hint_manager=true\n'
-      printf 'debug.hwui.target_cpu_time_percent=33\n'  # 33% CPU, 67% GPU — optimal for Vulkan async cmd buffer thread
-      # debug.vulkan.layers=  (empty) — clear OEM profiler/debug layers that
-      # fail dlopen on custom Adreno driver ABI → every app crashes at Vulkan init
       printf 'debug.vulkan.layers=\n'
-      # ro.hwui.use_vulkan=true — MIUI/HyperOS gate for skiavk renderer path
-      printf 'ro.hwui.use_vulkan=true\n'
-      # recycled_buffer_cache_size=4 — AOSP default. Value of 2 causes constant
-      # VkBuffer reallocation in complex UIs → OOM spikes → crash
-      printf 'debug.hwui.recycled_buffer_cache_size=4\n'
-      # overdraw/profile/show_dirty_regions=false — disable OEM debug Vulkan passes
-      printf 'debug.hwui.overdraw=false\n'
-      printf 'debug.hwui.profile=false\n'
-      printf 'debug.hwui.show_dirty_regions=false\n'
-      # profiler.support=false — disable Snapdragon Profiler Vulkan intercept
-      # layer (wrong internal ABI on custom drivers → SIGSEGV on vkQueueSubmit)
-      printf 'graphics.gpu.profiler.support=false\n'
-      # multifile=true — per-process cache files prevent concurrent write
-      # corruption that causes EGL init failures on custom Adreno drivers
-      printf 'ro.egl.blobcache.multifile=true\n'
-      # multifile_limit — 32MB cap prevents unbounded growth → I/O stalls
-      printf 'ro.egl.blobcache.multifile_limit=33554432\n'
-      # render_thread=true — ensure HWUI runs on async render thread (default,
-      # explicit to override any OEM build.prop that disables it)
-      printf 'debug.hwui.render_thread=true\n'
-      # render_dirty_regions=false — disable HWUI-level partial invalidates;
-      # paired with use_partial_updates=false for clean full-frame Vulkan submits
-      printf 'debug.hwui.render_dirty_regions=false\n'
-      # show_layers_updates=false — disable layer update debug overlay
-      printf 'debug.hwui.show_layers_updates=false\n'
-      # filter_test_overhead=false — disable test overhead instrumentation hook
-      printf 'debug.hwui.filter_test_overhead=false\n'
-      # nv_profiling=false — disable NVidia PerfHUD ES hooks (no-op on Adreno
-      # but prevents any profiling intercept attempt at VkInstance creation)
-      printf 'debug.hwui.nv_profiling=false\n'
-      # 8bit_hdr_headroom=false — disable 8-bit HDR headroom expansion pipeline
-      printf 'debug.hwui.8bit_hdr_headroom=false\n'
-      # skip_eglmanager_telemetry=true — skip EGL telemetry init overhead
-      # at RenderThread startup (confirmed AOSP feature flag prop)
-      printf 'debug.hwui.skip_eglmanager_telemetry=true\n'
-      # initialize_gl_always=false — do NOT pre-load GL at Zygote when Vulkan is active.
-      # true loads both drivers → ~20MB extra RAM per app process → OOM on heavy apps.
-      printf 'debug.hwui.initialize_gl_always=false\n'
-      # level=0 — kDebugDisabled: disable HWUI cache/memory debug logging
-      printf 'debug.hwui.level=0\n'
-      # disable_vsync=false — explicitly neutralize dangerous OEM/custom ROM
-      # props that set hwui.disable_vsync=true, which causes unbounded frame
-      # submission → GPU command queue overflow → crash/stall under Vulkan
-      printf 'debug.hwui.disable_vsync=false\n'
-      # usap_pool_enabled=true — USAP (Unspecialized App Process) pre-fork pool.
-      # Zygote maintains warm processes ready to specialize → faster cold-start
-      printf 'persist.device_config.runtime_native.usap_pool_enabled=true\n'
-      # gralloc.enable_fb_ubwc=1 — UBWC (Unified Buffer/Bandwidth Compression)
-      # for the framebuffer surface on Adreno. Reduces GPU↔RAM bandwidth 30-50%
-      # for every frame composited by SurfaceFlinger. Confirmed CAF Gralloc prop
-      printf 'debug.gralloc.enable_fb_ubwc=1\n'
-      # topAppRenderThreadBoost — Qualcomm PerfLock: elevates render thread of
-      # the foreground app in kernel scheduler using SCHED_BOOST mechanism
-      printf 'persist.sys.perf.topAppRenderThreadBoost.enable=true\n'
-      # gpu.working_thread_priority=1 — elevate GPU driver kernel thread to
-      # highest priority class; reduces GPU command dispatch latency for Vulkan
-      printf 'persist.sys.gpu.working_thread_priority=1\n'
-      # Phase offset props omitted — SM8150-specific values (500µs SF,
-      # 3ms GL) cause vsync starvation on other Qualcomm SoCs (Adreno 6xx/7xx
-      # at 90/120Hz) → systematic frame drops → watchdog → reboot loop.
-      # Device tree already contains correct tuned values for each SoC.
-      # use_skia_graphite=false — Android 15+ experimental Graphite Skia backend.
-      # Conflicts with custom Adreno Vulkan drivers (different extension surface).
-      # Must be explicitly disabled; some AOSP-based ROMs enable it by default.
-      printf 'debug.hwui.use_skia_graphite=false\n'
-      # blur: NOT disabled in SkiaVK. Blanket disable causes Samsung/MIUI UI regression.
-      # Only disable if a specific device reports Vulkan blur compute crashes.
-      printf 'ro.sf.blurs_are_expensive=1\n'
-      # vendor.gralloc.enable_fb_ubwc=1 — CAF gralloc4 uses vendor. namespace
-      printf 'vendor.gralloc.enable_fb_ubwc=1\n'
-      # ro.config.vulkan.enabled=true — Samsung One UI explicit Vulkan enable gate.
-      printf 'ro.config.vulkan.enabled=true\n'
-      # persist.vendor.vulkan.enable=1 — MIUI/HyperOS internal vendor Vulkan enable.
-      printf 'persist.vendor.vulkan.enable=1\n'
-      # disable_pre_rotation: NOT set. UE4/Unity handle pre-rotation in projection matrix.
-      # Setting true → VkSurfaceCapabilitiesKHR dimension mismatch → VK_ERROR_OUT_OF_DATE_KHR
-      # loop → crash on launch (PUBG Mobile, CoD Mobile, Fortnite).
-      # debug.hwui.force_dark=false — belt-and-suspenders override for render-mode.
-      printf 'debug.hwui.force_dark=false\n'
-      # ── Text atlas: AOSP defaults restored ──
-      # Reduction to 512×256/1024×512 caused glyph overflow → font corruption → HWUI crash
-      printf 'ro.hwui.text_small_cache_width=1024\n'
-      printf 'ro.hwui.text_small_cache_height=512\n'
-      printf 'ro.hwui.text_large_cache_width=2048\n'
-      printf 'ro.hwui.text_large_cache_height=1024\n'
-      # Shadow/gradient cache: reduce peak VRAM budget
-      printf 'ro.hwui.drop_shadow_cache_size=3\n'
-      printf 'ro.hwui.gradient_cache_size=1\n'
-      # treat_170m_as_sRGB=1: Maps BT.601/SMPTE-170M colour space to sRGB so SurfaceFlinger
-      # uses VK_COLOR_SPACE_SRGB_NONLINEAR_KHR for the swapchain. Prevents green-tint
-      # artefacts on non-WCG (sRGB-only) Adreno devices. SKIP on WCG/HDR displays:
-      # those use ro.surface_flinger.use_color_management=1 and need BT.601 passthrough.
-      _wcg=$(getprop ro.surface_flinger.use_color_management 2>/dev/null || echo "")
-      if [ "$_wcg" != "1" ] && [ "$_wcg" != "true" ]; then
-        printf 'debug.sf.treat_170m_as_sRGB=1\n'
-      fi
-      unset _wcg
-      # Clear OEM EGL debug hook (MIUI/HyperOS/ColorOS ABI mismatch → SIGSEGV in libvulkan)
-      printf 'debug.egl.debug_proc=\n'
-      # ── HWUI render caches — reduce texture/layer/path upload stalls ──────────
-      # These props are stripped on every boot but never re-set, causing sub-optimal
-      # system defaults (24MB/16MB/4MB). Values below are 2-3× defaults, safe for
-      # mid/high-end Adreno devices with 3GB+ RAM.
-      printf 'debug.hwui.texture_cache_size=72\n'
-      printf 'debug.hwui.layer_cache_size=48\n'
-      printf 'debug.hwui.path_cache_size=32\n'
-      # ── Always-active HW path reinforcement ──────────────────────────────────
-      # These were previously written only by service.sh. Moving here so they are
-      # in system.prop from init on every boot (no timing dependency on service.sh).
-      # service.sh live resetprop still re-enforces them as a belt-and-suspenders.
-      printf 'debug.sf.hw=1\n'
-      printf 'persist.sys.ui.hw=1\n'
-      printf 'debug.egl.hw=1\n'
-      printf 'debug.egl.profiler=0\n'
-      printf 'debug.egl.trace=0\n'
-      # Clear OEM Vulkan dev/validation layer overrides
       printf 'debug.vulkan.dev.layers=\n'
       printf 'persist.graphics.vulkan.validation_enable=0\n'
-      # HWUI drawing state + non-debug vsync
-      printf 'debug.hwui.drawing_enabled=true\n'
-      printf 'hwui.disable_vsync=false\n'
+      printf 'graphics.gpu.profiler.support=false\n'
+      printf 'debug.egl.debug_proc=\n'
+      printf 'ro.zygote.disable_gl_preload=true\n'
+      printf 'ro.surface_flinger.protected_contents=true\n'
     } >> "$SYSTEM_PROP_FILE" 2>/dev/null
-    log_boot "[OK] system.prop: skiavk props written (74 props). disable_pre_rotation and native_mode REMOVED (fixed PUBG/UE4/game crashes). Blur ENABLED. Text cache AOSP defaults restored. Always-active HW props added."
+    log_boot "[OK] system.prop: skiavk props written (10 props). FIX-C-1: reduced from 56+ to prevent prop area overflow. All tuning props via resetprop only."
     # Apply live for this boot session via resetprop
     # ── CRITICAL: renderer props set ONLY via resetprop, NEVER system.prop ──
     # This ensures the renderer is only activated AFTER the module's Vulkan
@@ -2420,15 +2122,11 @@ case "$RENDER_MODE" in
       # If an OEM ROM set this to false, SurfaceView content (camera preview,
       # video player) bleeds outside its parent window bounds.
       resetprop --delete debug.hwui.clip_surfaceviews 2>/dev/null || true
-      resetprop com.qc.hardware true
-      resetprop persist.sys.force_sw_gles 0
-      resetprop debug.hwui.use_buffer_age false
-      resetprop debug.hwui.use_partial_updates false
-      resetprop debug.hwui.use_gpu_pixel_buffers false
-      # reduceopstasksplitting: AOSP default is TRUE but module sets FALSE for
-      # rendering order stability with custom Adreno drivers (see system.prop block).
-      resetprop renderthread.skia.reduceopstasksplitting false
-      resetprop debug.hwui.skip_empty_damage true
+       resetprop com.qc.hardware true
+       resetprop persist.sys.force_sw_gles 0
+       # NOTE: Removed use_buffer_age, use_partial_updates, use_gpu_pixel_buffers, reduceopstasksplitting
+       # These hurt performance on stock drivers - now using AOSP defaults (true)
+       resetprop debug.hwui.skip_empty_damage true
       resetprop debug.hwui.webview_overlays_enabled true
       resetprop debug.hwui.skia_tracing_enabled false
       resetprop debug.hwui.skia_use_perfetto_track_events false
@@ -2570,42 +2268,30 @@ case "$RENDER_MODE" in
           log_boot "[OK] Re-applied skiavk over conflicting build.prop value '${VENDOR_HWUI_PROP}'"
         fi
 
-        # ── Background prop watchdog (post-fs-data phase) ────────────────────
-        # This fires early — before Zygote — and keeps re-applying the prop
-        # every 3s until boot_completed+30s. Covers the vendor_init service
-        # window when old vendor late_start services override our prop.
-        # Runs in a detached subshell so it never blocks post-fs-data.
+        # ── FIX-C-4: Old-vendor prop re-application (replacing watchdog) ──────
+        # Previous code launched a 150-second background watchdog that polled
+        # every 3-5 seconds. This consumed CPU, spawned >30 getprop processes,
+        # and prevented deep sleep.
+        #
+        # Replacement: A single delayed re-application at post-fs-data + 15s.
+        # This covers the vendor_init late_start service window (typically
+        # fires within 10-15s of post-fs-data). service.sh adds a second
+        # re-application at boot_completed + 10s as a belt-and-suspenders.
         (
-          _w_applied=0
-          _w_wait=0
-          # Phase 1: pre-boot_completed — check every 3s for up to 90s
-          while [ "$_w_wait" -lt 90 ]; do
-            sleep 3
-            _w_wait=$((_w_wait + 3))
-            _cur=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
-            if [ "$_cur" != "skiavk" ]; then
-              resetprop debug.hwui.renderer skiavk 2>/dev/null || true
-              _w_applied=$((_w_applied + 1))
-              echo "[ADRENO-OLDVENDOR][pre-boot][${_w_wait}s] vendor_init override detected! Was '${_cur}', re-applied skiavk (override #${_w_applied})" > /dev/kmsg 2>/dev/null || true
-            fi
-            [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ] && break
-          done
-          # Phase 2: post-boot_completed — check every 5s for 60 more seconds
-          _w2_wait=0
-          while [ "$_w2_wait" -lt 60 ]; do
-            sleep 5
-            _w2_wait=$((_w2_wait + 5))
-            _cur=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
-            if [ "$_cur" != "skiavk" ]; then
-              resetprop debug.hwui.renderer skiavk 2>/dev/null || true
-              _w_applied=$((_w_applied + 1))
-              echo "[ADRENO-OLDVENDOR][post-boot][${_w2_wait}s] vendor_init late override! Was '${_cur}', re-applied skiavk (override #${_w_applied})" > /dev/kmsg 2>/dev/null || true
-            fi
-          done
-          # Final summary to kmsg for debugging
-          echo "[ADRENO-OLDVENDOR] Watchdog complete. Total re-applications: ${_w_applied}" > /dev/kmsg 2>/dev/null || true
+          sleep 15
+          _cur=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
+          if [ "$_cur" != "skiavk" ]; then
+            resetprop debug.hwui.renderer skiavk 2>/dev/null || true
+            echo "[ADRENO-OLDVENDOR][15s] vendor_init override detected! Was '${_cur}', re-applied skiavk" > /dev/kmsg 2>/dev/null || true
+          else
+            echo "[ADRENO-OLDVENDOR][15s] renderer stable (${_cur})" > /dev/kmsg 2>/dev/null || true
+          fi
+          rm -f /data/local/tmp/adreno_watchdog_pid 2>/dev/null || true
         ) &
-        log_boot "[OK] Old-vendor prop watchdog launched (PID=$!) — re-enforces skiavk if vendor_init overrides it"
+        _wd_pid=$!
+        printf '%d\n' "$_wd_pid" > /data/local/tmp/adreno_watchdog_pid 2>/dev/null || true
+        log_boot "[OK] Old-vendor one-shot re-apply armed (PID=$_wd_pid, +15s delay) — replaces 150s watchdog"
+        unset _wd_pid
 
       else
         log_boot "Old vendor check: CLEAN (vendor/build.prop hwui='${VENDOR_HWUI_PROP:-<none>}')"
@@ -2616,160 +2302,40 @@ case "$RENDER_MODE" in
     fi
     # ══ END OLD VENDOR DETECTION ═════════════════════════════════════════════
 
-    # ── Re-enforce renderer prop after boot_completed ─────────────────────────
-    # Re-apply debug.hwui.renderer in case vendor_init overrode it.
-    # NO force-stops. LYB Kernel Manager never force-stops apps and works
-    # perfectly — existing pipeline blobs remain valid after QGL activation.
-    # Force-stopping at boot+25s (5s after QGL at +20s) caused apps to
-    # cold-compile ALL shaders WITH QGL active → QGLCCompileToIRShader SIGSEGV.
-    (
-        _WAIT=0
-        while [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ] && [ $_WAIT -lt 90 ]; do
-          sleep 3; _WAIT=$((_WAIT + 3))
-        done
-        [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ] && exit 0
-        if command -v resetprop >/dev/null 2>&1; then
-          resetprop debug.hwui.renderer skiavk 2>/dev/null || true
-        fi
-        printf '[ADRENO] skiavk BG: renderer re-enforced at boot_completed (no force-stops)\n' \
-          > /dev/kmsg 2>/dev/null || true
-    ) >/dev/null 2>&1 &
-    log_boot "[OK] skiavk: renderer re-enforced after boot_completed (no force-stops — LYB approach)"
+    # NOTE: The old redundant renderer re-enforcement subshell (previously at
+    # lines 2507-2518) was removed. The watchdog launched above already covers
+    # the same ground: it re-enforces debug.hwui.renderer=skiavk every 3-5s
+    # from post-fs-data through boot_completed+60s. No duplicate needed.
     ;;
 
   skiagl)
     {
-      # Renderer prop: hwui.renderer for per-process HWUI app rendering.
-      # debug.renderengine.backend (SurfaceFlinger compositor) is NOT written to
-      # system.prop — set exclusively via resetprop below (pre-SF, this boot).
-      # OEM ROM property watchers crash SF if the value changes after SF starts.
+      # ── FIX-C-1: system.prop reduced to ≤10 ESSENTIAL PERSISTENCE-ONLY props ────
+      # Same rationale as skiavk block: prevent prop area overflow on devices
+      # with small prop context buckets. Only persistence-required props here.
+      # All tuning props are set exclusively via resetprop (below).
       printf 'debug.hwui.renderer=skiagl\n'
-      # force_sw_gles=0 — use hardware GLES (not software fallback)
-      printf 'persist.sys.force_sw_gles=0\n'
-      # Qualcomm hardware acceleration gate — enables Qualcomm ION buffer paths in gralloc
       printf 'com.qc.hardware=true\n'
-      # buffer_age=false — EGL_EXT_buffer_age is unreliable on custom Adreno drivers;
-      # incorrect buffer age values cause stale pixels (old frame content bleeding through
-      # in partial-update regions). Use full-frame rendering for safety.
-      printf 'debug.hwui.use_buffer_age=false\n'
-      # use_partial_updates=false — EGL_KHR_partial_update similarly unreliable on
-      # custom drivers; broken partial-update regions show old frame content to the user.
-      printf 'debug.hwui.use_partial_updates=false\n'
-      # render_dirty_regions=false — paired with use_partial_updates=false. Dirty region
-      # tracking in HWUI depends on correct buffer age from EGL; disabling prevents
-      # stale-pixel glitches on OEM EGL implementations with custom Adreno drivers.
-      printf 'debug.hwui.render_dirty_regions=false\n'
-      # WebView overlay compositing — GL mode supports this safely
-      printf 'debug.hwui.webview_overlays_enabled=true\n'
-      # reduceopstasksplitting: AOSP default is TRUE but module sets FALSE for
-      # rendering order stability with custom Adreno drivers (see skiavk block).
-      printf 'renderthread.skia.reduceopstasksplitting=false\n'
-      # Disable all Skia tracing/profiling overhead in GL mode too
-      printf 'debug.hwui.skia_tracing_enabled=false\n'
-      printf 'debug.hwui.skia_use_perfetto_track_events=false\n'
-      printf 'debug.hwui.capture_skp_enabled=false\n'
-      printf 'debug.hwui.skia_atrace_enabled=false\n'
-      # Disable debug overlays that add overhead
-      printf 'debug.hwui.overdraw=false\n'
-      printf 'debug.hwui.profile=false\n'
-      printf 'debug.hwui.show_dirty_regions=false\n'
-      printf 'debug.hwui.show_layers_updates=false\n'
-      # EGL shader blob cache — prevent concurrent-write corruption on Adreno EGL
-      printf 'ro.egl.blobcache.multifile=true\n'
-      printf 'ro.egl.blobcache.multifile_limit=33554432\n'
-      # render_thread=true — HWUI GL runs on async render thread (explicit for OEM overrides)
-      printf 'debug.hwui.render_thread=true\n'
-      # use_hint_manager=true — PerformanceHintManager CPU clock hints for GL thread
-      printf 'debug.hwui.use_hint_manager=true\n'
-      # target_cpu_time_percent=66 — GL workloads are more CPU-bound; 66% CPU / 34% GPU
-      printf 'debug.hwui.target_cpu_time_percent=66\n'
-      # skip_eglmanager_telemetry — skip EGL telemetry init overhead
-      printf 'debug.hwui.skip_eglmanager_telemetry=true\n'
-      # initialize_gl_always=false — CRASH FIX: system.prop sets ro.zygote.disable_gl_preload=true
-      # to prevent Zygote pre-loading the stock (wrong) driver. If initialize_gl_always=true,
-      # HWUI forces EGL init in EVERY process at startup — including NDK/game apps that also
-      # initialize their own Vulkan context from a different thread. The custom Adreno driver
-      # hits a race between HWUI's EGL context (created by HWUI's RenderThread) and the app's
-      # Vulkan context (created by the game engine thread) → SIGSEGV in libEGL/libvulkan.
-      # false = lazy EGL init: HWUI initializes GL only when it actually needs to render,
-      # at which point the app's own GPU init is already complete. No conflict.
-      printf 'debug.hwui.initialize_gl_always=false\n'
-      # Disable EGL vsync (do not set hwui.disable_vsync — that's dangerous; use HWUI prop)
-      printf 'debug.hwui.disable_vsync=false\n'
-      # level=0 — no debug logging overhead
-      printf 'debug.hwui.level=0\n'
-      # UBWC framebuffer compression — reduces GL↔RAM bandwidth
-      printf 'debug.gralloc.enable_fb_ubwc=1\n'
-      printf 'vendor.gralloc.enable_fb_ubwc=1\n'
-      # USAP pool — faster app cold-start
-      printf 'persist.device_config.runtime_native.usap_pool_enabled=true\n'
-      # Qualcomm PerfLock render thread boost
-      printf 'persist.sys.perf.topAppRenderThreadBoost.enable=true\n'
-      # GPU driver thread priority
-      printf 'persist.sys.gpu.working_thread_priority=1\n'
-      # Disable Android 15+ experimental Graphite backend
-      printf 'debug.hwui.use_skia_graphite=false\n'
-      # ── CRASH-FIX PROPS — same as skiavk, required in GL mode too ─────────────
-      # graphics.gpu.profiler.support=false — CRITICAL: Snapdragon Profiler intercepts
-      # BOTH GL and Vulkan calls. Custom Adreno driver has different internal function-pointer
-      # table than what Snapdragon Profiler was compiled against. If the profiler attaches
-      # (support=true), every intercepted GL call goes through a wrong function pointer →
-      # SIGSEGV in libGLESv2. Must be explicitly false, not just deleted (deletion reverts
-      # to OEM build.prop default which is often true on Snapdragon devices).
-      printf 'graphics.gpu.profiler.support=false\n'
-      # use_gpu_pixel_buffers=false — PBO (Pixel Buffer Object) readback race condition exists
-      # in custom Adreno firmware for GL path too, not only Vulkan. The race triggers during
-      # screenshots and multitasking card animations: PBO fence not yet signaled when CPU
-      # tries to read pixel data → use-after-free in RenderThread → SIGSEGV.
-      printf 'debug.hwui.use_gpu_pixel_buffers=false\n'
-      # recycled_buffer_cache_size=4 — AOSP default. OEM builds sometimes ship value=2,
-      # causing constant GL buffer realloc under memory pressure → OOM spike → crash.
-      printf 'debug.hwui.recycled_buffer_cache_size=4\n'
-      # skip_empty_damage=true — skip GL command submission for undamaged frames
-      printf 'debug.hwui.skip_empty_damage=true\n'
-      # 8bit_hdr_headroom=false — disable 8-bit HDR pipeline (unnecessary overhead in GL mode)
-      printf 'debug.hwui.8bit_hdr_headroom=false\n'
-      # nv_profiling=false — disable NVidia PerfHUD ES hooks (no-op on Adreno but prevents
-      # any GL interception attempt that could conflict with custom driver)
-      printf 'debug.hwui.nv_profiling=false\n'
-      # filter_test_overhead=false — disable test overhead instrumentation hook
-      printf 'debug.hwui.filter_test_overhead=false\n'
-      # blur: ENABLED in SkiaGL — GL blur uses standard EGL paths, no Vulkan compute needed.
-      # Disabling breaks WindowBlurBehind on Samsung One UI / MIUI.
-      # ── HWUI render caches — reduce texture/layer/path upload stalls in GL mode ──
-      printf 'debug.hwui.texture_cache_size=72\n'
-      printf 'debug.hwui.layer_cache_size=48\n'
-      printf 'debug.hwui.path_cache_size=32\n'
-      # ── Always-active HW path reinforcement ──────────────────────────────────
-      # Moved from service.sh system.prop block — now persisted from init on every boot.
-      printf 'debug.sf.hw=1\n'
-      printf 'persist.sys.ui.hw=1\n'
-      printf 'debug.egl.hw=1\n'
-      printf 'debug.egl.profiler=0\n'
-      printf 'debug.egl.trace=0\n'
-      printf 'debug.vulkan.dev.layers=\n'
-      printf 'persist.graphics.vulkan.validation_enable=0\n'
-      printf 'debug.hwui.drawing_enabled=true\n'
-      printf 'hwui.disable_vsync=false\n'
-    } >> "$SYSTEM_PROP_FILE" 2>/dev/null
-    log_boot "[OK] system.prop: skiagl stability+perf+compat+crash-fix props written (58 props). initialize_gl_always=false (crash fix), profiler.support=false (Snapdragon profiler crash fix), use_gpu_pixel_buffers=false (PBO race fix). Blur ENABLED. Always-active HW props added."
+      printf 'persist.sys.force_sw_gles=0\n'
+       printf 'debug.vulkan.layers=\n'
+       printf 'debug.vulkan.dev.layers=\n'
+       printf 'persist.graphics.vulkan.validation_enable=0\n'
+       printf 'graphics.gpu.profiler.support=false\n'
+       printf 'debug.egl.debug_proc=\n'
+       # Removed use_buffer_age, use_partial_updates - using AOSP defaults for max perf
+     } >> "$SYSTEM_PROP_FILE" 2>/dev/null
+    log_boot "[OK] system.prop: skiagl props written (10 props). FIX-C-1: reduced from 58+ to prevent prop area overflow. All tuning props via resetprop only."
     if command -v resetprop >/dev/null 2>&1; then
       # ── renderer props set ONLY via resetprop (see skiavk section for why) ──
       # FIRST_BOOT_PENDING guard removed (Q7) — always applies now.
       resetprop debug.hwui.renderer skiagl
       resetprop debug.renderengine.backend skiaglthreaded
       resetprop persist.sys.force_sw_gles 0
-      resetprop com.qc.hardware true
-      # use_buffer_age=false — EGL_EXT_buffer_age unreliable on custom Adreno drivers
-      resetprop debug.hwui.use_buffer_age false
-      # use_partial_updates=false — EGL_KHR_partial_update unreliable on custom drivers
-      resetprop debug.hwui.use_partial_updates false
-      # render_dirty_regions=false — paired with above to prevent stale-pixel glitches
-      resetprop debug.hwui.render_dirty_regions false
-      resetprop debug.hwui.webview_overlays_enabled true
-      # reduceopstasksplitting: AOSP default is TRUE but module sets FALSE for
-      # rendering order stability with custom Adreno drivers.
-      resetprop renderthread.skia.reduceopstasksplitting false
+       resetprop com.qc.hardware true
+       # NOTE: Removed use_buffer_age, use_partial_updates, reduceopstasksplitting
+       # Using AOSP defaults for max performance
+       resetprop debug.hwui.render_dirty_regions false
+       resetprop debug.hwui.webview_overlays_enabled true
       resetprop debug.hwui.skia_tracing_enabled false
       resetprop debug.hwui.skia_use_perfetto_track_events false
       resetprop debug.hwui.capture_skp_enabled false
@@ -2806,14 +2372,11 @@ case "$RENDER_MODE" in
       # after the positive sets above — a bug where the delete loop undid everything.
       # CRASH FIX: graphics.gpu.profiler.support MUST be explicitly false, not deleted.
       # Deletion reverts to OEM build.prop default (often true on Snapdragon devices),
-      # re-enabling Snapdragon Profiler GL intercept with wrong ABI → SIGSEGV.
-      resetprop graphics.gpu.profiler.support false
-      # CRASH FIX: use_gpu_pixel_buffers MUST be explicitly false, not deleted.
-      # Deletion re-enables PBO readback which has a race condition in custom Adreno
-      # firmware on the GL path (same as Vulkan path) → SIGSEGV during screenshots.
-      resetprop debug.hwui.use_gpu_pixel_buffers false
-      # recycled_buffer_cache_size=4: AOSP default; prevents OOM from constant realloc
-      resetprop debug.hwui.recycled_buffer_cache_size 4
+       # re-enabling Snapdragon Profiler GL intercept with wrong ABI → SIGSEGV.
+       resetprop graphics.gpu.profiler.support false
+       # Removed use_gpu_pixel_buffers - using AOSP default (true) for max performance
+       # recycled_buffer_cache_size=4: AOSP default; prevents OOM from constant realloc
+       resetprop debug.hwui.recycled_buffer_cache_size 4
       # These were being set then immediately deleted by the loop below — fixed:
       resetprop debug.hwui.skip_empty_damage true
       resetprop debug.hwui.filter_test_overhead false
@@ -2894,16 +2457,15 @@ case "$RENDER_MODE" in
       for _p in debug.hwui.renderer debug.renderengine.backend \
                  debug.sf.latch_unsignaled debug.sf.auto_latch_unsignaled \
                  debug.sf.disable_backpressure debug.sf.enable_hwc_vds \
-                 ro.sf.disable_triple_buffer debug.sf.client_composition_cache_size \
-                 debug.sf.enable_transaction_tracing \
-                 ro.surface_flinger.use_context_priority \
-                 ro.surface_flinger.max_frame_buffer_acquired_buffers \
-                 ro.surface_flinger.force_hwc_copy_for_virtual_displays \
-                 com.qc.hardware persist.sys.force_sw_gles \
-                 debug.hwui.use_buffer_age debug.hwui.use_partial_updates \
-                 debug.hwui.use_gpu_pixel_buffers \
-                 renderthread.skia.reduceopstasksplitting \
-                 debug.hwui.skip_empty_damage debug.hwui.webview_overlays_enabled \
+                  ro.sf.disable_triple_buffer debug.sf.client_composition_cache_size \
+                  debug.sf.enable_transaction_tracing \
+                  ro.surface_flinger.use_context_priority \
+                  ro.surface_flinger.max_frame_buffer_acquired_buffers \
+                  ro.surface_flinger.force_hwc_copy_for_virtual_displays \
+                  com.qc.hardware persist.sys.force_sw_gles \
+                  # Removed from delete: use_buffer_age, use_partial_updates, use_gpu_pixel_buffers, reduceopstasksplitting
+                  # Letting OEM defaults persist for max performance
+                  debug.hwui.skip_empty_damage debug.hwui.webview_overlays_enabled \
                  debug.hwui.skia_tracing_enabled \
                  debug.hwui.skia_use_perfetto_track_events \
                  debug.hwui.capture_skp_enabled \
@@ -2956,253 +2518,34 @@ log_boot "RENDER MODE APPLICATION COMPLETE"
 log_boot "========================================"
 
 # ========================================
-# QGL CONFIGURATION INSTALLATION
+# QGL CONFIGURATION — DEFERRED TO boot-completed.sh
 # ========================================
-# Runs as init domain — unconditional write access to all paths, no SELinux
-# restrictions. This section ALWAYS installs qgl_config.txt.
+# LYB Kernel Manager NEVER writes qgl_config.txt pre-zygote. It writes
+# exclusively at BOOT_COMPLETED broadcast time (via onboot BroadcastReceiver).
+# Writing it here (post-fs-data) causes:
+#   - Pre-zygote: SF reads QGL during boot → caches compiled with QGL
+#   - If file is 0000 (protected): SF gets EACCES → no-QGL caches
+#   - When boot-completed.sh activates (0644): mixed QGL/no-QGL contexts
+#     on same KGSL device → cascade crash → black screen → bootloop
 #
-# BOOT FREEZE ROOT CAUSE (skiavkthreaded + QGL pre-SF):
-# ALWAYS ACTIVE MODE (0644):
-#   qgl_config.txt is written at 0644 here in post-fs-data.sh.
-#   SF, apps, and every process reads it from the very start of the boot.
-#   All pipeline caches compiled during boot are WITH QGL active.
-#   boot-completed.sh re-writes at boot_completed to refresh the inode
-#   and ensure correct SELinux context — identical to LYB Kernel Manager.
-#
-# WHY THE OLD PROTECTED MODE (0000) CAUSED BLACK SCREEN:
-#   Writing 0000 meant all boot-session caches were compiled without QGL.
-#   When QGL activated at boot_completed, the pipelineCacheUUID had NOT
-#   changed (custom Adreno drivers don't update UUID on QGL changes).
-#   Driver loaded old no-QGL blobs with QGL active → wrong shader output
-#   → black screen for every app including the launcher.
-#   The _PREV_BOOT_SUCCESS gate already handles first-boot SF hang safety
-#   by using skiaglthreaded on the first boot after install.
+# FIX: do NOT install qgl_config.txt here at all. boot-completed.sh handles
+# it exclusively at the correct timing (boot_completed + 3s stabilization).
+# The /data/vendor/gpu directory is pre-created below for SELinux readiness.
 
 if [ "$QGL" = "y" ]; then
-  # ── LYB BOOT 2+ BEHAVIOR: skip install if file already active ─────────────
-  # ROOT CAUSE OF CASCADE CRASH (first app works, second crashes, cascade):
-  #
-  #   LYB never writes qgl_config.txt during post-fs-data/init time.
-  #   On boot 2+, the previous boot's 0644 file is still present when
-  #   BOOT_COMPLETED fires. ALL apps from BOOT_COMPLETED+0s read the SAME
-  #   QGL config — consistent KGSL context state across the entire session.
-  #   No mixed state = no cascade crash.
-  #
-  #   Our module overwrites the previous boot's 0644 with 0000 here, which
-  #   creates a transition window:
-  #     BOOT_COMPLETED+0s to +20s: apps get EACCES → default (no-QGL) KGSL contexts
-  #     BOOT_COMPLETED+20s:        boot-completed.sh writes 0644 → QGL KGSL contexts
-  #   When both types of context coexist on the same KGSL device → crash → cascade.
-  #
-  #   FIX: if the file already exists at 0644 with our owner marker (written by
-  #   boot-completed.sh on the previous boot), SKIP the install entirely.
-  #   boot-completed.sh will refresh it at BOOT_COMPLETED+20s (same mechanism as LYB).
-  #   All apps from BOOT_COMPLETED+0s read the same config → consistent → no crash.
-  #
-  #   BOOT 1 / fresh install: file absent or not ours → fall through to normal install
-  #   (writes 0000, boot-completed.sh activates at +20s with line-by-line write).
-  # ─────────────────────────────────────────────────────────────────────────────
-  _qgl_skip=false
-  case "$RENDER_MODE" in
-    skiavk)
-      _qgl_existing_mode=$(stat -c '%a' "/data/vendor/gpu/qgl_config.txt" 2>/dev/null || echo "")
-      _qgl_existing_owner="/data/vendor/gpu/.adreno_qgl_owner"
-      case "$_qgl_existing_mode" in
-        "644"|"0644")
-          if [ -f "$_qgl_existing_owner" ]; then
-            _qgl_skip=true
-            log_boot "[OK] QGL: file already at 0644 with owner marker — SKIP install (LYB boot 2+ behavior)"
-            log_boot "    All apps from BOOT_COMPLETED+0s will see consistent QGL state."
-            log_boot "    boot-completed.sh will refresh at BOOT_COMPLETED+20s."
-          fi
-          ;;
-      esac
-      unset _qgl_existing_mode _qgl_existing_owner
-      ;;
-  esac
-
-  if [ "$_qgl_skip" = "true" ]; then
-    unset _qgl_skip _QGL_SKIAVK_BOOT
-  else
-  unset _qgl_skip
-
-  # ── Determine whether skiavkthreaded will be active this boot ─────────────
-  # skiavkthreaded = SF uses Vulkan compositor → reads qgl_config.txt during
-  # cold vkCreateDevice init → certain QGL settings cause indefinite hang.
-  # Write 0000 to prevent SF from reading it. boot-completed.sh writes 0644
-  # at boot_completed — "settings take effect for the next app launched" (RE §7).
-  _QGL_SKIAVK_BOOT=false
-  case "$RENDER_MODE" in
-    skiavk)
-      _QGL_SKIAVK_BOOT=true
-      log_boot "[OK] QGL: RENDER_MODE=${RENDER_MODE} → skiavkthreaded boot → PROTECTED MODE (0000)"
-      ;;
-  esac
-  if [ "$_QGL_SKIAVK_BOOT" = "false" ]; then
-    _hwui_live=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
-    if [ "$_hwui_live" = "skiavk" ]; then
-      _QGL_SKIAVK_BOOT=true
-      log_boot "[OK] QGL: debug.hwui.renderer=skiavk detected → PROTECTED MODE (0000)"
-    else
-      log_boot "[OK] QGL: no Vulkan renderer active → ACTIVE MODE (0644)"
-    fi
-    unset _hwui_live
-  fi
-
-  log_boot "========================================"
-  log_boot "QGL CONFIGURATION: INSTALLING (init domain)"
-  log_boot "========================================"
-
-  if [ -f "$MODDIR/qgl_config.txt" ]; then
-    QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
-    QGL_TEMP="/data/vendor/gpu/.qgl_config.txt.tmp.$$"
-    QGL_OWNER_MARKER="/data/vendor/gpu/.adreno_qgl_owner"
-    QGL_INSTALL_SUCCESS=false
-    MAX_RETRIES=5
-    RETRY_COUNT=0
-
-    # ── OWNERSHIP RECLAIM: protected-mode file without owner marker ─────────
-    # If qgl_config.txt exists at mode 0000 (our exclusive PROTECTED MODE) but the
-    # owner marker is missing, the foreign-file guard below would incorrectly skip
-    # the file as "third-party". No third-party manager (LYB, etc.) ever writes a
-    # mode-0000 file — they write at 0644. Mode 0000 is only written by this module's
-    # post-fs-data PROTECTED MODE path. The marker is lost when:
-    #   (a) The QGL=n disable path removed the marker but not the file (now fixed above)
-    #   (b) The owner marker write failed silently on a prior boot
-    # Fix: write the marker before the guard so CASE A can proceed on service.sh.
-    if [ -f "$QGL_TARGET" ] && [ ! -f "$QGL_OWNER_MARKER" ]; then
-      _pfd_reown_mode=$(stat -c '%a' "$QGL_TARGET" 2>/dev/null || echo "?")
-      case "$_pfd_reown_mode" in
-        "0"|"00"|"000"|"0000")
-          log_boot "[OK] QGL: protected-mode file (mode=0000) found without owner marker"
-          log_boot "    Reclaiming ownership (marker was lost — see QGL=n path fix comment)"
-          touch "$QGL_OWNER_MARKER" 2>/dev/null && \
-            chmod 0600 "$QGL_OWNER_MARKER" 2>/dev/null && \
-            log_boot "    Owner marker re-created — CASE A will activate the file" || \
-            log_boot "    [!] Owner marker re-create failed — file may stay 0000 this boot"
-          ;;
-      esac
-      unset _pfd_reown_mode
-    fi
-    # ── END ownership reclaim ────────────────────────────────────────────────
-
-    # Foreign-file guard: if the file exists without our owner marker, leave it.
-    if [ -f "$QGL_TARGET" ] && [ ! -f "$QGL_OWNER_MARKER" ]; then
-      log_boot "[!] QGL: qgl_config.txt exists but NOT owned by this module — leaving untouched"
-      QGL_INSTALL_SUCCESS=true
-    else
-      while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$QGL_INSTALL_SUCCESS" = "false" ]; do
-        sleep 1
-        if touch /data/.adreno_qgl_test 2>/dev/null && rm -f /data/.adreno_qgl_test 2>/dev/null; then
-          if mkdir -p /data/vendor/gpu 2>/dev/null; then
-            # CRITICAL: Ensure directory is vendor_data_file BEFORE cp.
-            # If it's same_process_hal_file (from a prior boot's activation), cp creates
-            # a file with 'unlabeled' context (no type_transition) → init 'create' denied
-            # → cp fails → temp file never created → mv never runs → old 0644 stays →
-            # SF reads it → skiavkthreaded hang → watchdog → reboot.
-            # Relabeling to vendor_data_file here (with init's unrestricted chcon) ensures
-            # type_transition (init → vendor_data_file:dir → vendor_data_file file) fires.
-            chcon u:object_r:vendor_data_file:s0 /data/vendor/gpu 2>/dev/null || true
-            if cp -f "$MODDIR/qgl_config.txt" "$QGL_TEMP" 2>/dev/null; then
-              if [ -f "$QGL_TEMP" ] && [ -s "$QGL_TEMP" ]; then
-
-                  if [ "$_QGL_SKIAVK_BOOT" = "true" ]; then
-                    # PROTECTED MODE — SF uses skiavkthreaded (Vulkan), reads
-                    # qgl_config.txt during cold vkCreateDevice init which hangs.
-                    # 0000 → SF gets EACCES → no hang. boot-completed.sh writes
-                    # 0644 at boot_completed. Every app launched AFTER boot_completed
-                    # reads QGL. This is LYB-equivalent: "settings take effect for
-                    # the next app launched" (RE reference §7 timing note).
-                    chmod 0000 "$QGL_TEMP" 2>/dev/null
-                    chown 0:0 "$QGL_TEMP" 2>/dev/null
-                  else
-                    # ACTIVE MODE — SF uses skiaglthreaded (GL), never reads
-                    # qgl_config.txt at init. Safe to install at 0644 now.
-                    chmod 0644 "$QGL_TEMP" 2>/dev/null
-                    chown 0:1000 "$QGL_TEMP" 2>/dev/null
-                  fi
-
-                if mv -f "$QGL_TEMP" "$QGL_TARGET" 2>/dev/null; then
-                  if [ -f "$QGL_TARGET" ]; then
-                    ACTUAL_SIZE=$(stat -c%s "$QGL_TARGET" 2>/dev/null || echo 0)
-                    if [ "$ACTUAL_SIZE" -gt 0 ]; then
-                      QGL_INSTALL_SUCCESS=true
-                      touch "$QGL_OWNER_MARKER" 2>/dev/null || true
-                      chmod 0600 "$QGL_OWNER_MARKER" 2>/dev/null || true
-
-                        "$SEPOLICY_TOOL" --live \
-                          "allow same_process_hal_file labeledfs filesystem associate" \
-                          >/dev/null 2>&1 || true
-                        "$SEPOLICY_TOOL" --live \
-                          "allow same_process_hal_file unlabeled filesystem associate" \
-                          >/dev/null 2>&1 || true
-                        if [ "$_QGL_SKIAVK_BOOT" = "true" ]; then
-                          # Protected mode: label vendor_data_file. boot-completed.sh
-                          # will chcon to same_process_hal_file when it re-writes.
-                          chcon u:object_r:vendor_data_file:s0 "$QGL_TARGET" 2>/dev/null || true
-                          _qgl_ctx=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
-                          log_boot "[OK] QGL written — PROTECTED MODE (${ACTUAL_SIZE}B, 0000, ctx=${_qgl_ctx})"
-                          log_boot "    boot-completed.sh activates at boot_completed"
-                          unset _qgl_ctx
-                        else
-                          if chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null; then
-                            chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu 2>/dev/null || true
-                            _qgl_ctx=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
-                            log_boot "[OK] QGL written — ACTIVE MODE (${ACTUAL_SIZE}B, 0644, ctx=${_qgl_ctx})"
-                          else
-                            chcon u:object_r:vendor_data_file:s0 "$QGL_TARGET" 2>/dev/null || true
-                            _qgl_ctx=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "unknown")
-                            log_boot "[!] QGL written — ACTIVE MODE (${ACTUAL_SIZE}B, 0644, ctx=${_qgl_ctx}) — chcon OEM-blocked"
-                          fi
-                          unset _qgl_ctx
-                        fi
-                      log_boot "[OK] QGL owner marker: $QGL_OWNER_MARKER"
-                      break
-                    else
-                      log_boot "[X] QGL post-rename file is empty — retrying"
-                    fi
-                  else
-                    log_boot "[X] QGL post-rename file missing — retrying"
-                  fi
-                else
-                  log_boot "[X] QGL atomic rename failed — retrying"
-                  rm -f "$QGL_TEMP" 2>/dev/null
-                fi
-              else
-                log_boot "[X] QGL temp file empty/missing after cp — retrying"
-                rm -f "$QGL_TEMP" 2>/dev/null
-              fi
-            else
-              log_boot "[X] QGL cp to temp failed — retrying"
-            fi
-          else
-            log_boot "[X] QGL mkdir /data/vendor/gpu failed — retrying"
-          fi
-        else
-          log_boot "[X] /data not writable yet — retrying"
-        fi
-        RETRY_COUNT=$((RETRY_COUNT + 1))
-        [ "$QGL_INSTALL_SUCCESS" = "false" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ] && \
-          sleep $((RETRY_COUNT * 2))
-      done
-      rm -f "$QGL_TEMP" 2>/dev/null
-
-      if [ "$QGL_INSTALL_SUCCESS" = "false" ]; then
-        log_boot "[X] ERROR: QGL install failed after $MAX_RETRIES attempts"
-        log_boot "    service.sh will attempt emergency install post-boot_completed"
-      fi
-    fi
-
-    unset QGL_TARGET QGL_TEMP QGL_OWNER_MARKER QGL_INSTALL_SUCCESS
-    unset MAX_RETRIES RETRY_COUNT ACTUAL_SIZE
-  else
-    log_boot "[X] ERROR: $MODDIR/qgl_config.txt not found — cannot install QGL"
-  fi
-
-  unset _QGL_SKIAVK_BOOT
-  fi # end _qgl_skip else block
+  log_boot "QGL: enabled — installation deferred to boot-completed.sh (LYB timing)"
+  # Pre-create directory with correct context so boot-completed.sh has a
+  # ready target. This is safe — no file exists yet, just the directory.
+  mkdir -p /data/vendor/gpu 2>/dev/null || true
+  chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu 2>/dev/null || true
+  # Remove any stale file from a crashed previous boot to ensure clean state
+  rm -f /data/vendor/gpu/qgl_config.txt 2>/dev/null || true
+  log_boot "[OK] QGL: /data/vendor/gpu pre-created, stale file cleared"
 else
   log_boot "QGL configuration disabled"
+  # If QGL is disabled, clean up any existing file
+  rm -f /data/vendor/gpu/qgl_config.txt 2>/dev/null || true
+  rm -f /data/vendor/gpu/.adreno_qgl_owner 2>/dev/null || true
 fi
 
 # ========================================
@@ -3333,17 +2676,14 @@ if [ -d "$MODDIR/system/vendor/firmware" ]; then
     log_boot "WARNING: Failed to set SELinux contexts for firmware"
 fi
 
-# ── OEM-specific: QGL data directory fix ─────────────────────────────────────
-if [ "$HYPEROS_ROM" = "true" ] && [ "$QGL" = "y" ]; then
-  mkdir -p /data/vendor/gpu 2>/dev/null
-  # GPU HAL writes shader caches here at runtime. It runs in the 'system'
-  # group (GID 1000). 0775 = owner+group write. 0755 would deny group
-  # writes → HAL can't create caches → crash → SurfaceFlinger restart loop.
-  chown root:system /data/vendor/gpu 2>/dev/null || true
-  chmod 0775 /data/vendor/gpu 2>/dev/null || true
-  # same_process_hal_file is required for BOTH the directory and qgl_config.txt.
-  # The Adreno driver validates both contexts before reading the config file.
-  # The directory receiving same_process_hal_file is validated by LYB Kernel Manager.
+# ── QGL data directory setup (ALL OEMs) ─────────────────────────────────────
+# GPU HAL writes shader caches here at runtime. It runs in the 'system'
+# group (GID 1000). 0775 = owner+group write. 0755 would deny group
+# writes → HAL can't create caches → crash → SurfaceFlinger restart loop.
+# same_process_hal_file is required for BOTH the directory and qgl_config.txt.
+# The Adreno driver validates both contexts before reading the config file.
+if [ "$QGL" = "y" ]; then
+  mkdir -p /data/vendor/gpu 2>/dev/null || true
   chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu 2>/dev/null || true
   log_boot "QGL directory context set to same_process_hal_file (dir+file both required by driver)"
 fi

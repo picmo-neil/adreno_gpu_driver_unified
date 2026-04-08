@@ -1,335 +1,361 @@
 #!/system/bin/sh
-# Adreno GPU Driver - Boot Completed Script
-# Runs at sys.boot_completed via KSU-Next/KernelSU/Magisk/APatch boot-completed stage.
+# Adreno GPU Driver — QGL Config Activator (Boot Phase)
 #
-# PURPOSE: Write qgl_config.txt FRESH at BOOT_COMPLETED — exactly mirroring LYB
-# Kernel Manager's timing and mechanism (Section 7 of RE reference).
+# TWO-PHASE QGL STRATEGY:
+#   Phase 1 (post-fs-data.sh): REMOVE stale QGL before Zygote forks.
+#     Prevents GPU driver from reading QGL during init (causes bootloop).
+#   Phase 2 (this script): RE-APPLY QGL after system is stable.
+#     Delegates to apply_qgl.sh --boot for the actual write.
 #
-# WHY FRESH WRITE (not chmod):
-#   post-fs-data.sh writes qgl_config.txt at mode=0000 (protected) to prevent
-#   SurfaceFlinger's early vkCreateDevice from reading it and hanging.
-#   Previously, boot-completed.sh only did chmod 0644. That approach had a fatal
-#   flaw: chcon same_process_hal_file on an EXISTING vendor_data_file-labeled file
-#   fails silently on OEM ROMs with neverallow for same_process_hal_file on /data.
-#   Result: file is at 0644 but wrong SELinux context → Adreno driver validates
-#   BOTH file AND directory context (RE reference §7) → context wrong → driver
-#   silently ignores the file → QGL never activates despite appearing active.
+# PER-APP QGL: After boot, the QGL Trigger APK (AccessibilityService)
+#   handles per-app QGL application. When any app opens, the APK calls
+#   apply_qgl.sh <package_name> which writes the app-specific profile.
+#   This matches LYB Kernel Manager's exact behavior.
 #
-#   LYB's approach (Section 7): rm → touch (new inode) → chcon dir → chcon file →
-#   write content. The fresh inode in an already-labeled directory correctly inherits
-#   same_process_hal_file via type_transition policy on every ROM. Context is always
-#   right because it's set at file CREATION, not applied to an existing file.
+# TIMING FIX (BUG ALPHA): LYB's onboot BroadcastReceiver applies QGL
+#   IMMEDIATELY at BOOT_COMPLETED — NO launcher PID wait. The "wait for
+#   launcher" step created a 3-60s window where qgl_config.txt was absent,
+#   allowing the APK to write a per-app config BEFORE the global baseline.
+#   This caused mixed KGSL contexts → cascade crash → bootloop.
+#   Fix: removed launcher PID polling. Apply at boot_completed+3s (matches
+#   LYB's implicit BroadcastReceiver timing).
 #
-#   This script replicates LYB's exact mechanism.
+# LYB COMPAT: Uses touch + chcon (same_process_hal_file), NO chmod, NO chown.
+#   Matches LYB r1.m6493b() exact sequence (see apply_qgl.sh header).
 #
-# Developer: @pica_pica_picachu | Channel: @zesty_pic
+# LOGGING: All operations logged to /sdcard/Adreno_Driver/qgl_trigger.log
+#   and /sdcard/Adreno_Driver/qgl_diagnostics.log for diagnostics.
 
 MODDIR="${0%/*}"
+LOG_FILE="/sdcard/Adreno_Driver/qgl_trigger.log"
+DIAG_FILE="/sdcard/Adreno_Driver/qgl_diagnostics.log"
+QGL_DIR="/data/vendor/gpu"
+QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
+BASELINE_FLAG="/data/vendor/gpu/.qgl_boot_baseline_ready"
 
-# ── 1. Load QGL and RENDER_MODE from config ──────────────────────────────
-# RENDER_MODE is needed for the state-file-based cache clear (section 4).
+# ══════════════════════════════════════════════════════════════════════════
+# LOGGING HELPERS (same as apply_qgl.sh)
+# ══════════════════════════════════════════════════════════════════════════
+
+_qgl_log() {
+  _ts=$(date +%H:%M:%S 2>/dev/null || echo '?')
+  printf '[%s] %s\n' "$_ts" "$1" >> "$LOG_FILE" 2>/dev/null || true
+  printf '[%s] %s\n' "$_ts" "$1" > /dev/kmsg 2>/dev/null || true
+}
+
+_qgl_diag() {
+  _ts=$(date +%Y-%m-%d_%H:%M:%S 2>/dev/null || echo '?')
+  printf '[%s] [BOOT-DIAG] %s\n' "$_ts" "$1" >> "$DIAG_FILE" 2>/dev/null || true
+}
+
+_qgl_state_capture() {
+  _label="$1"
+  _qgl_diag "=== STATE CAPTURE: $_label ==="
+  
+  if [ -f "$QGL_TARGET" ]; then
+    _qgl_diag "QGL_FILE: EXISTS"
+    _ls=$(ls -laZ "$QGL_TARGET" 2>/dev/null || echo 'ls_failed')
+    _qgl_diag "QGL_FILE_LS: $_ls"
+    _ctx=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo 'unknown')
+    _qgl_diag "QGL_FILE_CONTEXT: $_ctx"
+    _size=$(wc -c < "$QGL_TARGET" 2>/dev/null || echo '0')
+    _qgl_diag "QGL_FILE_SIZE: $_size bytes"
+  else
+    _qgl_diag "QGL_FILE: ABSENT"
+  fi
+  
+  if [ -d "$QGL_DIR" ]; then
+    _qgl_diag "QGL_DIR: EXISTS"
+    _dirctx=$(ls -dZ "$QGL_DIR" 2>/dev/null | awk '{print $1}' || echo 'unknown')
+    _qgl_diag "QGL_DIR_CONTEXT: $_dirctx"
+  else
+    _qgl_diag "QGL_DIR: ABSENT"
+  fi
+  
+  _enforce=$(getenforce 2>/dev/null || echo 'unknown')
+  _qgl_diag "SELINUX_MODE: $_enforce"
+  
+  _avc=$(dmesg 2>/dev/null | grep -E 'avc.*qgl|avc.*same_process_hal' | tail -5 | tr '\n' '|' || echo 'none')
+  _qgl_diag "QGL_AVC_DENIALS: $_avc"
+  
+  _qgl_diag "=== END STATE CAPTURE ==="
+}
+
+# Ensure log directory exists
+mkdir -p /sdcard/Adreno_Driver 2>/dev/null || true
+
+_qgl_diag "========================================"
+_qgl_diag "BOOT-COMPLETED.SH STARTED"
+_qgl_diag "PID: $$"
+_qgl_diag "TIME: $(date 2>/dev/null || echo 'unknown')"
+_qgl_diag "========================================"
+
+# ══════════════════════════════════════════════════════════════════════════
+# LOAD CONFIG
+# ══════════════════════════════════════════════════════════════════════════
+
 QGL="n"
-RENDER_MODE=""
+QGL_PERAPP="n"
 for _cfg in \
     "/sdcard/Adreno_Driver/Config/adreno_config.txt" \
     "/data/local/tmp/adreno_config.txt" \
     "$MODDIR/adreno_config.txt"; do
   [ -f "$_cfg" ] || continue
-  _has_qgl=false
   while IFS='= ' read -r _k _v; do
-    _v="${_v%%$'\r'}"
     case "$_k" in
-      '#'*|'') continue ;;
-      QGL)
-        case "$_v" in
-          [Yy]|[Yy][Ee][Ss]|1) QGL="y" ;;
-        esac
-        _has_qgl=true
-        ;;
-      RENDER_MODE)
-        RENDER_MODE="$_v"
-        ;;
+      QGL) case "$_v" in [Yy]*|1) QGL="y" ;; esac ;;
+      QGL_PERAPP) case "$_v" in [Yy]*|1) QGL_PERAPP="y" ;; esac ;;
     esac
   done < "$_cfg"
-  [ "$_has_qgl" = "true" ] && break
+  [ "$QGL" = "y" ] && break
 done
-unset _cfg _k _v _has_qgl
+unset _cfg _k _v
 
-# Skip if QGL is disabled
-[ "$QGL" = "y" ] || exit 0
+_qgl_log "[BOOT] Config loaded: QGL=$QGL QGL_PERAPP=$QGL_PERAPP"
+_qgl_diag "CONFIG_QGL: $QGL"
+_qgl_diag "CONFIG_QGL_PERAPP: $QGL_PERAPP"
 
-printf '[ADRENO] boot-completed.sh: QGL=y — writing fresh qgl_config.txt (LYB-style)\n' \
-  > /dev/kmsg 2>/dev/null || true
-
-# ── DYNAMIC TIMING — detect launcher first-frame instead of fixed sleep ───────
-#
-# WHY DYNAMIC: LYB's write timing is NOT a fixed sleep — it is the cumulative
-# wall-clock time of all blocking operations before r1.b() fires:
-#   uname -a + devfreq discovery (multiple cat/ls per device) + lkm_8.txt parse
-#   + JSON config reload. This varies per device (3–25s). A fixed 20s is wrong
-#   for most devices — too late on fast ones, too early on slow ones.
-#
-# WHAT WE ACTUALLY NEED: QGL must appear AFTER the launcher and SystemUI have
-# already called vkCreateDevice and initialised their Vulkan contexts. Once a
-# process has vkCreateDevice open, the presence of qgl_config.txt does NOT
-# affect it (the driver reads it only at vkCreateDevice time). So: detect when
-# the launcher has rendered its first frames → its vkCreateDevice is done →
-# safe to write QGL → all subsequent app opens see QGL from the start.
-#
-# DETECTION STRATEGY (three layers, most accurate to fallback):
-#   Layer 1: Find default launcher package dynamically via PackageManager.
-#   Layer 2: Poll dumpsys gfxinfo for the launcher until frames > 0.
-#            This is the exact moment vkCreateDevice has been called.
-#   Layer 3: Absolute safety ceiling of 30s prevents hanging on edge cases.
-#   Layer 4: +2s buffer after frame detection — ensures the launcher's
-#            RenderThread has fully settled (HWUI init is async after first
-#            frame submission, not before).
-#
-# NO FORCE-STOPS — EVER. LYB never force-stops any app. Neither do we.
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Layer 1: Resolve default home/launcher package
-_bc_home=""
-_bc_home_raw=$(cmd package resolve-activity --brief \
-  -a android.intent.action.MAIN \
-  -c android.intent.category.HOME 2>/dev/null | head -1)
-# Strip "/Activity" class suffix — keep only the package name
-_bc_home="${_bc_home_raw%%/*}"
-# Sanitise: must look like a dotted package name
-case "$_bc_home" in
-  *.*)  : ;;           # valid (e.g. com.android.launcher3)
-  *)    _bc_home="" ;; # garbage — discard
-esac
-unset _bc_home_raw
-
-printf '[ADRENO] boot-completed.sh: dynamic QGL timing — launcher=%s\n' \
-  "${_bc_home:-unknown}" > /dev/kmsg 2>/dev/null || true
-
-# Layer 2: Poll gfxinfo until launcher has rendered at least 1 frame.
-# dumpsys gfxinfo <pkg> returns "Total frames rendered: N" in its header block.
-# N > 0 means the HWUI RenderThread has submitted at least one frame → vkCreateDevice
-# has already been called → safe to write QGL.
-_bc_waited=0
-_bc_max=28   # hard ceiling: 28s poll + 2s buffer = 30s absolute max
-_bc_frames_done=false
-
-if [ -n "$_bc_home" ]; then
-  while [ $_bc_waited -lt $_bc_max ]; do
-    # Extract "Total frames rendered: N" from gfxinfo header
-    _bc_frames=$(dumpsys gfxinfo "$_bc_home" 2>/dev/null \
-      | awk '/Total frames rendered/{print $NF; exit}' 2>/dev/null || echo "0")
-    _bc_frames="${_bc_frames:-0}"
-    # Strip non-digits (e.g. trailing comma on some ROM variants)
-    _bc_frames="${_bc_frames%%[!0-9]*}"
-    if [ "${_bc_frames:-0}" -gt 0 ] 2>/dev/null; then
-      _bc_frames_done=true
-      break
-    fi
-    sleep 1
-    _bc_waited=$((_bc_waited + 1))
-  done
-else
-  # No launcher detected — cannot poll; wait a fixed 6s (safe for most devices)
-  printf '[ADRENO] boot-completed.sh: no launcher detected — using fixed 6s fallback\n' \
-    > /dev/kmsg 2>/dev/null || true
-  sleep 6
-  _bc_frames_done=true
-fi
-
-# Layer 3: Fallback log if we hit the ceiling without detecting frames
-if [ "$_bc_frames_done" = "false" ]; then
-  printf '[ADRENO] boot-completed.sh: frame detection timed out after %ds — proceeding anyway\n' \
-    "$_bc_waited" > /dev/kmsg 2>/dev/null || true
-fi
-
-# Layer 4: +2s buffer after frame detection to let HWUI RenderThread fully settle.
-# The first frame submission != HWUI fully initialised; the async init continues
-# for ~1–2s after the first frame. This buffer closes that window.
-sleep 2
-
-printf '[ADRENO] boot-completed.sh: launcher frames detected after %ds + 2s buffer — writing QGL\n' \
-  "$_bc_waited" > /dev/kmsg 2>/dev/null || true
-unset _bc_home _bc_waited _bc_max _bc_frames _bc_frames_done
-
-QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
-QGL_OWNER_MARKER="/data/vendor/gpu/.adreno_qgl_owner"
-
-# ── 2. Locate the QGL source file ────────────────────────────────────────────
-# Priority: /sdcard (mounted by boot_completed) → /data/local/tmp → $MODDIR
-# Same priority order as post-fs-data.sh and service.sh use.
-_bc_qsrc=""
-for _qs in \
-    "/sdcard/Adreno_Driver/Config/qgl_config.txt" \
-    "/data/local/tmp/qgl_config.txt" \
-    "$MODDIR/qgl_config.txt"; do
-  [ -f "$_qs" ] && { _bc_qsrc="$_qs"; break; }
-done
-unset _qs
-
-if [ -z "$_bc_qsrc" ]; then
-  printf '[ADRENO] boot-completed.sh: no qgl_config.txt source found — exiting\n' \
-    > /dev/kmsg 2>/dev/null || true
+if [ "$QGL" != "y" ]; then
+  _qgl_log "[BOOT] QGL=n in config — skipping QGL activation"
+  _qgl_diag "EXIT: QGL disabled in config"
   exit 0
 fi
 
-# ── 2b. SELinux injection — needed for write/unlink on vendor_data_file ──────
-#
-# We need: unlink (rm), create (cp), setattr (chmod/chown/chcon) on
-# vendor_data_file and same_process_hal_file. Inject before any file ops.
-#
-_bc_injected=false
-for _spbin in "/data/adb/ksud" "/data/adb/ksu/bin/ksud"; do
-  [ -f "$_spbin" ] && [ -x "$_spbin" ] || continue
-  "$_spbin" sepolicy patch \
-    "allow su vendor_data_file file { getattr setattr relabelfrom relabelto create write unlink open read }" \
-    >/dev/null 2>&1 && _bc_injected=true
-  "$_spbin" sepolicy patch \
-    "allow su same_process_hal_file file { getattr setattr relabelto relabelfrom create write unlink open read }" \
-    >/dev/null 2>&1 || true
-  "$_spbin" sepolicy patch \
-    "allow su same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }" \
-    >/dev/null 2>&1 || true
-  "$_spbin" sepolicy patch \
-    "allow su vendor_data_file dir { getattr search read open write add_name remove_name }" \
-    >/dev/null 2>&1 || true
-  "$_spbin" sepolicy patch \
-    "allow same_process_hal_file labeledfs filesystem associate" \
-    >/dev/null 2>&1 || true
-  "$_spbin" sepolicy patch \
-    "allow su unlabeled file { getattr setattr relabelfrom relabelto create write unlink open read }" \
-    >/dev/null 2>&1 || true
-  break
+# Capture initial state
+_qgl_state_capture "BEFORE_BOOT_QGL"
+
+# ══════════════════════════════════════════════════════════════════════════
+# STEP 1: WAIT FOR BOOT COMPLETED
+# ══════════════════════════════════════════════════════════════════════════
+
+_qgl_log "[BOOT] Waiting for sys.boot_completed=1..."
+_qgl_diag "WAIT: For sys.boot_completed=1"
+
+_boot_wait=0
+while [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ] && [ $_boot_wait -lt 120 ]; do
+  sleep 1
+  _boot_wait=$((_boot_wait + 1))
 done
-if [ "$_bc_injected" = "false" ]; then
-  for _spbin in \
-      "$(command -v magiskpolicy 2>/dev/null)" \
-      "/data/adb/magisk/magiskpolicy" \
-      "/data/adb/ksu/bin/magiskpolicy" \
-      "/data/adb/ap/bin/magiskpolicy"; do
-    [ -z "$_spbin" ] && continue
-    [ -f "$_spbin" ] && [ -x "$_spbin" ] || continue
-    "$_spbin" --live \
-      "allow su vendor_data_file file { getattr setattr relabelfrom relabelto create write unlink open read }" \
-      >/dev/null 2>&1 && _bc_injected=true
-    "$_spbin" --live \
-      "allow su same_process_hal_file file { getattr setattr relabelto relabelfrom create write unlink open read }" \
-      >/dev/null 2>&1 || true
-    "$_spbin" --live \
-      "allow su same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }" \
-      >/dev/null 2>&1 || true
-    "$_spbin" --live \
-      "allow su vendor_data_file dir { getattr search read open write add_name remove_name }" \
-      >/dev/null 2>&1 || true
-    "$_spbin" --live \
-      "allow same_process_hal_file labeledfs filesystem associate" \
-      >/dev/null 2>&1 || true
-    "$_spbin" --live \
-      "allow su unlabeled file { getattr setattr relabelfrom relabelto create write unlink open read }" \
-      >/dev/null 2>&1 || true
-    break
-  done
-fi
-unset _spbin _bc_injected
-# ── END PRE-STAT INJECTION ────────────────────────────────────────────────
+unset _boot_wait
 
-# ── 3. No cache clearing at boot_completed — apps are already running ──────
-#
-# At boot_completed, SurfaceFlinger, SystemUI, the launcher, and Zygote have
-# already initialised. Clearing pipeline caches HERE forces the first user-
-# opened app to cold-recompile ALL shaders with QGL already active. The custom
-# Adreno driver crashes in QGLCCompileToIRShader during cold compilation under
-# QGL settings → device reboots on first app open.
-#
-# LYB Kernel Manager NEVER clears any cache on any boot. It writes
-# qgl_config.txt and lets all apps reuse their existing pipeline blobs.
-# Existing blobs remain valid: QGL changes driver-internal execution
-# parameters, not the SPIR-V bytecode Skia submits. Reusing them is safe.
-#
-# All necessary cache clearing (render mode change GL↔Vulkan = incompatible
-# binary blob format, first install) is handled exclusively by post-fs-data.sh
-# BEFORE Zygote starts — the only window where clearing is safe.
-#
-printf '[ADRENO] boot-completed.sh: writing qgl_config.txt — LYB-style, no force-stops, no cache clear\n' \
-  > /dev/kmsg 2>/dev/null || true
-
-rm -f /data/local/tmp/adreno_post_fs_data_done 2>/dev/null || true
-
-# ── 4. Write qgl_config.txt FRESH — LYB-style mechanism with atomic cp ────
-#
-# LYB Section 7 (RE reference) sequence:
-#   mkdir /data/vendor/gpu
-#   rm /data/vendor/gpu/qgl_config.txt
-#   touch /data/vendor/gpu/qgl_config.txt
-#   chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu
-#   chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu/qgl_config.txt
-#   echo KEY=VAL >> ...  (each setting)
-#
-# WHY THIS WORKS WHEN CHMOD-ONLY DID NOT:
-#   The Adreno driver validates BOTH the file AND directory SELinux context
-#   before reading qgl_config.txt (RE reference §7). chcon on an EXISTING
-#   vendor_data_file-labeled file fails silently on OEM ROMs that have
-#   neverallow blocking same_process_hal_file relabeling on /data fs.
-#   A FRESH file created in an already-labeled same_process_hal_file directory
-#   inherits the correct label via kernel type_transition policy — this works
-#   on every ROM without needing relabelfrom/relabelto permissions at all.
-#
-# WHY cp INSTEAD OF LINE-BY-LINE echo:
-#   LYB's line-by-line echo submits all commands simultaneously as fire-and-forget
-#   async shells — they execute in rapid succession with no artificial delay.
-#   A while loop with sleep 0.1 between 177 lines = 17+ seconds of partial file
-#   exposure: force-stopped apps that restart during this window call vkCreateDevice
-#   against an incomplete config → non-deterministic driver state → crash.
-#   cp is atomic: the file goes from absent to complete in a single operation.
-#   No partial-write window → no race → force-stopped apps always see either
-#   no file (defaults) or the complete config. Clean and correct.
-#
-mkdir -p /data/vendor/gpu 2>/dev/null || true
-
-# Step 1: Label directory FIRST (LYB §4.3: chcon dir before file creation)
-chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu 2>/dev/null || true
-
-# Step 2: Remove previous file — fresh inode (LYB: rm)
-rm -f "$QGL_TARGET" 2>/dev/null || true
-
-# Step 3: Copy complete file atomically (replaces LYB's touch → echo × N sequence)
-# cp is a single syscall sequence: open → write full content → close.
-# File inherits same_process_hal_file context from the directory via type_transition.
-if ! cp -f "$_bc_qsrc" "$QGL_TARGET" 2>/dev/null; then
-  printf '[ADRENO] boot-completed.sh: cp FAILED — QGL not activated\n' \
-    > /dev/kmsg 2>/dev/null || true
-  exit 1
-fi
-unset _bc_qsrc
-
-if [ ! -f "$QGL_TARGET" ]; then
-  printf '[ADRENO] boot-completed.sh: QGL_TARGET missing after cp — QGL not activated\n' \
-    > /dev/kmsg 2>/dev/null || true
-  exit 1
+if [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ]; then
+  _qgl_log "[BOOT] sys.boot_completed never reached — exiting"
+  _qgl_diag "EXIT: boot_completed never reached"
+  exit 0
 fi
 
-# Step 4: Set ownership, permissions, and SELinux context
-chmod 0644 "$QGL_TARGET" 2>/dev/null || true
-chown 0:1000 "$QGL_TARGET" 2>/dev/null || true
-chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || \
-  chcon u:object_r:vendor_data_file:s0 "$QGL_TARGET" 2>/dev/null || true
+_qgl_log "[BOOT] sys.boot_completed=1 confirmed"
+_qgl_diag "WAIT: OK - boot_completed=1"
 
-# Write owner marker so service.sh CASE A/B/C recognises this as our file
-touch "$QGL_OWNER_MARKER" 2>/dev/null || true
-chmod 0600 "$QGL_OWNER_MARKER" 2>/dev/null || true
+# ══════════════════════════════════════════════════════════════════════════
+# STEP 2: SAFETY MARGIN (Vulkan pipeline settle)
+# ══════════════════════════════════════════════════════════════════════════
 
-# ── 5. Verify and log ─────────────────────────────────────────────────────
-_bc_mode=$(stat -c '%a' "$QGL_TARGET" 2>/dev/null || echo "?")
-_bc_ctx=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "?")
-_bc_dir_ctx=$(ls -Zd /data/vendor/gpu 2>/dev/null | awk '{print $1}' || echo "?")
-_bc_size=$(stat -c '%s' "$QGL_TARGET" 2>/dev/null || echo "?")
+_qgl_log "[BOOT] 3s stabilization delay (matches LYB BroadcastReceiver timing)"
+_qgl_diag "STABILIZE: 3s delay started"
+sleep 3
+_qgl_log "[BOOT] 3s stabilization delay complete"
+_qgl_diag "STABILIZE: 3s delay complete"
 
-if [ "$_bc_mode" = "644" ] || [ "$_bc_mode" = "0644" ]; then
-  printf '[ADRENO] boot-completed.sh: QGL WRITTEN OK mode=%s size=%s file_ctx=%s dir_ctx=%s\n' \
-    "$_bc_mode" "$_bc_size" "$_bc_ctx" "$_bc_dir_ctx" > /dev/kmsg 2>/dev/null || true
+# ══════════════════════════════════════════════════════════════════════════
+# STEP 3: PREPARE DIRECTORY AND WRITE BASELINE FLAG
+# ══════════════════════════════════════════════════════════════════════════
+
+_qgl_log "[BOOT] Preparing $QGL_DIR"
+_qgl_diag "DIR_OP: Creating $QGL_DIR"
+
+mkdir -p "$QGL_DIR" 2>/dev/null || true
+_qgl_diag "DIR_OP: mkdir done"
+
+# Set SELinux context on directory (LYB: chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu)
+_qgl_log "[BOOT] Setting context on directory"
+_qgl_diag "SELINUX_OP: chcon u:object_r:same_process_hal_file:s0 $QGL_DIR"
+
+_chcon_out=$(chcon u:object_r:same_process_hal_file:s0 "$QGL_DIR" 2>&1)
+_chcon_rc=$?
+
+if [ $_chcon_rc -eq 0 ]; then
+  _qgl_log "[BOOT] Directory context set"
+  _qgl_diag "SELINUX_OP: chcon dir succeeded"
 else
-  printf '[ADRENO] boot-completed.sh: QGL WRITE PARTIAL mode=%s ctx=%s — check avc\n' \
-    "$_bc_mode" "$_bc_ctx" > /dev/kmsg 2>/dev/null || true
+  _qgl_log "[WARN] chcon directory failed: $_chcon_out"
+  _qgl_diag "SELINUX_OP: chcon dir failed: $_chcon_out"
 fi
-unset _bc_mode _bc_ctx _bc_dir_ctx _bc_size
 
-exit 0
+# Verify directory context
+_dir_ctx=$(ls -dZ "$QGL_DIR" 2>/dev/null | awk '{print $1}' || echo 'unknown')
+_qgl_log "[BOOT] Directory context: $_dir_ctx"
+_qgl_diag "SELINUX_VERIFY: Dir context: $_dir_ctx"
+
+case "$_dir_ctx" in
+  *same_process_hal_file*)
+    _qgl_log "[BOOT] Directory context VERIFIED"
+    _qgl_diag "SELINUX_VERIFY: OK - Dir context correct"
+    ;;
+  *)
+    _qgl_log "[WARN] Directory context NOT same_process_hal_file"
+    _qgl_diag "SELINUX_VERIFY: WARN - Dir context unexpected: $_dir_ctx"
+    ;;
+esac
+
+# Write baseline flag BEFORE applying QGL (signals APK to wait)
+_qgl_log "[BOOT] Writing baseline flag at $BASELINE_FLAG"
+_qgl_diag "FLAG_OP: Creating baseline flag"
+
+touch "$BASELINE_FLAG" 2>/dev/null || true
+
+if [ -f "$BASELINE_FLAG" ]; then
+  _qgl_log "[BOOT] Baseline flag written"
+  _qgl_diag "FLAG_OP: OK - Baseline flag created"
+else
+  _qgl_log "[WARN] Failed to write baseline flag"
+  _qgl_diag "FLAG_OP: WARN - Baseline flag creation failed"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════
+# STEP 3b: BOOT 2+ FAST EXIT (ADR-005)
+# ══════════════════════════════════════════════════════════════════════════
+
+if [ -f "$QGL_TARGET" ]; then
+  _qgl_ctx=$(ls -Z "$QGL_TARGET" 2>/dev/null | awk '{print $1}' || echo "")
+  case "$_qgl_ctx" in
+    *same_process_hal_file*)
+      _qgl_log "[OK] QGL boot 2+ fast exit: file exists with correct context ($_qgl_ctx)"
+      _qgl_diag "FAST_EXIT: OK - File already exists with correct context"
+      _qgl_state_capture "BOOT2_FAST_EXIT"
+      unset _qgl_ctx
+      exit 0
+      ;;
+  esac
+  _qgl_log "[BOOT] QGL file exists but wrong context ($_qgl_ctx) — will re-apply"
+  _qgl_diag "FAST_EXIT: NO - File exists but wrong context: $_qgl_ctx"
+  unset _qgl_ctx
+fi
+
+# ══════════════════════════════════════════════════════════════════════════
+# STEP 4: APPLY QGL (branch on QGL_PERAPP)
+# ══════════════════════════════════════════════════════════════════════════
+
+if [ "$QGL_PERAPP" = "y" ]; then
+  # ── Per-app mode: delegate to apply_qgl.sh for global baseline ──────────
+  _qgl_log "[BOOT] Per-app mode: applying global baseline → exec apply_qgl.sh --boot"
+  _qgl_diag "MODE: PER-APP - Delegating to apply_qgl.sh --boot"
+  _qgl_state_capture "BEFORE_EXEC_APPLY_QGL"
+  exec "$MODDIR/apply_qgl.sh" --boot
+else
+  # ── Static mode: apply bundled qgl_config.txt ────────────────────────────
+  # LYB COMPAT: touch + chcon, NO chmod, NO chown (ADR-008)
+  
+  _qgl_log "[BOOT] Static mode: installing from bundled qgl_config.txt"
+  _qgl_diag "MODE: STATIC - Installing bundled config"
+  
+  QGL_OWNER_MARKER="/data/vendor/gpu/.adreno_qgl_owner"
+  
+  # Safety check: if qgl_config.txt exists but no owner marker, skip
+  if [ -f "$QGL_TARGET" ] && [ ! -f "$QGL_OWNER_MARKER" ]; then
+    _qgl_log "[!] QGL static: qgl_config.txt exists but NOT owned by this module — skipping"
+    _qgl_diag "STATIC: SKIP - File exists but not owned by module"
+    exit 0
+  fi
+  
+  if [ ! -f "$MODDIR/qgl_config.txt" ]; then
+    _qgl_log "[!] QGL static: qgl_config.txt not found in module"
+    _qgl_diag "STATIC: SKIP - No bundled qgl_config.txt"
+    exit 0
+  fi
+  
+  _qgl_log "[BOOT] Proceeding with static install"
+  _qgl_diag "STATIC: Starting install"
+  
+  QGL_INSTALL_SUCCESS="false"
+  MAX_RETRIES=5
+  RETRY_COUNT=0
+  QGL_TEMP=""
+  
+  while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$QGL_INSTALL_SUCCESS" = "false" ]; do
+    sleep 1
+    _qgl_diag "STATIC_RETRY: Attempt $((RETRY_COUNT + 1))/$MAX_RETRIES"
+    
+    if touch /data/.adreno_test 2>/dev/null && rm /data/.adreno_test 2>/dev/null; then
+      # Directory already created above with correct context
+      
+      QGL_TEMP="${QGL_TARGET}.tmp.$$"
+      _qgl_diag "FILE_OP: Temp file: $QGL_TEMP"
+      
+      # Copy to temp (atomic write pattern)
+      if cp -f "$MODDIR/qgl_config.txt" "$QGL_TEMP" 2>/dev/null; then
+        if [ -f "$QGL_TEMP" ] && [ -s "$QGL_TEMP" ]; then
+          _qgl_diag "FILE_OP: cp succeeded, size: $(wc -c < "$QGL_TEMP" 2>/dev/null || echo '?') bytes"
+          
+          # LYB COMPAT: touch (NO chmod, NO chown per ADR-008)
+          touch "$QGL_TEMP" 2>/dev/null || true
+          
+          # Atomic rename
+          if mv -f "$QGL_TEMP" "$QGL_TARGET" 2>/dev/null; then
+            if [ -f "$QGL_TARGET" ] && [ -s "$QGL_TARGET" ]; then
+              _qgl_log "[BOOT] File renamed successfully"
+              _qgl_diag "FILE_OP: mv succeeded"
+              
+              # Touch again on final location (LYB)
+              touch "$QGL_TARGET" 2>/dev/null || true
+              
+              # Set SELinux context (LYB: chcon file)
+              _qgl_log "[BOOT] Setting context on file"
+              _chcon_file=$(chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>&1)
+              if [ $? -eq 0 ]; then
+                _qgl_diag "SELINUX_OP: chcon file succeeded"
+              else
+                _qgl_diag "SELINUX_OP: chcon file failed: $_chcon_file"
+              fi
+              
+              # Verify
+              EXPECTED_SIZE=$(stat -c%s "$MODDIR/qgl_config.txt" 2>/dev/null || echo 0)
+              ACTUAL_SIZE=$(stat -c%s "$QGL_TARGET" 2>/dev/null || echo 0)
+              
+              if [ "$EXPECTED_SIZE" -eq "$ACTUAL_SIZE" ] 2>/dev/null && [ "$ACTUAL_SIZE" -gt 0 ] 2>/dev/null; then
+                QGL_INSTALL_SUCCESS="true"
+                touch "$QGL_OWNER_MARKER" 2>/dev/null || true
+                _qgl_log "[OK] QGL static install verified: $ACTUAL_SIZE bytes"
+                _qgl_diag "STATIC_RESULT: SUCCESS - $ACTUAL_SIZE bytes"
+                break
+              else
+                _qgl_log "[!] QGL static size mismatch: expected=$EXPECTED_SIZE actual=$ACTUAL_SIZE"
+                _qgl_diag "STATIC: WARN - Size mismatch"
+              fi
+            fi
+          else
+            _qgl_log "[!] QGL static atomic rename failed"
+            _qgl_diag "FILE_OP: mv failed"
+            rm -f "$QGL_TEMP" 2>/dev/null || true
+          fi
+        else
+          _qgl_log "[!] QGL static temp file empty"
+          _qgl_diag "FILE_OP: Temp file empty"
+          rm -f "$QGL_TEMP" 2>/dev/null || true
+        fi
+      fi
+    fi
+    
+    RETRY_COUNT=$((RETRY_COUNT + 1))
+    if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+      _delay=$((RETRY_COUNT * 2))
+      _qgl_log "[BOOT] Retry $RETRY_COUNT in ${_delay}s..."
+      sleep $_delay
+    fi
+  done
+  
+  rm -f "$QGL_TEMP" 2>/dev/null || true
+  
+  if [ "$QGL_INSTALL_SUCCESS" = "false" ]; then
+    _qgl_log "[FAIL] QGL static install failed after $MAX_RETRIES attempts"
+    _qgl_diag "STATIC_RESULT: FAIL - Max retries exceeded"
+  fi
+  
+  _qgl_state_capture "AFTER_STATIC_INSTALL"
+  unset QGL_TARGET QGL_OWNER_MARKER QGL_TEMP QGL_INSTALL_SUCCESS MAX_RETRIES RETRY_COUNT EXPECTED_SIZE ACTUAL_SIZE
+fi
+
+_qgl_log "[END] boot-completed.sh finished"
+_qgl_diag "========================================"
+_qgl_diag "BOOT-COMPLETED.SH FINISHED"
+_qgl_diag "========================================"

@@ -539,17 +539,16 @@ Runs a few seconds after the device has fully booted and is interactive. This ph
 - Writes the persistent `system.prop` entries for the next boot.
 - Optionally force-stops third-party apps so they cold-start with the new renderer (relevant for `skiavk_all` mode and when switching modes).
 
-### First-Boot Safety Mechanism
+### Vulkan Compatibility Safety Gate
 
-Installing the module does not activate Vulkan rendering immediately. On the very first boot after install:
+The renderer is applied immediately on all boots (including first boot after install). Rather than a blanket two-boot delay, safety is provided by a structural Vulkan compatibility gate in `post-fs-data.sh`:
 
-1. The installer (`customize.sh`) creates a `.first_boot_pending` marker file.
-2. `post-fs-data.sh` detects this marker and **defers all renderer configuration** — the render mode stays at `normal` for this boot.
-3. A `.service_skip_render` marker is created.
-4. `service.sh` detects the skip marker and also skips renderer config, so it does not write any Vulkan properties or touch apps.
-5. On the **second boot**, `post-fs-data.sh` finds no pending marker and applies the configured render mode normally.
+1. `post-fs-data.sh` checks for a valid Vulkan ICD (Installable Client Driver) on the device.
+2. If no Vulkan ICD is found, the render mode is **auto-degraded** from `skiavk` to `skiagl` — a real structural fallback rather than a timing workaround.
+3. Pipeline caches are cleared pre-Zygote when the render mode changes, preventing stale cache crashes.
+4. `service.sh` confirms boot success and writes a `.boot_success` marker, which gates `skiavkthreaded` backend promotion on subsequent boots.
 
-This ensures the custom driver has passed at least one complete boot cycle before Vulkan is enabled, preventing an unrecoverable bootloop if the driver binary is incompatible with the device.
+This approach provides real Vulkan capability detection rather than deferring the renderer to an arbitrary second boot.
 
 <a name="property-management"></a>
 ## 11. Property Management System
