@@ -2121,11 +2121,9 @@ case "$RENDER_MODE" in
       # clip_surfaceviews: delete to restore AOSP default (true).
       # If an OEM ROM set this to false, SurfaceView content (camera preview,
       # video player) bleeds outside its parent window bounds.
-      resetprop --delete debug.hwui.clip_surfaceviews 2>/dev/null || true
+       resetprop --delete debug.hwui.clip_surfaceviews 2>/dev/null || true
        resetprop com.qc.hardware true
        resetprop persist.sys.force_sw_gles 0
-       # NOTE: Removed use_buffer_age, use_partial_updates, use_gpu_pixel_buffers, reduceopstasksplitting
-       # These hurt performance on stock drivers - now using AOSP defaults (true)
        resetprop debug.hwui.skip_empty_damage true
       resetprop debug.hwui.webview_overlays_enabled true
       resetprop debug.hwui.skia_tracing_enabled false
@@ -2203,109 +2201,6 @@ case "$RENDER_MODE" in
       resetprop --delete debug.vulkan.layers.enable 2>/dev/null || true
     fi
     log_boot "[OK] skiavk + SF + stability + OEM compat + EGL + perf + legacy-compat + blur-disable + vendor-gralloc + Samsung/MIUI Vulkan gates + pre-rotation fix + cache sizing + VK crash-fix + phase-offsets props applied live (78+ props)"
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # OLD VENDOR DETECTION + PROP WATCHDOG (post-fs-data phase)
-    # ══════════════════════════════════════════════════════════════════════════
-    #
-    # PROBLEM — Why old vendor kills skiavk with no error:
-    #
-    #   Android property loading order (init source, system/core/init):
-    #     1. /system/build.prop        (system partition)
-    #     2. /vendor/build.prop        ← loaded AFTER system, HIGHER precedence
-    #     3. persist.* props from /data
-    #
-    #   An old vendor's /vendor/build.prop may contain:
-    #     debug.hwui.renderer=skiagl   ← loaded AFTER our system.prop skiavk
-    #   Result: skiagl wins the static prop load, despite our system.prop skiavk.
-    #
-    #   Our resetprop (above) fixes it for THIS process context. But vendor's
-    #   init.rc late_start services can call setprop again at any time AFTER
-    #   init fires those services (which is after post-fs-data). The prop flips
-    #   back to skiagl before Zygote forks any app process → all apps start GL.
-    #
-    #   Additionally: old Vulkan stacks (API 11 vendor on API 14 system) may
-    #   not support VK_KHR_timeline_semaphore, VK_KHR_dynamic_rendering, or
-    #   other extensions the custom Adreno driver declares as required. The
-    #   Vulkan loader returns VK_ERROR_EXTENSION_NOT_PRESENT on vkCreateDevice
-    #   → HWUI silently falls back to GL → "skiavk but all apps crash" symptom.
-    #
-    # SOLUTION — Two-part approach:
-    #   Part 1 (this block): detect old vendor and persist the result.
-    #   Part 2 (background subshell): watch for the prop being overridden by
-    #          vendor_init late services; re-apply skiavk immediately each time.
-    #          Runs for 90s from boot_completed — covers the entire vendor_init
-    #          service window on even the slowest custom ROMs.
-    # ══════════════════════════════════════════════════════════════════════════
-
-    # FIRST_BOOT_PENDING guard removed (Q7); resetprop check kept.
-    if command -v resetprop >/dev/null 2>&1; then
-
-      detect_old_vendor_extended
-
-      _OLD_VENDOR_FILE="/data/local/tmp/adreno_old_vendor"
-
-      if [ "$OLD_VENDOR" = "true" ]; then
-        log_boot "========================================"
-        log_boot "OLD VENDOR DETECTED"
-        log_boot "========================================"
-        log_boot "  Conflicting hwui prop : '${VENDOR_HWUI_PROP:-<not found in any build.prop>}'"
-        log_boot "  Offending init.rc     : '${VENDOR_RC_OVERRIDE:-<none found>}'"
-        log_boot "  Offending script      : '${VENDOR_SCRIPT_OVERRIDE:-<none found>}'"
-        log_boot "  Reason                : $OLD_VENDOR_REASON"
-        log_boot "  Impact                : vendor/odm/product build.props load AFTER system.prop;"
-        log_boot "                          init.rc on-property triggers fire AFTER our resetprop"
-        log_boot "  Mitigation            : post-fs-data watchdog + service.sh persistent re-enforcement"
-        log_boot "========================================"
-
-        # Persist detection result for service.sh and the Vulkan probe
-        printf '%s\n' "$OLD_VENDOR_REASON" > "$_OLD_VENDOR_FILE" 2>/dev/null || true
-
-        # If any partition build.prop has a conflicting renderer, re-apply skiavk now
-        if [ -n "$VENDOR_HWUI_PROP" ] && [ "$VENDOR_HWUI_PROP" != "skiavk" ]; then
-          resetprop debug.hwui.renderer skiavk 2>/dev/null || true
-          resetprop ro.hwui.use_vulkan true 2>/dev/null || true
-          log_boot "[OK] Re-applied skiavk over conflicting build.prop value '${VENDOR_HWUI_PROP}'"
-        fi
-
-        # ── FIX-C-4: Old-vendor prop re-application (replacing watchdog) ──────
-        # Previous code launched a 150-second background watchdog that polled
-        # every 3-5 seconds. This consumed CPU, spawned >30 getprop processes,
-        # and prevented deep sleep.
-        #
-        # Replacement: A single delayed re-application at post-fs-data + 15s.
-        # This covers the vendor_init late_start service window (typically
-        # fires within 10-15s of post-fs-data). service.sh adds a second
-        # re-application at boot_completed + 10s as a belt-and-suspenders.
-        (
-          sleep 15
-          _cur=$(getprop debug.hwui.renderer 2>/dev/null || echo "")
-          if [ "$_cur" != "skiavk" ]; then
-            resetprop debug.hwui.renderer skiavk 2>/dev/null || true
-            echo "[ADRENO-OLDVENDOR][15s] vendor_init override detected! Was '${_cur}', re-applied skiavk" > /dev/kmsg 2>/dev/null || true
-          else
-            echo "[ADRENO-OLDVENDOR][15s] renderer stable (${_cur})" > /dev/kmsg 2>/dev/null || true
-          fi
-          rm -f /data/local/tmp/adreno_watchdog_pid 2>/dev/null || true
-        ) &
-        _wd_pid=$!
-        printf '%d\n' "$_wd_pid" > /data/local/tmp/adreno_watchdog_pid 2>/dev/null || true
-        log_boot "[OK] Old-vendor one-shot re-apply armed (PID=$_wd_pid, +15s delay) — replaces 150s watchdog"
-        unset _wd_pid
-
-      else
-        log_boot "Old vendor check: CLEAN (vendor/build.prop hwui='${VENDOR_HWUI_PROP:-<none>}')"
-        # Write clean state — service.sh reads this to skip old-vendor extra work
-        printf 'clean\n' > "$_OLD_VENDOR_FILE" 2>/dev/null || true
-      fi
-      unset _OLD_VENDOR_FILE
-    fi
-    # ══ END OLD VENDOR DETECTION ═════════════════════════════════════════════
-
-    # NOTE: The old redundant renderer re-enforcement subshell (previously at
-    # lines 2507-2518) was removed. The watchdog launched above already covers
-    # the same ground: it re-enforces debug.hwui.renderer=skiavk every 3-5s
-    # from post-fs-data through boot_completed+60s. No duplicate needed.
     ;;
 
   skiagl)
@@ -2317,14 +2212,13 @@ case "$RENDER_MODE" in
       printf 'debug.hwui.renderer=skiagl\n'
       printf 'com.qc.hardware=true\n'
       printf 'persist.sys.force_sw_gles=0\n'
-       printf 'debug.vulkan.layers=\n'
-       printf 'debug.vulkan.dev.layers=\n'
-       printf 'persist.graphics.vulkan.validation_enable=0\n'
-       printf 'graphics.gpu.profiler.support=false\n'
-       printf 'debug.egl.debug_proc=\n'
-       # Removed use_buffer_age, use_partial_updates - using AOSP defaults for max perf
-     } >> "$SYSTEM_PROP_FILE" 2>/dev/null
-    log_boot "[OK] system.prop: skiagl props written (10 props). FIX-C-1: reduced from 58+ to prevent prop area overflow. All tuning props via resetprop only."
+      printf 'debug.vulkan.layers=\n'
+      printf 'debug.vulkan.dev.layers=\n'
+      printf 'persist.graphics.vulkan.validation_enable=0\n'
+      printf 'graphics.gpu.profiler.support=false\n'
+      printf 'debug.egl.debug_proc=\n'
+    } >> "$SYSTEM_PROP_FILE" 2>/dev/null
+    log_boot "[OK] system.prop: skiagl props written (8 props). FIX-C-1: reduced from 58+ to prevent prop area overflow. All tuning props via resetprop only."
     if command -v resetprop >/dev/null 2>&1; then
       # ── renderer props set ONLY via resetprop (see skiavk section for why) ──
       # FIRST_BOOT_PENDING guard removed (Q7) — always applies now.
@@ -2418,7 +2312,6 @@ case "$RENDER_MODE" in
                  debug.sf.early_gl_app_phase_offset_ns \
                  debug.sf.use_phase_offsets_as_durations \
                  ro.sf.blurs_are_expensive \
-                 hwui.disable_vsync \
                  persist.sys.sf.native_mode \
                  debug.sf.treat_170m_as_sRGB \
                  ro.config.vulkan.enabled \
@@ -2463,8 +2356,6 @@ case "$RENDER_MODE" in
                   ro.surface_flinger.max_frame_buffer_acquired_buffers \
                   ro.surface_flinger.force_hwc_copy_for_virtual_displays \
                   com.qc.hardware persist.sys.force_sw_gles \
-                  # Removed from delete: use_buffer_age, use_partial_updates, use_gpu_pixel_buffers, reduceopstasksplitting
-                  # Letting OEM defaults persist for max performance
                   debug.hwui.skip_empty_damage debug.hwui.webview_overlays_enabled \
                  debug.hwui.skia_tracing_enabled \
                  debug.hwui.skia_use_perfetto_track_events \

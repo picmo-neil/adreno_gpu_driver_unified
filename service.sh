@@ -1234,9 +1234,6 @@ if cmd_exists resetprop; then
       resetprop --delete ro.surface_flinger.supports_background_blur 2>/dev/null || true
       resetprop --delete persist.sys.sf.disable_blurs 2>/dev/null || true
       resetprop ro.sf.blurs_are_expensive 1 2>/dev/null || true
-      resetprop debug.hwui.use_partial_updates false 2>/dev/null || true
-      resetprop debug.hwui.use_buffer_age false 2>/dev/null || true
-      resetprop debug.hwui.use_gpu_pixel_buffers false 2>/dev/null || true
       resetprop debug.hwui.recycled_buffer_cache_size 4 2>/dev/null || true
       resetprop debug.hwui.target_cpu_time_percent 33 2>/dev/null || true  # 33% CPU / 67% GPU split — optimal for Skia Vulkan threaded
       resetprop debug.hwui.initialize_gl_always false 2>/dev/null || true
@@ -1252,8 +1249,6 @@ if cmd_exists resetprop; then
       #   Android 11–14: prop is unrecognized → no-op (safe)
       #   Android 15+:   prop is read by HWUI → prevents Graphite activation → safe
       resetprop debug.hwui.use_skia_graphite false 2>/dev/null || true
-      # reduceopstasksplitting=false — ensure AOSP default, not prior true value
-      resetprop renderthread.skia.reduceopstasksplitting false 2>/dev/null || true
       # clip_surfaceviews: delete to restore AOSP default (true).
       # OEM ROMs may set this to false, causing SurfaceView (camera, video player)
       # to render outside its parent window bounds.
@@ -1269,11 +1264,7 @@ if cmd_exists resetprop; then
       # debug.renderengine.backend intentionally NOT live-resetprop'd — same OEM
       # watcher risk as skiavk. Set before SF starts in post-fs-data.sh only.
       resetprop persist.sys.force_sw_gles 0 2>/dev/null || true
-      # use_partial_updates/use_buffer_age: keep false — custom driver EGL unreliable
-      resetprop debug.hwui.use_partial_updates false 2>/dev/null || true
-      resetprop debug.hwui.use_buffer_age false 2>/dev/null || true
       resetprop debug.hwui.render_dirty_regions false 2>/dev/null || true
-      resetprop renderthread.skia.reduceopstasksplitting false 2>/dev/null || true
       # Graphite backend disable — same rationale as skiavk block above.
       # No-op on Android 11–14; prevents Graphite on Android 15+ (custom driver
       # lacks VK_KHR_dynamic_rendering → vkCreateDevice failure if enabled).

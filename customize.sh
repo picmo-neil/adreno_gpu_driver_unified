@@ -1631,10 +1631,6 @@ if [ -f "$SYSTEM_PROP" ]; then
        !/^ro\.surface_flinger\.max_frame_buffer_acquired_buffers=/ &&
        !/^ro\.surface_flinger\.force_hwc_copy_for_virtual_displays=/ &&
        !/^ro\.surface_flinger\.supports_background_blur=/ &&
-       !/^debug\.hwui\.use_buffer_age=/ &&
-       !/^debug\.hwui\.use_partial_updates=/ &&
-       !/^debug\.hwui\.use_gpu_pixel_buffers=/ &&
-       !/^renderthread\.skia\.reduceopstasksplitting=/ &&
        !/^debug\.hwui\.skip_empty_damage=/ &&
        !/^debug\.hwui\.webview_overlays_enabled=/ &&
        !/^debug\.hwui\.skia_tracing_enabled=/ &&
