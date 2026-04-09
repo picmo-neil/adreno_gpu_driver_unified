@@ -9,6 +9,8 @@
 
 > **⚡ ONE ZIP FILE FOR ALL INSTALLATION METHODS**
 
+> **⚠️ BOOTLOOP DISCLAIMER:** This module includes optional library replacements (`libdmabufheap.so`, `libgpu_tonemapper.so`) that interact with your device's specific Adreno GPU generation, ROM version, and vendor partition. These libraries may cause bootloops on unsupported devices. If you experience 3+ consecutive bootloops, remove these libraries via Quick Fixes or reflash without the library overlay.
+
 ---
 
 # 📋 TABLE OF CONTENTS
