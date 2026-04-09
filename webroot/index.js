@@ -736,6 +736,10 @@ const DEFAULT_EN = {
     msgApkNotFound: "APK not found. Re-flash the module.",
     msgApkInstalled: "APK installed! Enable in Accessibility settings.",
     msgApkInstallFail: "APK install failed.",
+    msgApkUninstalled: "APK uninstalled",
+    msgApkUninstallFail: "APK uninstall failed.",
+    msgQglRequired: "QGL must be enabled to use Per-App QGL",
+    uninstallApk: "Uninstall APK",
     confirmDeleteProfileTitle: "Delete Profile",
     confirmDeleteProfileMsg: "Are you sure you want to delete this app's QGL profile?",
     editProfile: "Edit",
@@ -1029,6 +1033,10 @@ const BUILTIN_ZH_CN = {
     msgApkNotFound: "未找到APK。请重新刷入模块。",
     msgApkInstalled: "APK已安装！请在无障碍设置中启用。",
     msgApkInstallFail: "APK安装失败。",
+    msgApkUninstalled: "APK已卸载",
+    msgApkUninstallFail: "APK卸载失败。",
+    msgQglRequired: "需要启用QGL才能使用逐应用QGL",
+    uninstallApk: "卸载APK",
     confirmDeleteProfileTitle: "删除配置",
     confirmDeleteProfileMsg: "确定要删除此应用的QGL配置吗？",
     editProfile: "编辑",
@@ -1321,6 +1329,10 @@ const BUILTIN_ZH_TW = {
     msgApkNotFound: "找不到APK。請重新刷入模組。",
     msgApkInstalled: "APK已安裝！請在無障礙設定中啟用。",
     msgApkInstallFail: "APK安裝失敗。",
+    msgApkUninstalled: "APK已解除安裝",
+    msgApkUninstallFail: "APK解除安裝失敗。",
+    msgQglRequired: "需要啟用QGL才能使用逐應用程式QGL",
+    uninstallApk: "解除安裝APK",
     confirmDeleteProfileTitle: "刪除設定檔",
     confirmDeleteProfileMsg: "確定要刪除此應用程式的QGL設定檔嗎？",
     editProfile: "編輯",
@@ -1940,6 +1952,8 @@ async function loadConfig() {
     // Show/hide QGL_PERAPP row based on QGL state
     const _qglPerappRow = document.getElementById('qglPerappRow');
     if (_qglPerappRow) _qglPerappRow.style.display = config.QGL === 'y' ? '' : 'none';
+    // Update Per-App QGL section visibility after config loads
+    updatePerAppSectionVisibility();
     // Load FORCE_SKIAVKTHREADED_BACKEND toggle
     const _ftb = document.getElementById('FORCE_SKIAVKTHREADED_BACKEND');
     if (_ftb) _ftb.checked = config.FORCE_SKIAVKTHREADED_BACKEND === 'y';
@@ -4796,6 +4810,43 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('QGL_PERAPP')?.addEventListener('change', _checkSkiavkPerappWarning);
     document.getElementById('RENDER_MODE')?.addEventListener('change', _checkSkiavkPerappWarning);
 
+    // ── Per-App QGL Section Visibility Logic ────────────────────────────────
+    function updatePerAppSectionVisibility() {
+        const qglOn = document.getElementById('QGL')?.checked || false;
+        const perappOn = document.getElementById('QGL_PERAPP')?.checked || false;
+        const section = document.getElementById('perAppQGLSection');
+        const warningId = 'perAppQglRequiredWarning';
+        let warning = document.getElementById(warningId);
+
+        // Show section only when QGL=ON AND QGL_PERAPP=ON
+        if (qglOn && perappOn) {
+            if (section) section.style.display = '';
+            if (warning) warning.remove();
+        } else {
+            if (section) section.style.display = 'none';
+            // Show warning if QGL_PERAPP=ON but QGL=OFF
+            if (perappOn && !qglOn) {
+                if (!warning) {
+                    warning = document.createElement('div');
+                    warning.id = warningId;
+                    warning.className = 'alert alert-warning';
+                    warning.setAttribute('data-i18n', 'msgQglRequired');
+                    warning.textContent = currentTranslations?.msgQglRequired || 'QGL must be enabled to use Per-App QGL';
+                    const qglPerappRow = document.getElementById('qglPerappRow');
+                    if (qglPerappRow) qglPerappRow.parentNode.insertBefore(warning, qglPerappRow.nextSibling);
+                }
+            } else if (warning) {
+                warning.remove();
+            }
+        }
+    }
+
+    // Initialize visibility on load
+    updatePerAppSectionVisibility();
+    // Update on toggle changes
+    document.getElementById('QGL')?.addEventListener('change', updatePerAppSectionVisibility);
+    document.getElementById('QGL_PERAPP')?.addEventListener('change', updatePerAppSectionVisibility);
+
     // Re-sync after config loads
     const _origLoadConfig = loadConfig;
     // (sync triggered in loadConfig via setToggle calls — covered by change events)
@@ -5256,6 +5307,8 @@ async function saveQGLProfiles() {
 function initPerAppQGL() {
     // APK install button
     document.getElementById('btnInstallQGLApk')?.addEventListener('click', installQGLApk);
+    // APK uninstall button
+    document.getElementById('btnUninstallQGLApk')?.addEventListener('click', uninstallQGLApk);
 
     // Global profile toggle
     document.getElementById('globalQGLEnabled')?.addEventListener('change', async (e) => {
@@ -5348,15 +5401,22 @@ function initPerAppQGL() {
 
 async function checkQGLApkStatus() {
     const statusEl = document.getElementById('qglApkStatus');
+    const installBtn = document.getElementById('btnInstallQGLApk');
+    const uninstallBtn = document.getElementById('btnUninstallQGLApk');
     if (!statusEl) return;
     try {
         const res = await exec('pm list packages io.github.adreno.qgl.trigger 2>/dev/null');
-        if (res && res.stdout && res.stdout.includes('io.github.adreno.qgl.trigger')) {
+        const isInstalled = res && res.stdout && res.stdout.includes('io.github.adreno.qgl.trigger');
+        if (isInstalled) {
             statusEl.textContent = currentTranslations.installed || 'Installed';
             statusEl.className = 'badge badge-success';
+            if (installBtn) installBtn.style.display = 'none';
+            if (uninstallBtn) uninstallBtn.style.display = '';
         } else {
             statusEl.textContent = currentTranslations.notInstalled || 'Not Installed';
             statusEl.className = 'badge badge-warning';
+            if (installBtn) installBtn.style.display = '';
+            if (uninstallBtn) uninstallBtn.style.display = 'none';
         }
     } catch (e) {
         statusEl.textContent = currentTranslations.checkingStatus || 'Checking...';
@@ -5365,6 +5425,13 @@ async function checkQGLApkStatus() {
 }
 
 async function installQGLApk() {
+    // Check if QGL is enabled
+    const qglOn = document.getElementById('QGL')?.checked || false;
+    if (!qglOn) {
+        showToast(currentTranslations.msgQglRequired || 'QGL must be enabled to use Per-App QGL');
+        return;
+    }
+
     const btn = document.getElementById('btnInstallQGLApk');
     if (btn) btn.disabled = true;
     setLoading(true);
@@ -5397,6 +5464,32 @@ async function installQGLApk() {
     } catch (e) {
         logToTerminal('❌ APK install failed: ' + (e.message || e), 'error');
         showToast(currentTranslations.msgApkInstallFail || 'APK install failed.');
+    } finally {
+        setLoading(false);
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function uninstallQGLApk() {
+    const btn = document.getElementById('btnUninstallQGLApk');
+    if (btn) btn.disabled = true;
+    setLoading(true);
+    logToTerminal('🗑️ Uninstalling QGL Trigger APK...', 'info');
+
+    try {
+        const res = await exec('pm uninstall io.github.adreno.qgl.trigger 2>&1');
+
+        if (res && res.stdout && (res.stdout.includes('Success') || res.stdout.includes('deleted'))) {
+            logToTerminal('✅ QGL Trigger APK uninstalled', 'success');
+            showToast(currentTranslations.msgApkUninstalled || 'APK uninstalled');
+            await checkQGLApkStatus();
+        } else {
+            logToTerminal('⚠️ Uninstall result: ' + (res ? res.stdout : 'unknown'), 'warning');
+            showToast(currentTranslations.msgApkUninstallFail || 'APK uninstall failed.');
+        }
+    } catch (e) {
+        logToTerminal('❌ APK uninstall failed: ' + (e.message || e), 'error');
+        showToast(currentTranslations.msgApkUninstallFail || 'APK uninstall failed.');
     } finally {
         setLoading(false);
         if (btn) btn.disabled = false;

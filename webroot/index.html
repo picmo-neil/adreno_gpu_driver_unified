@@ -489,6 +489,7 @@
         <!-- PER-APP QGL PROFILES (LYB-style) — moved closer to main QGL -->
         <!-- ═══════════════════════════════════════════════════════════ -->
         <div class="card glass-panel animate-in" style="animation-delay: 0.08s;">
+            <div id="perAppQGLSection" style="display:none;">
             <div class="card-header">
                 <span class="header-icon gradient-text">📱</span>
                 <div>
@@ -505,6 +506,10 @@
                     <div class="setting-desc" data-i18n="qglTriggerApkDesc">Companion app that applies QGL configs when apps open (like LYB Kernel Manager). Requires Accessibility Service.</div>
                 </div>
                 <div class="row-end">
+                    <button class="btn-small ripple-effect modern-btn" id="btnUninstallQGLApk">
+                        <span class="btn-icon">🗑️</span>
+                        <span data-i18n="uninstallApk">Uninstall APK</span>
+                    </button>
                     <button class="btn-small ripple-effect modern-btn" id="btnInstallQGLApk">
                         <span class="btn-icon">📦</span>
                         <span data-i18n="installApk">Install APK</span>
@@ -552,6 +557,7 @@
                     <span class="info-icon">📱</span>
                     <p class="info-text" data-i18n="noAppProfilesMsg">No app-specific profiles yet. All apps use the global QGL config.</p>
                 </div>
+            </div>
             </div>
         </div>
 
