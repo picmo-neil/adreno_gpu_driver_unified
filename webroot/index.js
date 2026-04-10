@@ -1953,7 +1953,11 @@ async function loadConfig() {
     const _qglPerappRow = document.getElementById('qglPerappRow');
     if (_qglPerappRow) _qglPerappRow.style.display = config.QGL === 'y' ? '' : 'none';
     // Update Per-App QGL section visibility after config loads
-    updatePerAppSectionVisibility();
+    setTimeout(() => {
+        try {
+            updatePerAppSectionVisibility();
+        } catch(e) { console.error('updatePerAppSectionVisibility error:', e); }
+    }, 100);
     // Load FORCE_SKIAVKTHREADED_BACKEND toggle
     const _ftb = document.getElementById('FORCE_SKIAVKTHREADED_BACKEND');
     if (_ftb) _ftb.checked = config.FORCE_SKIAVKTHREADED_BACKEND === 'y';
@@ -4801,7 +4805,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 _existing.setAttribute('data-i18n', 'skiavkPerappWarning');
                 _existing.textContent = currentTranslations?.skiavkPerappWarning || '⚠️ skiavk + Per-App QGL Off: Apps launched before boot_completed+3s receive NO QGL config at Vulkan init time.';
                 const _qglRow = document.getElementById('qglPerappRow');
-                if (_qglRow) _qglRow.parentNode.insertBefore(_existing, _qglRow.nextSibling);
+                if (_qglRow && _qglRow.parentNode) _qglRow.parentNode.insertBefore(_existing, _qglRow.nextSibling);
             }
         } else if (_existing) {
             _existing.remove();
@@ -4812,40 +4816,64 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // ── Per-App QGL Section Visibility Logic ────────────────────────────────
     function updatePerAppSectionVisibility() {
-        const qglOn = document.getElementById('QGL')?.checked || false;
-        const perappOn = document.getElementById('QGL_PERAPP')?.checked || false;
-        const section = document.getElementById('perAppQGLSection');
-        const warningId = 'perAppQglRequiredWarning';
-        let warning = document.getElementById(warningId);
+        try {
+            const qglEl = document.getElementById('QGL');
+            const perappEl = document.getElementById('QGL_PERAPP');
+            const section = document.getElementById('perAppQGLSection');
+            
+            // Skip if required elements don't exist yet
+            if (!qglEl || !perappEl || !section) return;
+            
+            const qglOn = qglEl.checked || false;
+            const perappOn = perappEl.checked || false;
+            const warningId = 'perAppQglRequiredWarning';
+            let warning = document.getElementById(warningId);
 
-        // Show section only when QGL=ON AND QGL_PERAPP=ON
-        if (qglOn && perappOn) {
-            if (section) section.style.display = '';
-            if (warning) warning.remove();
-        } else {
-            if (section) section.style.display = 'none';
-            // Show warning if QGL_PERAPP=ON but QGL=OFF
-            if (perappOn && !qglOn) {
-                if (!warning) {
-                    warning = document.createElement('div');
-                    warning.id = warningId;
-                    warning.className = 'alert alert-warning';
-                    warning.setAttribute('data-i18n', 'msgQglRequired');
-                    warning.textContent = currentTranslations?.msgQglRequired || 'QGL must be enabled to use Per-App QGL';
-                    const qglPerappRow = document.getElementById('qglPerappRow');
-                    if (qglPerappRow) qglPerappRow.parentNode.insertBefore(warning, qglPerappRow.nextSibling);
+            // Show section only when QGL=ON AND QGL_PERAPP=ON
+            if (qglOn && perappOn) {
+                section.style.display = 'block';
+                if (warning) warning.remove();
+                // Check APK status when section becomes visible
+                checkQGLApkStatus();
+            } else {
+                section.style.display = 'none';
+                // Show warning if QGL_PERAPP=ON but QGL=OFF
+                if (perappOn && !qglOn) {
+                    if (!warning) {
+                        warning = document.createElement('div');
+                        warning.id = warningId;
+                        warning.className = 'alert alert-warning';
+                        warning.setAttribute('data-i18n', 'msgQglRequired');
+                        warning.textContent = currentTranslations?.msgQglRequired || 'QGL must be enabled to use Per-App QGL';
+                        const qglPerappRow = document.getElementById('qglPerappRow');
+                        if (qglPerappRow && qglPerappRow.parentNode) {
+                            qglPerappRow.parentNode.insertBefore(warning, qglPerappRow.nextSibling);
+                        }
+                    }
+                } else if (warning) {
+                    warning.remove();
                 }
-            } else if (warning) {
-                warning.remove();
             }
-        }
+        } catch(e) { console.error('updatePerAppSectionVisibility error:', e); }
     }
 
-    // Initialize visibility on load
-    updatePerAppSectionVisibility();
+    // Initialize visibility on load (wrapped in setTimeout to ensure DOM is ready)
+    setTimeout(() => {
+        try {
+            updatePerAppSectionVisibility();
+        } catch(e) { console.error('updatePerAppSectionVisibility init error:', e); }
+    }, 100);
     // Update on toggle changes
-    document.getElementById('QGL')?.addEventListener('change', updatePerAppSectionVisibility);
-    document.getElementById('QGL_PERAPP')?.addEventListener('change', updatePerAppSectionVisibility);
+    document.getElementById('QGL')?.addEventListener('change', () => {
+        setTimeout(() => {
+            try { updatePerAppSectionVisibility(); } catch(e) { console.error(e); }
+        }, 50);
+    });
+    document.getElementById('QGL_PERAPP')?.addEventListener('change', () => {
+        setTimeout(() => {
+            try { updatePerAppSectionVisibility(); } catch(e) { console.error(e); }
+        }, 50);
+    });
 
     // Re-sync after config loads
     const _origLoadConfig = loadConfig;
@@ -5411,11 +5439,11 @@ async function checkQGLApkStatus() {
             statusEl.textContent = currentTranslations.installed || 'Installed';
             statusEl.className = 'badge badge-success';
             if (installBtn) installBtn.style.display = 'none';
-            if (uninstallBtn) uninstallBtn.style.display = '';
+            if (uninstallBtn) uninstallBtn.style.display = 'inline-block';
         } else {
             statusEl.textContent = currentTranslations.notInstalled || 'Not Installed';
             statusEl.className = 'badge badge-warning';
-            if (installBtn) installBtn.style.display = '';
+            if (installBtn) installBtn.style.display = 'inline-block';
             if (uninstallBtn) uninstallBtn.style.display = 'none';
         }
     } catch (e) {

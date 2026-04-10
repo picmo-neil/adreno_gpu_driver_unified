@@ -290,7 +290,10 @@ else
           # LYB COMPAT: touch (NO chmod, NO chown per ADR-008)
           touch "$QGL_TEMP" 2>/dev/null || true
           
-          # Atomic rename
+          # Set SELinux context on temp file BEFORE mv (avoids window with wrong context)
+          chcon u:object_r:same_process_hal_file:s0 "$QGL_TEMP" 2>/dev/null || true
+          
+          # Atomic rename — mv overwrites target atomically, no rm needed
           if mv -f "$QGL_TEMP" "$QGL_TARGET" 2>/dev/null; then
             if [ -f "$QGL_TARGET" ] && [ -s "$QGL_TARGET" ]; then
               _qgl_log "[BOOT] File renamed successfully"
@@ -299,14 +302,8 @@ else
               # Touch again on final location (LYB)
               touch "$QGL_TARGET" 2>/dev/null || true
               
-              # Set SELinux context (LYB: chcon file)
-              _qgl_log "[BOOT] Setting context on file"
-              _chcon_file=$(chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>&1)
-              if [ $? -eq 0 ]; then
-                _qgl_diag "SELINUX_OP: chcon file succeeded"
-              else
-                _qgl_diag "SELINUX_OP: chcon file failed: $_chcon_file"
-              fi
+              # Re-verify SELinux context on final file
+              chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
               
               # Verify
               EXPECTED_SIZE=$(stat -c%s "$MODDIR/qgl_config.txt" 2>/dev/null || echo 0)

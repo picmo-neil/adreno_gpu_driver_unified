@@ -7,8 +7,10 @@ import android.app.NotificationManager
 import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import java.io.BufferedReader
 import java.io.DataOutputStream
 import java.io.IOException
+import java.io.InputStreamReader
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -43,6 +45,7 @@ class QGLAccessibilityService : AccessibilityService() {
 
     @Volatile private var persistentShell: Process? = null
     @Volatile private var shellStdin: DataOutputStream? = null
+    @Volatile private var shellStdout: BufferedReader? = null
     private val shellLock = Any()
 
     private val scriptExecutor = Executors.newSingleThreadExecutor { r ->
@@ -84,42 +87,31 @@ class QGLAccessibilityService : AccessibilityService() {
         lastAppPackage = packageName
         lastSwitchTime = now
 
-        handleAppSwitch(packageName)
+        scriptExecutor.execute {
+            handleAppSwitch(packageName)
+        }
     }
 
     private fun handleAppSwitch(packageName: String) {
-        // BUG ALPHA FIX: Wait for boot baseline flag before writing per-app configs.
-        // boot-completed.sh writes /data/vendor/gpu/.qgl_boot_baseline_ready BEFORE
-        // applying the global QGL baseline. If this flag is absent, the global baseline
-        // hasn't been written yet — writing a per-app config now would create a mixed
-        // KGSL context race condition → cascade crash → bootloop.
-        // Poll with 500ms intervals for up to 15s (covers slow boot scenarios).
-        //
-        // THREAD SAFETY: The entire body — including Thread.sleep — runs on
-        // scriptExecutor (a dedicated single-thread executor), NOT on the
-        // accessibility event callback thread. Blocking the callback thread for
-        // up to 15s would trigger an ANR. Moving here eliminates that risk.
-        scriptExecutor.execute {
-            val baselineFlag = java.io.File("/data/vendor/gpu/.qgl_boot_baseline_ready")
-            var waited = 0L
-            while (!baselineFlag.exists() && waited < 15000L) {
-                Thread.sleep(500)
-                waited += 500
-            }
-            if (!baselineFlag.exists()) {
-                Log.w(TAG, "Boot baseline flag not found after ${waited}ms — skipping QGL for $packageName to prevent mixed-context crash")
-                return@execute
-            }
-
-            val keys = ProfileManager.getKeysForPackage(packageName)
-            if (keys.isNullOrEmpty()) {
-                Log.d(TAG, "No QGL profile configured for $packageName, skipping")
-                return@execute
-            }
-
-            Log.d(TAG, "Applying QGL config for $packageName with ${keys.size} keys")
-            executeQGLScript(packageName, keys)
+        val baselineFlag = java.io.File("/data/vendor/gpu/.qgl_boot_baseline_ready")
+        var waited = 0L
+        while (!baselineFlag.exists() && waited < 15000L) {
+            Thread.sleep(500)
+            waited += 500
         }
+        if (!baselineFlag.exists()) {
+            Log.w(TAG, "Boot baseline flag not found after ${waited}ms — skipping QGL for $packageName")
+            return
+        }
+
+        val keys = ProfileManager.getKeysForPackage(packageName)
+        if (keys.isNullOrEmpty()) {
+            Log.d(TAG, "No QGL profile configured for $packageName, skipping")
+            return
+        }
+
+        Log.d(TAG, "Applying QGL config for $packageName with ${keys.size} keys")
+        executeQGLWrite(packageName, keys)
     }
 
     private fun getOrCreateShell(): DataOutputStream? {
@@ -133,23 +125,55 @@ class QGLAccessibilityService : AccessibilityService() {
                 persistentShell = p
                 val stdin = DataOutputStream(p.outputStream)
                 shellStdin = stdin
+                shellStdout = BufferedReader(InputStreamReader(p.inputStream))
                 Log.d(TAG, "Persistent root shell created")
                 stdin
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to create persistent root shell", e)
                 persistentShell = null
                 shellStdin = null
+                shellStdout = null
                 null
             }
         }
     }
 
-    private fun writeToShell(stdin: DataOutputStream, cmds: List<String>): Boolean {
+    private fun writeToShell(cmds: List<String>): Boolean {
+        val stdin: DataOutputStream
+        val stdout: BufferedReader
+        synchronized(shellLock) {
+            stdin = shellStdin ?: return false
+            stdout = shellStdout ?: return false
+        }
+
         return try {
+            val marker = "QGL_DONE_$$_${System.nanoTime()}"
             for (cmd in cmds) {
                 stdin.writeBytes("$cmd\n")
             }
+            stdin.writeBytes("echo $marker\n")
             stdin.flush()
+
+            val buf = CharArray(4096)
+            val sb = StringBuilder()
+            val deadline = System.currentTimeMillis() + 5000
+            while (System.currentTimeMillis() < deadline) {
+                if (stdout.ready()) {
+                    val n = stdout.read(buf)
+                    if (n > 0) sb.append(buf, 0, n)
+                    if (sb.contains(marker)) {
+                        val output = sb.toString()
+                        if (output.contains("QGL_WRITE_FAIL")) {
+                            Log.w(TAG, "Shell command reported failure")
+                            return false
+                        }
+                        return true
+                    }
+                } else {
+                    Thread.sleep(50)
+                }
+            }
+            Log.w(TAG, "Shell command timed out waiting for marker")
             true
         } catch (e: IOException) {
             Log.w(TAG, "Shell write failed, will respawn on next switch", e)
@@ -157,39 +181,40 @@ class QGLAccessibilityService : AccessibilityService() {
                 persistentShell?.destroyForcibly()
                 persistentShell = null
                 shellStdin = null
+                shellStdout = null
             }
             false
         }
     }
 
-    private fun executeQGLScript(packageName: String, keys: List<String>) {
-        scriptExecutor.execute {
-            val stdin = getOrCreateShell() ?: run {
-                Log.e(TAG, "No root shell available for $packageName")
-                return@execute
-            }
+    private fun executeQGLWrite(packageName: String, keys: List<String>) {
+        val stdin = getOrCreateShell() ?: run {
+            Log.e(TAG, "No root shell available for $packageName")
+            return
+        }
 
-            val magicHeader = "0x0=0x8675309"
-            val cmds = mutableListOf<String>()
+        val magicHeader = "0x0=0x8675309"
+        val tmpFile = "${QGL_TARGET}.tmp.$$"
+        val cmds = mutableListOf<String>()
 
-            cmds.add("mkdir -p $QGL_DIR 2>/dev/null")
-            cmds.add("chcon $SELINUX_CONTEXT $QGL_DIR 2>/dev/null || true")
+        cmds.add("mkdir -p $QGL_DIR 2>/dev/null")
+        cmds.add("chcon $SELINUX_CONTEXT $QGL_DIR 2>/dev/null || true")
+        cmds.add("{")
+        cmds.add("printf '%s\\n' '$magicHeader'")
+        for (key in keys) {
+            val escaped = key.replace("'", "'\\''")
+            cmds.add("printf '%s\\n' '$escaped'")
+        }
+        cmds.add("} > $tmpFile 2>/dev/null")
+        cmds.add("chcon $SELINUX_CONTEXT $tmpFile 2>/dev/null || true")
+        cmds.add("mv -f $tmpFile $QGL_TARGET 2>/dev/null || echo QGL_WRITE_FAIL")
+        cmds.add("touch $QGL_TARGET 2>/dev/null || true")
+        cmds.add("chcon $SELINUX_CONTEXT $QGL_TARGET 2>/dev/null || true")
 
-            val tmpFile = "${QGL_TARGET}.tmp"
-            cmds.add("{")
-            cmds.add("printf '%s\\n' '$magicHeader'")
-            for (key in keys) {
-                val escaped = key.replace("'", "'\\''")
-                cmds.add("printf '%s\\n' '$escaped'")
-            }
-            cmds.add("} > $tmpFile 2>/dev/null && mv -f $tmpFile $QGL_TARGET 2>/dev/null")
-            cmds.add("chcon $SELINUX_CONTEXT $QGL_TARGET 2>/dev/null || true")
-
-            if (writeToShell(stdin, cmds)) {
-                Log.d(TAG, "QGL config queued for $packageName (${keys.size} keys)")
-            } else {
-                Log.w(TAG, "Failed to write QGL config for $packageName, shell will respawn")
-            }
+        if (writeToShell(cmds)) {
+            Log.d(TAG, "QGL config applied for $packageName (${keys.size} keys)")
+        } else {
+            Log.w(TAG, "Failed to write QGL config for $packageName, shell will respawn")
         }
     }
 
@@ -208,6 +233,7 @@ class QGLAccessibilityService : AccessibilityService() {
             persistentShell?.destroyForcibly()
             persistentShell = null
             shellStdin = null
+            shellStdout = null
         }
         scriptExecutor.shutdown()
         try {

@@ -5,8 +5,9 @@ import java.io.File
 import java.io.IOException
 
 private const val TAG = "QGLTrigger"
-private const val PROFILE_PATH = "/sdcard/Adreno_Driver/Config/qgl_profiles.json"
-private const val MAX_PROFILE_SIZE = 1024 * 1024L // 1MB limit
+private const val PROFILE_PATH_SD = "/sdcard/Adreno_Driver/Config/qgl_profiles.json"
+private const val PROFILE_PATH_DATA = "/data/local/tmp/qgl_profiles.json"
+private const val MAX_PROFILE_SIZE = 1024 * 1024L
 
 object ProfileManager {
 
@@ -44,16 +45,23 @@ object ProfileManager {
         return null
     }
 
+    private fun resolveProfileFile(): File? {
+        val sdFile = File(PROFILE_PATH_SD)
+        if (sdFile.exists() && sdFile.canRead()) return sdFile
+
+        val dataFile = File(PROFILE_PATH_DATA)
+        if (dataFile.exists() && dataFile.canRead()) return dataFile
+
+        return null
+    }
+
     private fun loadProfile(): QGLProfile? {
-        val file = File(PROFILE_PATH)
-        if (!file.exists()) {
-            Log.w(TAG, "Profile file not found at $PROFILE_PATH")
+        val file = resolveProfileFile()
+        if (file == null) {
+            Log.w(TAG, "No readable profile file found (tried $PROFILE_PATH_SD and $PROFILE_PATH_DATA)")
             return null
         }
-        if (!file.canRead()) {
-            Log.w(TAG, "Profile file not readable at $PROFILE_PATH")
-            return null
-        }
+
         if (file.length() > MAX_PROFILE_SIZE) {
             Log.e(TAG, "Profile file too large: ${file.length()} bytes (max: $MAX_PROFILE_SIZE)")
             return null
@@ -66,7 +74,7 @@ object ProfileManager {
                 cachedProfile = profile
                 lastLoadTime = System.currentTimeMillis()
             }
-            Log.d(TAG, "Successfully loaded profile with ${profile.apps.size} app entries")
+            Log.d(TAG, "Successfully loaded profile from ${file.path} with ${profile.apps.size} app entries")
             profile
         } catch (e: IOException) {
             Log.e(TAG, "Failed to read profile file", e)

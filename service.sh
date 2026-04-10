@@ -289,6 +289,135 @@ fi
 sleep 2  # was 5s — 5s window caused black screen on unlock (OEM init.d scripts reset props)
         # (OEM init.d scripts reset props during this window; 2s is sufficient)
 log_service "System services stabilization delay complete (2s; was 5s)"
+# Record boot_completed timestamp for CASE A timing guard below.
+_BOOT_COMPLETED_TS=$(cat /proc/uptime 2>/dev/null | awk '{print int($1)}' || echo "0")
+
+# ========================================
+# EARLY QGL ACTIVATION FAST-PATH
+# ========================================
+# ROOT CAUSE FIX: The full QGL CASE A section runs AFTER the 30s sdcard wait
+# (line ~1568). On a FORCED_SKIAVKTHREADED_BACKEND=y device, post-fs-data
+# writes 0000 on EVERY boot. service.sh must activate it. If the sdcard takes
+# ~30s to mount, CASE A fires at boot_completed+32s — far too late.
+# Symptom: user checks file, sees 0000, thinks fix "didn't work."
+#
+# FIX: Activate here — at boot_completed+2s — immediately after the
+# stabilization sleep, BEFORE the sdcard wait, BEFORE the VK compat report,
+# BEFORE everything else. The full CASE A/B/C verification loop still runs
+# later for repair/drift correction.
+if [ "$QGL" = "y" ]; then
+  # Runs for skiavk and skiagl modes.
+  # boot-completed.sh is PRIMARY activation (sleep 20s → cp → chmod 0644).
+  # At boot+2s (this fast-path), boot-completed.sh is still sleeping.
+  # This fast-path defers to boot-completed.sh for the actual activation.
+  # If boot-completed.sh failed entirely (non-standard ROM, no tool), this
+  # fast-path is the first and only activation attempt before CASE A/B/C.
+  _eq="/data/vendor/gpu/qgl_config.txt"
+
+  # PRE-STAT INJECTION — inject getattr BEFORE calling stat.
+  # Without getattr, stat returns "" → case "" → "File absent" branch →
+  # chmod never runs → QGL stuck at 0000. This is the stuck-at-0000 fix.
+  for _eqb_pre in "/data/adb/ksud" "/data/adb/ksu/bin/ksud"; do
+    [ -f "$_eqb_pre" ] && [ -x "$_eqb_pre" ] || continue
+    "$_eqb_pre" sepolicy patch "allow su vendor_data_file file { getattr setattr relabelfrom relabelto create write unlink open read }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" sepolicy patch "allow su vendor_data_file dir { getattr search read open write add_name remove_name }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" sepolicy patch "allow su same_process_hal_file file { getattr setattr relabelto relabelfrom create write unlink open read }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" sepolicy patch "allow su same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" sepolicy patch "allow su unlabeled file { getattr setattr relabelfrom relabelto create write unlink open read }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" sepolicy patch "allow same_process_hal_file labeledfs filesystem associate" \
+      >/dev/null 2>&1 || true
+    break
+  done
+  for _eqb_pre in "$(command -v magiskpolicy 2>/dev/null)" \
+                  "/data/adb/magisk/magiskpolicy" \
+                  "/data/adb/ksu/bin/magiskpolicy" \
+                  "/data/adb/ap/bin/magiskpolicy"; do
+    [ -z "$_eqb_pre" ] && continue
+    [ -f "$_eqb_pre" ] && [ -x "$_eqb_pre" ] || continue
+    "$_eqb_pre" --live "allow su vendor_data_file file { getattr setattr relabelfrom relabelto create write unlink open read }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" --live "allow su vendor_data_file dir { getattr search read open write add_name remove_name }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" --live "allow su same_process_hal_file file { getattr setattr relabelto relabelfrom create write unlink open read }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" --live "allow su same_process_hal_file dir { getattr setattr relabelto relabelfrom search read open write add_name remove_name }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" --live "allow su unlabeled file { getattr setattr relabelfrom relabelto create write unlink open read }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" --live "allow same_process_hal_file labeledfs filesystem associate" \
+      >/dev/null 2>&1 || true
+    break
+  done
+  unset _eqb_pre
+
+  _em=$(stat -c '%a' "$_eq" 2>/dev/null || echo "")
+  case "$_em" in
+    "0"|"00"|"000"|"0000")
+      printf '[ADRENO-SVC] EARLY QGL FAST-PATH: mode=0000, checking if cache clear needed\n' \
+        > /dev/kmsg 2>/dev/null || true
+
+      _eq_state_file="/data/local/tmp/adreno_last_cleared_state"
+      _eq_prev_mode=""
+      _eq_prev_qgl=""
+      _eq_prev_hash=""
+      if [ -f "$_eq_state_file" ]; then
+        {
+          IFS= read -r _eq_prev_mode
+          IFS= read -r _eq_prev_qgl
+          IFS= read -r _eq_prev_hash
+        } < "$_eq_state_file" 2>/dev/null || true
+      fi
+      _eq_cur_hash="none"
+      if [ "$QGL" = "y" ]; then
+        for _eq_qsrc in \
+            "/sdcard/Adreno_Driver/Config/qgl_config.txt" \
+            "/data/local/tmp/qgl_config.txt" \
+            "$MODDIR/qgl_config.txt"; do
+          if [ -f "$_eq_qsrc" ]; then
+            _eq_cur_hash=$(cksum "$_eq_qsrc" 2>/dev/null | awk '{print $1}') || _eq_cur_hash="cksum_fail"
+            break
+          fi
+        done
+      fi
+
+      _eq_need_clear="false"
+      if [ "$_eq_prev_mode" != "$RENDER_MODE" ] || [ "$_eq_prev_qgl" != "$QGL" ] || [ "$_eq_prev_hash" != "$_eq_cur_hash" ]; then
+        _eq_need_clear="true"
+      fi
+      unset _eq_state_file _eq_prev_mode _eq_prev_qgl _eq_prev_hash _eq_cur_hash
+
+      if [ "$_eq_need_clear" = "true" ]; then
+        printf '[ADRENO-SVC] EARLY QGL: state changed, clearing caches\n' > /dev/kmsg 2>/dev/null || true
+        rm -rf /data/misc/hwui/ 2>/dev/null || true
+        rm -rf /data/misc/gpu/ 2>/dev/null || true
+      else
+        printf '[ADRENO-SVC] EARLY QGL: state unchanged, PRESERVING caches\n' > /dev/kmsg 2>/dev/null || true
+      fi
+      unset _eq_need_clear
+
+      # Try to chmod 0644 to activate
+      chmod 0644 "$_eq" 2>/dev/null && \
+        printf '[ADRENO-SVC] EARLY QGL: mode=0000 → 0644 success\n' > /dev/kmsg 2>/dev/null || \
+        printf '[ADRENO-SVC] EARLY QGL: mode=0000 → chmod failed (selinux?)\n' > /dev/kmsg 2>/dev/null || true
+      ;;
+    "644")
+      printf '[ADRENO-SVC] EARLY QGL: mode=0644 already, deferring to boot-completed.sh\n' \
+        > /dev/kmsg 2>/dev/null || true
+      ;;
+    *)
+      printf '[ADRENO-SVC] EARLY QGL: mode=%s, checking status\n' "$_em" > /dev/kmsg 2>/dev/null || true
+      if [ -f "$_eq" ]; then
+        chmod 0644 "$_eq" 2>/dev/null || true
+      fi
+      ;;
+  esac
+  unset _eq _em
+fi
 
 # QGL activation is handled EXCLUSIVELY by boot-completed.sh (display-stable timing).
 # Per-app QGL is handled by the QGL Trigger APK (AccessibilityService).
@@ -578,6 +707,22 @@ if [ -f "$_sd_cfg" ]; then
   fi
 fi
 unset _sd_cfg _dt_cfg
+
+# Mirror qgl_profiles.json to /data/local/tmp so the QGLTrigger APK can
+# read it before /sdcard is mounted (AccessibilityService starts at BOOT_COMPLETED
+# but FUSE/sdcardfs may not be ready yet).
+if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ]; then
+  _sd_prof="/sdcard/Adreno_Driver/Config/qgl_profiles.json"
+  _dt_prof="/data/local/tmp/qgl_profiles.json"
+  if [ -f "$_sd_prof" ]; then
+    if cp -f "$_sd_prof" "$_dt_prof" 2>/dev/null; then
+      log_service "[OK] QGL profiles mirrored to $_dt_prof (available to APK before sdcard mount)"
+    else
+      log_service "[!] Failed to mirror QGL profiles to $_dt_prof"
+    fi
+  fi
+  unset _sd_prof _dt_prof
+fi
 # ── END config mirror ────────────────────────────────────────────────────────
 
 # ========================================

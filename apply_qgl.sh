@@ -11,17 +11,15 @@
 # BEHAVIOR:
 #   1. Reads /sdcard/Adreno_Driver/Config/qgl_profiles.json
 #   2. Looks up package-specific profile, falls back to global
-#   3. Writes /data/vendor/gpu/qgl_config.txt atomically
+#   3. Writes /data/vendor/gpu/qgl_config.txt atomically (tmp + chcon + mv)
 #   4. Sets SELinux context to same_process_hal_file on BOTH dir and file
 #
-# LYB COMPAT: Uses touch + chcon (same_process_hal_file), NO chmod, NO chown.
-#   Matches LYB's r1.m6493b() exact sequence:
+# LYB COMPAT: Uses tmp + chcon + mv (same_process_hal_file), NO chmod, NO chown.
+#   Atomic write pattern — NO rm before mv (avoids SF crash window):
 #     mkdir /data/vendor/gpu
-#     rm /data/vendor/gpu/qgl_config.txt
-#     touch /data/vendor/gpu/qgl_config.txt
-#     chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu
-#     chcon u:object_r:same_process_hal_file:s0 /data/vendor/gpu/qgl_config.txt
-#     echo 0x0=0x8675309>> /data/vendor/gpu/qgl_config.txt
+#     echo content > /data/vendor/gpu/qgl_config.txt.tmp.$$
+#     chcon u:object_r:same_process_hal_file:s0 qgl_config.txt.tmp.$$
+#     mv -f qgl_config.txt.tmp.$$ qgl_config.txt
 #
 # LOGGING: All operations logged to /sdcard/Adreno_Driver/qgl_trigger.log
 #   and /sdcard/Adreno_Driver/qgl_diagnostics.log for detailed diagnostics.
@@ -386,11 +384,10 @@ if [ "$MODE" = "boot" ]; then
           _qgl_log "[BOOT] Temp file written, committing..."
           _qgl_diag "FILE_OP: Temp file size: $(wc -c < "$_qtmp" 2>/dev/null || echo '?') bytes"
           
-          # REMOVE old file first (LYB: rm /data/vendor/gpu/qgl_config.txt)
-          _qgl_log "[BOOT] Removing old QGL file"
-          rm -f "$QGL_TARGET" 2>/dev/null || true
+          # Set SELinux context on temp file BEFORE mv (avoids window with wrong context)
+          chcon u:object_r:same_process_hal_file:s0 "$_qtmp" 2>/dev/null || true
           
-          # Atomic rename (touch then mv - matches LYB approach)
+          # Atomic rename — mv overwrites target atomically, no rm needed
           if mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
             _qgl_log "[BOOT] File renamed successfully"
             _qgl_diag "FILE_OP: mv succeeded"
@@ -398,18 +395,8 @@ if [ "$MODE" = "boot" ]; then
             # Touch to ensure file has proper timestamp (LYB: touch)
             touch "$QGL_TARGET" 2>/dev/null || true
             
-            # Set SELinux context (LYB: chcon file)
-            _qgl_log "[BOOT] Setting SELinux context on file"
-            _chcon_file_out=$(chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>&1)
-            _chcon_file_rc=$?
-            
-            if [ $_chcon_file_rc -eq 0 ]; then
-              _qgl_log "[BOOT] File SELinux context set"
-              _qgl_diag "SELINUX_OP: chcon file succeeded"
-            else
-              _qgl_log "[WARN] chcon file failed: $_chcon_file_out"
-              _qgl_diag "SELINUX_OP: chcon file failed: $_chcon_file_out"
-            fi
+            # Re-verify SELinux context on final file
+            chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
             
             _lines=$(wc -l < "$QGL_TARGET" 2>/dev/null || echo '?')
             _qgl_log "[BOOT] QGL applied from qgl_profiles.json ($_lines lines)"
@@ -449,10 +436,6 @@ if [ "$MODE" = "boot" ]; then
   _qgl_diag "BOOT_SOURCE: $_qsrc (legacy)"
   _qgl_diag "BOOT_SOURCE_SIZE: $(wc -c < "$_qsrc" 2>/dev/null || echo '?') bytes"
   
-  # REMOVE old file (LYB: rm)
-  _qgl_log "[BOOT] Removing old QGL file"
-  rm -f "$QGL_TARGET" 2>/dev/null || true
-  
   # Copy to temp (prepare for atomic commit)
   _qgl_log "[BOOT] Copying to temp file"
   if ! cp -f "$_qsrc" "$_qtmp" 2>/dev/null; then
@@ -466,7 +449,10 @@ if [ "$MODE" = "boot" ]; then
   # Touch (LYB: touch) - ensures file timestamp
   touch "$_qtmp" 2>/dev/null || true
   
-  # Atomic commit (mv)
+  # Set SELinux context on temp file BEFORE mv (avoids window with wrong context)
+  chcon u:object_r:same_process_hal_file:s0 "$_qtmp" 2>/dev/null || true
+  
+  # Atomic commit (mv) — overwrites target atomically, no rm needed
   if mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
     _qgl_log "[BOOT] Atomic rename succeeded"
     _qgl_diag "FILE_OP: mv succeeded"
@@ -474,18 +460,8 @@ if [ "$MODE" = "boot" ]; then
     # Touch again on final location (matches LYB)
     touch "$QGL_TARGET" 2>/dev/null || true
     
-    # Set SELinux context (LYB: chcon file)
-    _qgl_log "[BOOT] Setting SELinux context on file (legacy path)"
-    _chcon_leg_out=$(chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>&1)
-    _chcon_leg_rc=$?
-    if [ $_chcon_leg_rc -eq 0 ]; then
-      _qgl_log "[BOOT] File SELinux context set (legacy path)"
-      _qgl_diag "SELINUX_OP: chcon file succeeded (legacy)"
-    else
-      _qgl_log "[WARN] chcon file failed (legacy path, rc=$_chcon_leg_rc): $_chcon_leg_out"
-      _qgl_diag "SELINUX_OP: chcon file failed (legacy): $_chcon_leg_out"
-    fi
-    unset _chcon_leg_out _chcon_leg_rc
+    # Re-verify SELinux context on final file (chcon on tmp should carry over)
+    chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
     
     _lines=$(wc -l < "$QGL_TARGET" 2>/dev/null || echo '?')
     _qgl_log "[BOOT] QGL applied successfully ($_lines lines)"
@@ -590,28 +566,17 @@ fi
 
 _qgl_diag "FILE_OP: Temp file written: $(wc -c < "$_qtmp" 2>/dev/null || echo '?') bytes"
 
-# REMOVE old file (LYB: rm)
-_qgl_log "[APP] Removing old QGL file"
-rm -f "$QGL_TARGET" 2>/dev/null || true
+# Set SELinux context on temp file BEFORE mv (avoids window with wrong context)
+chcon u:object_r:same_process_hal_file:s0 "$_qtmp" 2>/dev/null || true
 
-# Atomic commit (LYB: mv via touch + chcon approach)
+# Atomic commit — mv overwrites target atomically, no rm needed
 _qgl_log "[APP] Committing $_qtmp → $QGL_TARGET"
 if mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
   # Touch (LYB: touch)
   touch "$QGL_TARGET" 2>/dev/null || true
   
-  # Set SELinux context (LYB: chcon file)
-  _qgl_log "[APP] Setting SELinux context"
-  _chcon_app_out=$(chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>&1)
-  _chcon_app_rc=$?
-  if [ $_chcon_app_rc -eq 0 ]; then
-    _qgl_log "[APP] File SELinux context set"
-    _qgl_diag "SELINUX_OP: chcon file succeeded (app mode)"
-  else
-    _qgl_log "[WARN] chcon file failed for $PKG (rc=$_chcon_app_rc): $_chcon_app_out"
-    _qgl_diag "SELINUX_OP: chcon file failed (app mode): $_chcon_app_out"
-  fi
-  unset _chcon_app_out _chcon_app_rc
+  # Re-verify SELinux context on final file
+  chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
   
   _line_count=$(wc -l < "$QGL_TARGET" 2>/dev/null || echo '?')
   _qgl_log "[APP] QGL applied for $PKG ($_line_count keys)"

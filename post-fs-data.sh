@@ -516,14 +516,22 @@ log_boot "SYNCING MODULE STATE TO CONFIG"
 log_boot "========================================"
 
 if [ "$QGL" = "n" ]; then
-  if [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
-    rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null && \
-      log_boot "[OK] QGL disabled → removed /data/vendor/gpu/qgl_config.txt" || \
-      log_boot "[!] QGL disabled → failed to remove qgl_config.txt (may be same_process_hal_file context)"
+  # Only remove our own qgl_config.txt - leave LYB's file alone
+  if [ -f "/data/vendor/gpu/.adreno_qgl_owner" ]; then
+    if [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
+      rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null && \
+        log_boot "[OK] QGL disabled → removed our qgl_config.txt" || \
+        log_boot "[!] QGL disabled → failed to remove (SELinux?)"
+    fi
+    rm -f "/data/vendor/gpu/.adreno_qgl_owner" 2>/dev/null || true
   else
-    log_boot "QGL disabled → qgl_config.txt not present"
+    # No owner marker - LYB or another manager owns the file
+    if [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
+      log_boot "QGL=n → leaving external manager's qgl_config.txt (no owner marker)"
+    else
+      log_boot "QGL disabled → no qgl_config.txt present"
+    fi
   fi
-  rm -f "/data/vendor/gpu/.adreno_qgl_owner" 2>/dev/null || true
 else
   log_boot "QGL enabled → file will be installed below"
 fi
@@ -651,31 +659,53 @@ if [ "$QGL" = "y" ]; then
   fi
   rm -f "/data/vendor/gpu/.adreno_qgl_owner" 2>/dev/null || true
 else
-  # QGL=n: ensure no QGL file exists
-  if [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
-    _qgl_rm_ok=false
-    _qgl_rm_try=0
-    while [ $_qgl_rm_try -lt 3 ] && [ "$_qgl_rm_ok" = "false" ]; do
-      if rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null; then
-        if [ ! -f "/data/vendor/gpu/qgl_config.txt" ]; then
-          _qgl_rm_ok=true
+  # QGL=n: only remove QGL file if WE own it (marker present)
+  # Leave LYB's or other managers' files alone
+  if [ -f "/data/vendor/gpu/.adreno_qgl_owner" ]; then
+    if [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
+      _qgl_rm_ok=false
+      _qgl_rm_try=0
+      while [ $_qgl_rm_try -lt 3 ] && [ "$_qgl_rm_ok" = "false" ]; do
+        if rm -f "/data/vendor/gpu/qgl_config.txt" 2>/dev/null; then
+          if [ ! -f "/data/vendor/gpu/qgl_config.txt" ]; then
+            _qgl_rm_ok=true
+          fi
         fi
-      fi
-      if [ "$_qgl_rm_ok" = "false" ]; then
-        _qgl_rm_try=$((_qgl_rm_try + 1))
-        if [ $_qgl_rm_try -lt 3 ]; then
-          sleep 0.5
+        if [ "$_qgl_rm_ok" = "false" ]; then
+          _qgl_rm_try=$((_qgl_rm_try + 1))
+          if [ $_qgl_rm_try -lt 3 ]; then
+            sleep 0.5
+          fi
         fi
+      done
+      if [ "$_qgl_rm_ok" = "true" ]; then
+        log_boot "[OK] QGL: disabled → removed our config"
+      else
+        log_boot "[!] QGL: disabled → failed to remove after 3 attempts"
       fi
-    done
-    if [ "$_qgl_rm_ok" = "true" ]; then
-      log_boot "[OK] QGL: disabled → removed existing config"
-    else
-      log_boot "[!] QGL: disabled → failed to remove config after 3 attempts"
+      unset _qgl_rm_ok _qgl_rm_try
     fi
-    unset _qgl_rm_ok _qgl_rm_try
+    rm -f "/data/vendor/gpu/.adreno_qgl_owner" 2>/dev/null || true
+  else
+    # No owner marker - leave external manager's file alone
+    if [ -f "/data/vendor/gpu/qgl_config.txt" ]; then
+      log_boot "QGL=n → leaving external manager's qgl_config.txt"
+    fi
   fi
-  rm -f "/data/vendor/gpu/.adreno_qgl_owner" 2>/dev/null || true
+fi
+
+# ── APK Auto-Uninstall: Remove QGLTrigger APK if QGL_PERAPP is OFF ──
+# APK is only needed for per-app mode. If user disabled per-app, uninstall the APK.
+if [ "$QGL_PERAPP" != "y" ]; then
+  if command -v pm >/dev/null 2>&1; then
+    if pm list packages io.github.adreno.qgl.trigger 2>/dev/null | grep -q "io.github.adreno.qgl.trigger"; then
+      if pm uninstall io.github.adreno.qgl.trigger 2>/dev/null; then
+        log_boot "[OK] QGLTrigger APK uninstalled (QGL_PERAPP=$QGL_PERAPP)"
+      else
+        log_boot "[!] Failed to uninstall QGLTrigger APK"
+      fi
+    fi
+  fi
 fi
 
 log_boot "========================================"
@@ -1383,14 +1413,16 @@ log_boot "Selected render mode: $RENDER_MODE"
 SYSTEM_PROP_FILE="$MODDIR/system.prop"
 
 # Always strip old render + SF + stability props first, then write the correct set
+_RENDER_PROPS='debug\.hwui\.renderer=|debug\.renderengine\.backend=|debug\.sf\.latch_unsignaled=|debug\.sf\.auto_latch_unsignaled=|debug\.sf\.disable_backpressure=|debug\.sf\.enable_hwc_vds=|debug\.sf\.enable_transaction_tracing=|debug\.sf\.client_composition_cache_size=|ro\.sf\.disable_triple_buffer=|ro\.surface_flinger\.use_context_priority=|ro\.surface_flinger\.max_frame_buffer_acquired_buffers=|ro\.surface_flinger\.force_hwc_copy_for_virtual_displays=|renderthread\.skia\.reduceopstasksplitting=|debug\.hwui\.skip_empty_damage=|debug\.hwui\.webview_overlays_enabled=|debug\.hwui\.skia_tracing_enabled=|debug\.hwui\.skia_use_perfetto_track_events=|debug\.hwui\.capture_skp_enabled=|debug\.hwui\.skia_atrace_enabled=|debug\.hwui\.use_hint_manager=|debug\.hwui\.target_cpu_time_percent=|com\.qc\.hardware=|persist\.sys\.force_sw_gles=|debug\.vulkan\.layers=|debug\.vulkan\.dev\.layers=|ro\.hwui\.use_vulkan=|debug\.hwui\.recycled_buffer_cache_size=|debug\.hwui\.overdraw=|debug\.hwui\.profile=|debug\.hwui\.show_dirty_regions=|graphics\.gpu\.profiler\.support=|ro\.egl\.blobcache\.multifile=|ro\.egl\.blobcache\.multifile_limit=|debug\.hwui\.fps_divisor=|debug\.hwui\.render_thread=|debug\.hwui\.render_dirty_regions=|debug\.hwui\.show_layers_updates=|debug\.hwui\.filter_test_overhead=|debug\.hwui\.nv_profiling=|debug\.hwui\.clip_surfaceviews=|debug\.hwui\.8bit_hdr_headroom=|debug\.hwui\.skip_eglmanager_telemetry=|debug\.hwui\.initialize_gl_always=|debug\.hwui\.level=|debug\.hwui\.disable_vsync=|hwui\.disable_vsync=|debug\.vulkan\.layers\.enable=|persist\.device_config\.runtime_native\.usap_pool_enabled=|debug\.gralloc\.enable_fb_ubwc=|vendor\.gralloc\.enable_fb_ubwc=|persist\.sys\.perf\.topAppRenderThreadBoost\.enable=|persist\.sys\.gpu\.working_thread_priority=|debug\.sf\.use_phase_offsets_as_durations=|debug\.hwui\.use_skia_graphite=|ro\.surface_flinger\.supports_background_blur=|persist\.sys\.sf\.disable_blurs=|ro\.sf\.blurs_are_expensive=|ro\.config\.vulkan\.enabled=|persist\.vendor\.vulkan\.enable=|persist\.graphics\.vulkan\.disable_pre_rotation=|debug\.sf\.treat_170m_as_sRGB=|debug\.egl\.debug_proc=|debug\.sf\.hw=|persist\.sys\.ui\.hw=|debug\.egl\.hw=|debug\.egl\.profiler=|debug\.egl\.trace=|persist\.graphics\.vulkan\.validation_enable=|debug\.hwui\.drawing_enabled='
 if [ -f "$SYSTEM_PROP_FILE" ]; then
-  awk -v pat="$RENDER_PROPS_REGEX" '{ if ($0 ~ pat) next; print }' \
+  awk -v pat="$_RENDER_PROPS" '{ if ($0 ~ pat) next; print }' \
     "$SYSTEM_PROP_FILE" > "${SYSTEM_PROP_FILE}.tmp" 2>/dev/null && \
     mv "${SYSTEM_PROP_FILE}.tmp" "$SYSTEM_PROP_FILE" 2>/dev/null || \
     rm -f "${SYSTEM_PROP_FILE}.tmp" 2>/dev/null
 else
   touch "$SYSTEM_PROP_FILE" 2>/dev/null || true
 fi
+unset _RENDER_PROPS
 
 
 # ── FIRST BOOT SAFETY CHECK: REMOVED (Q7 decision) ───────────────────────────
@@ -1933,20 +1965,6 @@ case "$RENDER_MODE" in
     #   screenshots and screen recording instead of spawning a Vulkan GPU
     #   blit pass. Companion to enable_hwc_vds; covers the conversion path.
     #
-    # debug.hwui.use_buffer_age=false
-    #   Default true: Skia uses EGL_EXT_buffer_age for partial invalidation.
-    #   Adreno Vulkan drivers misreport buffer age → Skia reads stale regions
-    #   → corrupt frames → crash. False = full redraws every frame (safe).
-    #
-    # debug.hwui.use_partial_updates=false
-    #   Companion to use_buffer_age. Disables BUFFER_PRESERVED partial updates.
-    #   Same root cause: Adreno partial buffer age tracking is unreliable.
-    #
-    # debug.hwui.use_gpu_pixel_buffers=false
-    #   Disables PBO (Pixel Buffer Object) GPU readback. PBO readback via
-    #   Vulkan has a race condition in custom Adreno firmware → sporadic SIGSEGV
-    #   in RenderThread during screenshots and multitasking animations.
-    #
     # renderthread.skia.reduceopstasksplitting=true
     #   Prevents Skia from splitting render ops into many tiny tasks. Without
     #   this, task count grows unboundedly with each frame swap → memory for
@@ -1994,42 +2012,160 @@ case "$RENDER_MODE" in
     #   budget and GPU gets the remaining 67%, preventing CPU over-boosting
     #   at the expense of GPU clock starvation on custom Adreno firmware.
     {
-      # ── FIX-C-1: system.prop reduced to ≤10 ESSENTIAL PERSISTENCE-ONLY props ────
-      # Previous version wrote 56+ props to system.prop, causing "Found hole in
-      # prop area" on devices with small prop context buckets. Only props that
-      # MUST survive reboot via system.prop are written here. ALL other tuning
-      # props are set exclusively via resetprop (below) for the live session.
+      # ── SF fence/buffer props INTENTIONALLY OMITTED ──────────────────────────
+      # debug.sf.latch_unsignaled, debug.sf.auto_latch_unsignaled,
+      # debug.sf.disable_backpressure, debug.sf.enable_hwc_vds,
+      # ro.sf.disable_triple_buffer, debug.sf.client_composition_cache_size,
+      # debug.sf.enable_transaction_tracing, ro.surface_flinger.use_context_priority,
+      # ro.surface_flinger.max_frame_buffer_acquired_buffers,
+      # ro.surface_flinger.force_hwc_copy_for_virtual_displays
       #
-      # Why these 10:
-      #   debug.hwui.renderer — persistence across reboot (live resetprop below)
-      #   com.qc.hardware — Qualcomm ION buffer path gate (no resetprop equiv)
-      #   persist.sys.force_sw_gles — ensure HW GLES (persist.* must be in prop file)
-      #   debug.vulkan.layers= — clear OEM debug layers (must survive reboot)
-      #   debug.vulkan.dev.layers= — clear OEM dev layers (must survive reboot)
-      #   persist.graphics.vulkan.validation_enable=0 — kill validation (persist.*)
-      #   graphics.gpu.profiler.support=false — kill profiler (no resetprop equiv)
-      #   debug.egl.debug_proc= — clear OEM EGL hook (must survive reboot)
-      #   ro.zygote.disable_gl_preload=true — prevent GL preload in skiavk (invariant I-1)
-      #   ro.surface_flinger.protected_contents=true — existing static prop
-      #
-      # debug.renderengine.backend is INTENTIONALLY NOT in system.prop.
-      # OEM ROMs (MIUI/OneUI/ColorOS) register addChangeCallback for this prop.
-      # If init loads it from system.prop and value changes at runtime via resetprop,
-      # SF fires RenderEngine reinit mid-frame → crash → watchdog reboot.
-      # Set exclusively via resetprop BEFORE SF starts (below).
-
+      # ROOT CAUSE ANALYSIS — "shows for a second then whole screen black":
+      # latch_unsignaled tells SF to present Vulkan frames BEFORE the GPU fence
+      # signals. On custom Adreno drivers with broken/delayed fence FD export,
+      # the fence NEVER signals back. SF presents frame 1 (user sees app briefly),
+      # then the buffer queue fills with unsignaled fences — no new buffer can be
+      # dequeued — HWUI deadlocks — black screen. disable_backpressure amplifies
+      # this by removing SF flow control. disable_triple_buffer / max_frame_buffer=2
+      # starve the pipeline of render buffers, same outcome.
+      # The old working files had NONE of these SF props. Only hwui.renderer and
+      # renderengine.backend were needed. Removing all of them restores stability.
+      # Renderer props persist to system.prop so SF reads them at init
+      
+      
+      # FIRST_BOOT_PENDING guard removed — always applies now (Q7)
       printf 'debug.hwui.renderer=skiavk\n'
+      # debug.renderengine.backend intentionally NOT written to system.prop.
+      # OEM ROMs (MIUI/HyperOS, Samsung OneUI, ColorOS) register a live
+      # SystemProperties::addChangeCallback for this prop. If init loads it from
+      # system.prop and its value changes at runtime, SurfaceFlinger fires a
+      # RenderEngine reinitialization mid-frame → SF crash → all apps lose surfaces
+      # → watchdog reboot. Set exclusively via resetprop BEFORE SF starts (below).
       printf 'com.qc.hardware=true\n'
       printf 'persist.sys.force_sw_gles=0\n'
+      # reduceopstasksplitting: AOSP default is TRUE (Properties.h: "improves GPU
+      # efficiency but may increase VRAM consumption"). This module sets FALSE to
+      # preserve strict OpsTask ordering. Custom Adreno drivers handle concurrent
+      # OpsTask batches less reliably than stock, causing rendering order failures
+      # and visual artifacts in apps with complex draw operations (e-readers, maps,
+      # HWUI-overlay games). Performance cost of false is negligible on Adreno.
+      printf 'renderthread.skia.reduceopstasksplitting=false\n'
+      printf 'debug.hwui.skip_empty_damage=true\n'
+      printf 'debug.hwui.webview_overlays_enabled=true\n'
+      printf 'debug.hwui.skia_tracing_enabled=false\n'
+      printf 'debug.hwui.skia_use_perfetto_track_events=false\n'
+      printf 'debug.hwui.capture_skp_enabled=false\n'
+      printf 'debug.hwui.skia_atrace_enabled=false\n'
+      printf 'debug.hwui.use_hint_manager=true\n'
+      printf 'debug.hwui.target_cpu_time_percent=33\n'
+      # debug.vulkan.layers=  (empty) — clear OEM profiler/debug layers that
+      # fail dlopen on custom Adreno driver ABI → every app crashes at Vulkan init
       printf 'debug.vulkan.layers=\n'
+      # ro.hwui.use_vulkan=true — MIUI/HyperOS gate for skiavk renderer path
+      printf 'ro.hwui.use_vulkan=true\n'
+      # recycled_buffer_cache_size=4 — AOSP default. Value of 2 causes constant
+      # VkBuffer reallocation in complex UIs → OOM spikes → crash
+      printf 'debug.hwui.recycled_buffer_cache_size=4\n'
+      # overdraw/profile/show_dirty_regions=false — disable OEM debug Vulkan passes
+      printf 'debug.hwui.overdraw=false\n'
+      printf 'debug.hwui.profile=false\n'
+      printf 'debug.hwui.show_dirty_regions=false\n'
+      # profiler.support=false — disable Snapdragon Profiler Vulkan intercept
+      # layer (wrong internal ABI on custom drivers → SIGSEGV on vkQueueSubmit)
+      printf 'graphics.gpu.profiler.support=false\n'
+      # multifile=true — per-process cache files prevent concurrent write
+      # corruption that causes EGL init failures on custom Adreno drivers
+      printf 'ro.egl.blobcache.multifile=true\n'
+      # multifile_limit — 32MB cap prevents unbounded growth → I/O stalls
+      printf 'ro.egl.blobcache.multifile_limit=33554432\n'
+      # render_thread=true — ensure HWUI runs on async render thread (default,
+      # explicit to override any OEM build.prop that disables it)
+      printf 'debug.hwui.render_thread=true\n'
+      # render_dirty_regions=false — disable HWUI-level partial invalidates
+      printf 'debug.hwui.render_dirty_regions=false\n'
+      # show_layers_updates=false — disable layer update debug overlay
+      printf 'debug.hwui.show_layers_updates=false\n'
+      # filter_test_overhead=false — disable test overhead instrumentation hook
+      printf 'debug.hwui.filter_test_overhead=false\n'
+      # nv_profiling=false — disable NVidia PerfHUD ES hooks (no-op on Adreno
+      # but prevents any profiling intercept attempt at VkInstance creation)
+      printf 'debug.hwui.nv_profiling=false\n'
+      # 8bit_hdr_headroom=false — disable 8-bit HDR headroom expansion pipeline
+      printf 'debug.hwui.8bit_hdr_headroom=false\n'
+      # skip_eglmanager_telemetry=true — skip EGL telemetry init overhead
+      # at RenderThread startup (confirmed AOSP feature flag prop)
+      printf 'debug.hwui.skip_eglmanager_telemetry=true\n'
+      # initialize_gl_always=false — do NOT pre-load GL at Zygote when Vulkan is active.
+      # true loads both drivers → ~20MB extra RAM per app process → OOM on heavy apps.
+      printf 'debug.hwui.initialize_gl_always=false\n'
+      # level=0 — kDebugDisabled: disable HWUI cache/memory debug logging
+      printf 'debug.hwui.level=0\n'
+      # disable_vsync=false — explicitly neutralize dangerous OEM/custom ROM
+      # props that set hwui.disable_vsync=true, which causes unbounded frame
+      # submission → GPU command queue overflow → crash/stall under Vulkan
+      printf 'debug.hwui.disable_vsync=false\n'
+      # usap_pool_enabled=true — USAP (Unspecialized App Process) pre-fork pool.
+      # Zygote maintains warm processes ready to specialize → faster cold-start
+      printf 'persist.device_config.runtime_native.usap_pool_enabled=true\n'
+      # gralloc.enable_fb_ubwc=1 — UBWC (Unified Buffer/Bandwidth Compression)
+      # for the framebuffer surface on Adreno. Reduces GPU↔RAM bandwidth 30-50%
+      # for every frame composited by SurfaceFlinger. Confirmed CAF Gralloc prop
+      printf 'debug.gralloc.enable_fb_ubwc=1\n'
+      # topAppRenderThreadBoost — Qualcomm PerfLock: elevates render thread of
+      # the foreground app in kernel scheduler using SCHED_BOOST mechanism
+      printf 'persist.sys.perf.topAppRenderThreadBoost.enable=true\n'
+      # gpu.working_thread_priority=1 — elevate GPU driver kernel thread to
+      # highest priority class; reduces GPU command dispatch latency for Vulkan
+      printf 'persist.sys.gpu.working_thread_priority=1\n'
+      # ── SF phase offset props: REMOVED (SOC-specific, cause vsync starvation on other Qualcomm SoCs)
+      # Device tree already contains correct tuned values for each SoC.
+      # use_skia_graphite=false — Android 15+ experimental Graphite Skia backend.
+      # Conflicts with custom Adreno Vulkan drivers (different extension surface).
+      # Must be explicitly disabled; some AOSP-based ROMs enable it by default.
+      printf 'debug.hwui.use_skia_graphite=false\n'
+      # blur: NOT disabled in SkiaVK. Blanket disable causes Samsung/MIUI UI regression.
+      # Only disable if a specific device reports Vulkan blur compute crashes.
+      printf 'ro.sf.blurs_are_expensive=1\n'
+      # vendor.gralloc.enable_fb_ubwc=1 — CAF gralloc4 uses vendor. namespace
+      printf 'vendor.gralloc.enable_fb_ubwc=1\n'
+      # ro.config.vulkan.enabled=true — Samsung One UI explicit Vulkan enable gate.
+      printf 'ro.config.vulkan.enabled=true\n'
+      # persist.vendor.vulkan.enable=1 — MIUI/HyperOS internal vendor Vulkan enable.
+      printf 'persist.vendor.vulkan.enable=1\n'
+      # disable_pre_rotation: NOT set. UE4/Unity handle pre-rotation in projection matrix.
+      # Setting true → VkSurfaceCapabilitiesKHR dimension mismatch → VK_ERROR_OUT_OF_DATE_KHR
+      # loop → crash on launch (PUBG Mobile, CoD Mobile, Fortnite).
+      # debug.hwui.force_dark=false — belt-and-suspenders override for render-mode.
+      printf 'debug.hwui.force_dark=false\n'
+      # ── Text atlas: AOSP defaults restored ──
+      # Reduction to 512×256/1024×512 caused glyph overflow → font corruption → HWUI crash
+      printf 'ro.hwui.text_small_cache_width=1024\n'
+      printf 'ro.hwui.text_small_cache_height=512\n'
+      printf 'ro.hwui.text_large_cache_width=2048\n'
+      printf 'ro.hwui.text_large_cache_height=1024\n'
+      # Shadow/gradient cache: reduce peak VRAM budget
+      printf 'ro.hwui.drop_shadow_cache_size=3\n'
+      printf 'ro.hwui.gradient_cache_size=1\n'
+      # Clear OEM EGL debug hook (MIUI/HyperOS/ColorOS ABI mismatch → SIGSEGV in libvulkan)
+      printf 'debug.egl.debug_proc=\n'
+      # ── HWUI render caches — reduce texture/layer/path upload stalls ──────────
+      printf 'debug.hwui.texture_cache_size=72\n'
+      printf 'debug.hwui.layer_cache_size=48\n'
+      printf 'debug.hwui.path_cache_size=32\n'
+      # ── Always-active HW path reinforcement ──────────────────────────────────
+      printf 'debug.sf.hw=1\n'
+      printf 'persist.sys.ui.hw=1\n'
+      printf 'debug.egl.hw=1\n'
+      printf 'debug.egl.profiler=0\n'
+      printf 'debug.egl.trace=0\n'
+      # Clear OEM Vulkan dev/validation layer overrides
       printf 'debug.vulkan.dev.layers=\n'
       printf 'persist.graphics.vulkan.validation_enable=0\n'
-      printf 'graphics.gpu.profiler.support=false\n'
-      printf 'debug.egl.debug_proc=\n'
-      printf 'ro.zygote.disable_gl_preload=true\n'
-      printf 'ro.surface_flinger.protected_contents=true\n'
+      # HWUI drawing state + non-debug vsync
+      printf 'debug.hwui.drawing_enabled=true\n'
+      printf 'hwui.disable_vsync=false\n'
     } >> "$SYSTEM_PROP_FILE" 2>/dev/null
-    log_boot "[OK] system.prop: skiavk props written (10 props). FIX-C-1: reduced from 56+ to prevent prop area overflow. All tuning props via resetprop only."
+    log_boot "[OK] system.prop: skiavk props written. AOSP defaults for max perf. Blur ENABLED. Always-active HW props added."
     # Apply live for this boot session via resetprop
     # ── CRITICAL: renderer props set ONLY via resetprop, NEVER system.prop ──
     # This ensures the renderer is only activated AFTER the module's Vulkan
@@ -2205,30 +2341,114 @@ case "$RENDER_MODE" in
 
   skiagl)
     {
-      # ── FIX-C-1: system.prop reduced to ≤10 ESSENTIAL PERSISTENCE-ONLY props ────
-      # Same rationale as skiavk block: prevent prop area overflow on devices
-      # with small prop context buckets. Only persistence-required props here.
-      # All tuning props are set exclusively via resetprop (below).
+      # Renderer prop: hwui.renderer for per-process HWUI app rendering.
+      # debug.renderengine.backend (SurfaceFlinger compositor) is NOT written to
+      # system.prop — set exclusively via resetprop below (pre-SF, this boot).
+      # OEM ROM property watchers crash SF if the value changes after SF starts.
       printf 'debug.hwui.renderer=skiagl\n'
-      printf 'com.qc.hardware=true\n'
+      # force_sw_gles=0 — use hardware GLES (not software fallback)
       printf 'persist.sys.force_sw_gles=0\n'
-      printf 'debug.vulkan.layers=\n'
+      # Qualcomm hardware acceleration gate — enables Qualcomm ION buffer paths in gralloc
+      printf 'com.qc.hardware=true\n'
+      # reduceopstasksplitting: AOSP default is TRUE but module sets FALSE for
+      # rendering order stability with custom Adreno drivers (see skiavk block).
+      printf 'renderthread.skia.reduceopstasksplitting=false\n'
+      # Disable all Skia tracing/profiling overhead in GL mode too
+      printf 'debug.hwui.skia_tracing_enabled=false\n'
+      printf 'debug.hwui.skia_use_perfetto_track_events=false\n'
+      printf 'debug.hwui.capture_skp_enabled=false\n'
+      printf 'debug.hwui.skia_atrace_enabled=false\n'
+      # Disable debug overlays that add overhead
+      printf 'debug.hwui.overdraw=false\n'
+      printf 'debug.hwui.profile=false\n'
+      printf 'debug.hwui.show_dirty_regions=false\n'
+      printf 'debug.hwui.show_layers_updates=false\n'
+      # EGL shader blob cache — prevent concurrent-write corruption on Adreno EGL
+      printf 'ro.egl.blobcache.multifile=true\n'
+      printf 'ro.egl.blobcache.multifile_limit=33554432\n'
+      # render_thread=true — HWUI GL runs on async render thread (explicit for OEM overrides)
+      printf 'debug.hwui.render_thread=true\n'
+      # use_hint_manager=true — PerformanceHintManager CPU clock hints for GL thread
+      printf 'debug.hwui.use_hint_manager=true\n'
+      # target_cpu_time_percent=66 — GL workloads are more CPU-bound; 66% CPU / 34% GPU
+      printf 'debug.hwui.target_cpu_time_percent=66\n'
+      # skip_eglmanager_telemetry — skip EGL telemetry init overhead
+      printf 'debug.hwui.skip_eglmanager_telemetry=true\n'
+      # initialize_gl_always=false — CRASH FIX: system.prop sets ro.zygote.disable_gl_preload=true
+      # to prevent Zygote pre-loading the stock (wrong) driver. If initialize_gl_always=true,
+      # HWUI forces EGL init in EVERY process at startup — including NDK/game apps that also
+      # initialize their own Vulkan context from a different thread. The custom Adreno driver
+      # hits a race between HWUI's EGL context (created by HWUI's RenderThread) and the app's
+      # Vulkan context (created by the game engine thread) → SIGSEGV in libEGL/libvulkan.
+      # false = lazy EGL init: HWUI initializes GL only when it actually needs to render,
+      # at which point the app's own GPU init is already complete. No conflict.
+      printf 'debug.hwui.initialize_gl_always=false\n'
+      # Disable EGL vsync (do not set hwui.disable_vsync — that's dangerous; use HWUI prop)
+      printf 'debug.hwui.disable_vsync=false\n'
+      # level=0 — no debug logging overhead
+      printf 'debug.hwui.level=0\n'
+      # UBWC framebuffer compression — reduces GL↔RAM bandwidth
+      printf 'debug.gralloc.enable_fb_ubwc=1\n'
+      printf 'vendor.gralloc.enable_fb_ubwc=1\n'
+      # USAP pool — faster app cold-start
+      printf 'persist.device_config.runtime_native.usap_pool_enabled=true\n'
+      # Qualcomm PerfLock render thread boost
+      printf 'persist.sys.perf.topAppRenderThreadBoost.enable=true\n'
+      # GPU driver thread priority
+      printf 'persist.sys.gpu.working_thread_priority=1\n'
+      # Disable Android 15+ experimental Graphite backend
+      printf 'debug.hwui.use_skia_graphite=false\n'
+      # ── CRASH-FIX PROPS — same as skiavk, required in GL mode too ─────────────
+      # graphics.gpu.profiler.support=false — CRITICAL: Snapdragon Profiler intercepts
+      # BOTH GL and Vulkan calls. Custom Adreno driver has different internal function-pointer
+      # table than what Snapdragon Profiler was compiled against. If the profiler attaches
+      # (support=true), every intercepted GL call goes through a wrong function pointer →
+      # SIGSEGV in libGLESv2. Must be explicitly false, not just deleted (deletion reverts
+      # to OEM build.prop default which is often true on Snapdragon devices).
+      printf 'graphics.gpu.profiler.support=false\n'
+      # recycled_buffer_cache_size=4 — AOSP default. OEM builds sometimes ship value=2,
+      # causing constant GL buffer realloc under memory pressure → OOM spike → crash.
+      printf 'debug.hwui.recycled_buffer_cache_size=4\n'
+      # skip_empty_damage=true — skip GL command submission for undamaged frames
+      printf 'debug.hwui.skip_empty_damage=true\n'
+      # 8bit_hdr_headroom=false — disable 8-bit HDR pipeline (unnecessary overhead in GL mode)
+      printf 'debug.hwui.8bit_hdr_headroom=false\n'
+      # nv_profiling=false — disable NVidia PerfHUD ES hooks (no-op on Adreno but prevents
+      # any GL interception attempt that could conflict with custom driver)
+      printf 'debug.hwui.nv_profiling=false\n'
+      # filter_test_overhead=false — disable test overhead instrumentation hook
+      printf 'debug.hwui.filter_test_overhead=false\n'
+      # blur: ENABLED in SkiaGL — GL blur uses standard EGL paths, no Vulkan compute needed.
+      # Disabling breaks WindowBlurBehind on Samsung One UI / MIUI.
+      # ── HWUI render caches — reduce texture/layer/path upload stalls in GL mode ──
+      printf 'debug.hwui.texture_cache_size=72\n'
+      printf 'debug.hwui.layer_cache_size=48\n'
+      printf 'debug.hwui.path_cache_size=32\n'
+      # ── Always-active HW path reinforcement ──────────────────────────────────
+      # Moved from service.sh system.prop block — now persisted from init on every boot.
+      printf 'debug.sf.hw=1\n'
+      printf 'persist.sys.ui.hw=1\n'
+      printf 'debug.egl.hw=1\n'
+      printf 'debug.egl.profiler=0\n'
+      printf 'debug.egl.trace=0\n'
       printf 'debug.vulkan.dev.layers=\n'
       printf 'persist.graphics.vulkan.validation_enable=0\n'
-      printf 'graphics.gpu.profiler.support=false\n'
-      printf 'debug.egl.debug_proc=\n'
+      printf 'debug.hwui.drawing_enabled=true\n'
+      printf 'hwui.disable_vsync=false\n'
     } >> "$SYSTEM_PROP_FILE" 2>/dev/null
-    log_boot "[OK] system.prop: skiagl props written (8 props). FIX-C-1: reduced from 58+ to prevent prop area overflow. All tuning props via resetprop only."
+    log_boot "[OK] system.prop: skiagl stability+perf+crash-fix props written. profiler.support=false (Snapdragon profiler crash fix). Blur ENABLED. Always-active HW props added."
     if command -v resetprop >/dev/null 2>&1; then
       # ── renderer props set ONLY via resetprop (see skiavk section for why) ──
       # FIRST_BOOT_PENDING guard removed (Q7) — always applies now.
       resetprop debug.hwui.renderer skiagl
       resetprop debug.renderengine.backend skiaglthreaded
       resetprop persist.sys.force_sw_gles 0
-       resetprop com.qc.hardware true
-       # NOTE: Removed use_buffer_age, use_partial_updates, reduceopstasksplitting
-       # Using AOSP defaults for max performance
-       resetprop debug.hwui.render_dirty_regions false
+      resetprop com.qc.hardware true
+      # restore AOSP defaults for max performance
+      resetprop debug.hwui.use_buffer_age true
+      resetprop debug.hwui.use_partial_updates true
+      resetprop debug.hwui.use_gpu_pixel_buffers true
+      resetprop renderthread.skia.reduceopstasksplitting false
        resetprop debug.hwui.webview_overlays_enabled true
       resetprop debug.hwui.skia_tracing_enabled false
       resetprop debug.hwui.skia_use_perfetto_track_events false
@@ -2268,7 +2488,6 @@ case "$RENDER_MODE" in
       # Deletion reverts to OEM build.prop default (often true on Snapdragon devices),
        # re-enabling Snapdragon Profiler GL intercept with wrong ABI → SIGSEGV.
        resetprop graphics.gpu.profiler.support false
-       # Removed use_gpu_pixel_buffers - using AOSP default (true) for max performance
        # recycled_buffer_cache_size=4: AOSP default; prevents OOM from constant realloc
        resetprop debug.hwui.recycled_buffer_cache_size 4
       # These were being set then immediately deleted by the loop below — fixed:
@@ -2306,11 +2525,6 @@ case "$RENDER_MODE" in
                  ro.sf.disable_triple_buffer \
                  debug.sf.client_composition_cache_size \
                  debug.sf.enable_transaction_tracing \
-                 debug.sf.early_phase_offset_ns \
-                 debug.sf.early_app_phase_offset_ns \
-                 debug.sf.early_gl_phase_offset_ns \
-                 debug.sf.early_gl_app_phase_offset_ns \
-                 debug.sf.use_phase_offsets_as_durations \
                  ro.sf.blurs_are_expensive \
                  persist.sys.sf.native_mode \
                  debug.sf.treat_170m_as_sRGB \
@@ -2381,9 +2595,6 @@ case "$RENDER_MODE" in
                  debug.gralloc.enable_fb_ubwc \
                  persist.sys.perf.topAppRenderThreadBoost.enable \
                  persist.sys.gpu.working_thread_priority \
-                 debug.sf.early_phase_offset_ns debug.sf.early_app_phase_offset_ns \
-                 debug.sf.early_gl_phase_offset_ns debug.sf.early_gl_app_phase_offset_ns \
-                 debug.sf.use_phase_offsets_as_durations \
                  debug.hwui.use_skia_graphite ro.surface_flinger.supports_background_blur \
                  persist.sys.sf.disable_blurs ro.sf.blurs_are_expensive \
                  vendor.gralloc.enable_fb_ubwc \

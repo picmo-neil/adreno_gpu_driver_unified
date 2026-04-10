@@ -10,8 +10,8 @@ import android.os.IBinder
 import android.util.Log
 
 private const val TAG = "QGLTrigger"
-private const val KEEPALIVE_CHANNEL_ID = "qgl_keepalive_channel"
-private const val KEEPALIVE_NOTIFICATION_ID = 1002
+private const val KEEPALIVE_CHANNEL_ID = "qgl_trigger_channel"
+private const val KEEPALIVE_NOTIFICATION_ID = 1001
 
 class ForegroundKeepAliveService : Service() {
 
@@ -37,21 +37,22 @@ class ForegroundKeepAliveService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        Log.w(TAG, "ForegroundKeepAliveService destroyed — requesting restart")
+        Log.w(TAG, "ForegroundKeepAliveService destroyed — system will restart via START_STICKY")
         super.onDestroy()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.w(TAG, "ForegroundKeepAliveService task removed — scheduling restart")
+        super.onTaskRemoved(rootIntent)
         val restartIntent = Intent(applicationContext, ForegroundKeepAliveService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            try {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(restartIntent)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to restart keepalive service", e)
-            }
-        } else {
-            try {
+            } else {
                 startService(restartIntent)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to restart keepalive service", e)
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to restart keepalive service", e)
         }
     }
 
@@ -59,7 +60,7 @@ class ForegroundKeepAliveService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 KEEPALIVE_CHANNEL_ID,
-                "QGL Keepalive",
+                "QGL Trigger Service",
                 NotificationManager.IMPORTANCE_MIN
             ).apply {
                 setShowBadge(false)

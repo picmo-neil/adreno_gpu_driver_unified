@@ -3,6 +3,8 @@ package io.github.adreno.qgl.trigger
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Build
+import android.provider.Settings
 import android.util.Log
 
 private const val TAG = "QGLTrigger"
@@ -13,16 +15,29 @@ class BootReceiver : BroadcastReceiver() {
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_LOCKED_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED -> {
-                Log.d(TAG, "Boot event received: ${intent.action}, attempting to start QGL service")
+                Log.d(TAG, "Boot event received: ${intent.action}, starting QGL service")
+
                 try {
-                    val serviceIntent = Intent(context, ForegroundKeepAliveService::class.java)
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                        context.startForegroundService(serviceIntent)
+                    val keepAliveIntent = Intent(context, ForegroundKeepAliveService::class.java)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        context.startForegroundService(keepAliveIntent)
                     } else {
-                        context.startService(serviceIntent)
+                        context.startService(keepAliveIntent)
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to start keep-alive service on boot", e)
+                }
+
+                try {
+                    val accComp = "io.github.adreno.qgl.trigger/.QGLAccessibilityService"
+                    val enabled = Settings.Secure.getString(
+                        context.contentResolver,
+                        Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+                    ) ?: ""
+                    if (!enabled.contains(accComp)) {
+                        Log.d(TAG, "Accessibility service not enabled, cannot auto-start")
+                    }
+                } catch (_: Exception) {
                 }
             }
         }
