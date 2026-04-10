@@ -147,7 +147,7 @@ class QGLAccessibilityService : AccessibilityService() {
         }
 
         return try {
-            val marker = "QGL_DONE_$$_${System.nanoTime()}"
+            val marker = "QGL_DONE_${android.os.Process.myPid()}_${System.nanoTime()}"
             for (cmd in cmds) {
                 stdin.writeBytes("$cmd\n")
             }
@@ -194,7 +194,7 @@ class QGLAccessibilityService : AccessibilityService() {
         }
 
         val magicHeader = "0x0=0x8675309"
-        val tmpFile = "${QGL_TARGET}.tmp.$$"
+        val tmpFile = "${QGL_TARGET}.tmp.${android.os.Process.myPid()}"
         val cmds = mutableListOf<String>()
 
         cmds.add("mkdir -p $QGL_DIR 2>/dev/null")
