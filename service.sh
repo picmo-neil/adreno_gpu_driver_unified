@@ -708,20 +708,28 @@ if [ -f "$_sd_cfg" ]; then
 fi
 unset _sd_cfg _dt_cfg
 
-# Mirror qgl_profiles.json to /data/local/tmp so the QGLTrigger APK can
-# read it before /sdcard is mounted (AccessibilityService starts at BOOT_COMPLETED
-# but FUSE/sdcardfs may not be ready yet).
+# Mirror per-app QGL config files (qgl_config.txt.*) to /data/local/tmp so the
+# QGLTrigger APK can read them before /sdcard is mounted (AccessibilityService
+# starts at BOOT_COMPLETED but FUSE/sdcardfs may not be ready yet).
 if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ]; then
-  _sd_prof="/sdcard/Adreno_Driver/Config/qgl_profiles.json"
-  _dt_prof="/data/local/tmp/qgl_profiles.json"
-  if [ -f "$_sd_prof" ]; then
-    if cp -f "$_sd_prof" "$_dt_prof" 2>/dev/null; then
-      log_service "[OK] QGL profiles mirrored to $_dt_prof (available to APK before sdcard mount)"
+  _sd_qgl_dir="/sdcard/Adreno_Driver/Config"
+  _dt_qgl_dir="/data/local/tmp"
+  if [ -d "$_sd_qgl_dir" ]; then
+    _count=0
+    for _f in "$_sd_qgl_dir"/qgl_config.txt*; do
+      [ -f "$_f" ] || continue
+      _base="${_f##*/}"
+      if cp -f "$_f" "$_dt_qgl_dir/$_base" 2>/dev/null; then
+        _count=$((_count + 1))
+      fi
+    done
+    if [ "$_count" -gt 0 ]; then
+      log_service "[OK] QGL config files mirrored to $_dt_qgl_dir ($_count files)"
     else
-      log_service "[!] Failed to mirror QGL profiles to $_dt_prof"
+      log_service "[!] No QGL config files found to mirror"
     fi
   fi
-  unset _sd_prof _dt_prof
+  unset _sd_qgl_dir _dt_qgl_dir _count _f _base
 fi
 # ── END config mirror ────────────────────────────────────────────────────────
 

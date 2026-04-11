@@ -29,7 +29,7 @@ QGL_CONFIG_SD="/sdcard/Adreno_Driver/Config/qgl_config.txt"
 QGL_CONFIG_DATA="/data/local/tmp/qgl_config.txt"
 QGL_CONFIG_MOD="$MODDIR/qgl_config.txt"
 
-QGL_PROFILES_JSON="/sdcard/Adreno_Driver/Config/qgl_profiles.json"
+QGL_CONFIG_DIR_SD="/sdcard/Adreno_Driver/Config"
 QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
 QGL_DIR="/data/vendor/gpu"
 

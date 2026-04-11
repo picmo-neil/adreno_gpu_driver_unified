@@ -367,7 +367,7 @@
                 <div class="text-col">
                     <div class="setting-header">
                         <div class="setting-title" data-i18n="qglPerappName">Per-App QGL</div>
-                        <div class="info-tooltip" data-tooltip="QGLTrigger APK monitors app switches and applies per-app profiles from qgl_profiles.json">
+                        <div class="info-tooltip" data-tooltip="QGLTrigger APK monitors app switches and copies the matching qgl_config.txt.&lt;package&gt; file">
                             <span class="tooltip-icon">ℹ️</span>
                         </div>
                     </div>
@@ -942,10 +942,10 @@
 
 <!-- Per-App QGL Profile Editor Modal -->
 <!--
-  ARCHITECTURE NOTE: This modal edits per-profile QGL keys stored in
-  qgl_profiles.json — delivered at RUNTIME by the QGL Trigger APK
-  (AccessibilityService) when each app launches. These keys are NOT
-  written to /data/vendor/gpu/qgl_config.txt at boot.
+  ARCHITECTURE NOTE: This modal edits per-app QGL config files stored as
+  qgl_config.txt.<package_name> — delivered at RUNTIME by the QGL Trigger APK
+  (AccessibilityService) when each app launches. The APK copies the matching
+  file to /data/vendor/gpu/qgl_config.txt atomically (cp + chcon + mv).
 
   Contrast with the Normal QGL Editor (qglModal) which edits the raw
   qgl_config.txt written to /data/vendor/gpu/ at boot time via
@@ -989,12 +989,12 @@
                     </div>
                     <input type="text" id="appProfilePkg" class="input-glass premium-input" placeholder="com.example.app" readonly style="opacity: 0.7;">
                 </div>
-                <div class="setting-item" style="margin-bottom: 0;">
+                <div class="setting-item" style="margin-bottom: 0; display: none;">
                     <div class="text-col">
                         <div class="setting-title" data-i18n="enableProfile">Enable Profile</div>
                     </div>
                     <label class="switch modern-switch">
-                        <input type="checkbox" id="appProfileEnabled" role="switch">
+                        <input type="checkbox" id="appProfileEnabled" role="switch" checked>
                         <span class="slider modern-slider">
                             <span class="slider-text off">OFF</span>
                             <span class="slider-text on">ON</span>

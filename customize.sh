@@ -1306,7 +1306,7 @@ else
   log_only "WARNING: No system directory found in module package"
 fi
 
-for file in module.prop post-fs-data.sh service.sh uninstall.sh system.prop sepolicy.rule adreno_config.txt qgl_config.txt common.sh boot-completed.sh apply_qgl.sh qgl_profiles.json; do
+for file in module.prop post-fs-data.sh service.sh uninstall.sh system.prop sepolicy.rule adreno_config.txt qgl_config.txt common.sh boot-completed.sh apply_qgl.sh; do
   if [ -f "$TMPDIR/$file" ]; then
     if cp -f "$TMPDIR/$file" "$MODPATH/" 2>/dev/null; then
       FILES_COPIED=$((FILES_COPIED + 1))
@@ -1771,14 +1771,14 @@ if [ -f "$MODPATH/adreno_config.txt" ]; then
   fi
 fi
 
-# Install default QGL profiles JSON if not already present (preserves user edits)
-if [ -f "$MODPATH/qgl_profiles.json" ]; then
-  if [ ! -f "$SD_CONFIG_DIR/qgl_profiles.json" ]; then
-    cp -f "$MODPATH/qgl_profiles.json" "$SD_CONFIG_DIR/qgl_profiles.json" 2>/dev/null && \
-      log_only "Default QGL profiles installed to SD Card" || \
-      log_only "WARNING: Failed to install default QGL profiles"
+# Install default QGL config to SD Card if not already present (preserves user edits)
+if [ -f "$MODPATH/qgl_config.txt" ]; then
+  if [ ! -f "$SD_CONFIG_DIR/qgl_config.txt" ]; then
+    cp -f "$MODPATH/qgl_config.txt" "$SD_CONFIG_DIR/qgl_config.txt" 2>/dev/null && \
+      log_only "Default QGL config installed to SD Card" || \
+      log_only "WARNING: Failed to install default QGL config"
   else
-    log_only "QGL profiles already exists on SD Card — preserving user config"
+    log_only "QGL config already exists on SD Card — preserving user config"
   fi
 fi
 

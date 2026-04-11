@@ -2991,34 +2991,8 @@ async function saveQGL() {
         await exec(`printf '%s' '${safeContent}' > "${userSave}"`);
         logToTerminal(`User QGL saved to Adreno folder: ${userSave}`, 'success');
 
-        // --- 3) DUAL-WRITE: Also sync to qgl_profiles.json for per-app QGL ---
-        // Parse content into keys array and update global profile
-        const qglKeys = content.split('\n').filter(l => {
-            const t = l.trim();
-            return t && !t.startsWith('#');
-        });
-        try {
-            const profileRes = await exec(`cat "${QGL_PROFILES_PATH}" 2>/dev/null`);
-            let profiles = { global: { keys: [], enabled: true }, apps: {} };
-            if (profileRes && profileRes.stdout && profileRes.stdout.trim()) {
-                profiles = JSON.parse(profileRes.stdout.trim());
-            }
-            profiles.global = profiles.global || { keys: [], enabled: true };
-            profiles.apps = profiles.apps || {};
-            profiles.global.keys = qglKeys;
-            profiles.global.enabled = true;
-            const json = JSON.stringify(profiles, null, 2);
-            const jsonSafe = json.replace(/'/g, "'\\''");
-            const tmpPath = QGL_PROFILES_PATH + '.tmp';
-            await exec(`printf '%s' '${jsonSafe}' > "${tmpPath}" && mv -f "${tmpPath}" "${QGL_PROFILES_PATH}"`);
-            logToTerminal(`📱 Synced to qgl_profiles.json (global profile)`, 'success');
-        } catch (e) {
-            logToTerminal(`⚠️ Failed to sync to qgl_profiles.json: ${e.message || e}`, 'warn');
-        }
-
-        // --- 4) Copy user's saved file into the module (overwrite module config) ---
-        // Prefer cp; if cp can't write, fallback to printf into module path
-        await exec(`cp "${userSave}" "${moduleFile}" 2>/dev/null || printf '%s' '${safeContent}' > "${moduleFile}"`);
+        // --- 3) Copy user's saved file into the module (overwrite module config) ---
+        // Prefer cp; if cp can't write, fallback to printf into module path        await exec(`cp "${userSave}" "${moduleFile}" 2>/dev/null || printf '%s' '${safeContent}' > "${moduleFile}"`);
         logToTerminal(`Module QGL updated: ${moduleFile}`, 'success');
 
         // update app stats (if function exists)
@@ -5278,55 +5252,62 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════
-// PER-APP QGL PROFILES (LYB-style)
+// PER-APP QGL PROFILES (File-based)
+// Per-app configs stored as qgl_config.txt.<package_name> in Config dir.
+// Default config is qgl_config.txt (no suffix).
+// QGLTrigger APK copies the matching file to /data/vendor/gpu/qgl_config.txt.
 // ══════════════════════════════════════════════════════════════════════════
 
-const QGL_PROFILES_PATH = '/sdcard/Adreno_Driver/Config/qgl_profiles.json';
-let _qglProfilesCache = null;
+const QGL_CONFIG_DIR = '/sdcard/Adreno_Driver/Config';
+const QGL_CONFIG_PREFIX = 'qgl_config.txt';
+let _perAppProfilesCache = null;
 let _currentEditPkg = null;
 
 async function loadQGLProfiles() {
     try {
-        const res = await exec(`cat "${QGL_PROFILES_PATH}" 2>/dev/null`);
+        const res = await exec(`ls "${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}".* 2>/dev/null`);
+        _perAppProfilesCache = {};
         if (res && res.stdout && res.stdout.trim()) {
-            _qglProfilesCache = JSON.parse(res.stdout.trim());
-            // Ensure structure
-            if (!_qglProfilesCache.global) _qglProfilesCache.global = { keys: [], enabled: true };
-            if (!_qglProfilesCache.apps) _qglProfilesCache.apps = {};
-            logToTerminal('📱 QGL profiles loaded', 'info');
-        } else {
-            _qglProfilesCache = { global: { keys: [], enabled: true }, apps: {} };
-            logToTerminal('⚠️ No QGL profiles found, using empty default', 'warning');
+            const files = res.stdout.trim().split('\n').filter(f => f.trim());
+            files.forEach(filePath => {
+                const fileName = filePath.split('/').pop();
+                const pkg = fileName.substring(QGL_CONFIG_PREFIX.length + 1);
+                if (pkg && pkg.length > 0) {
+                    _perAppProfilesCache[pkg] = { filePath, exists: true };
+                }
+            });
         }
+        logToTerminal('QGL per-app profiles loaded', 'info');
     } catch (e) {
-        _qglProfilesCache = { global: { keys: [], enabled: true }, apps: {} };
-        logToTerminal('⚠️ Failed to load QGL profiles: ' + (e.message || e), 'warning');
+        _perAppProfilesCache = {};
+        logToTerminal('Failed to load QGL profiles: ' + (e.message || e), 'warning');
     }
-    // Sync global toggle to DOM
     const globalToggle = document.getElementById('globalQGLEnabled');
-    if (globalToggle && _qglProfilesCache && _qglProfilesCache.global) {
-        globalToggle.checked = _qglProfilesCache.global.enabled;
+    if (globalToggle) {
+        const defaultExists = await exec(`[ -f "${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}" ] && echo "yes" || echo "no"`);
+        const hasDefault = defaultExists && defaultExists.stdout && defaultExists.stdout.includes('yes');
+        globalToggle.checked = hasDefault;
         const row = globalToggle.closest('.setting-item');
-        if (row) row.classList.toggle('is-on', _qglProfilesCache.global.enabled);
+        if (row) row.classList.toggle('is-on', hasDefault);
     }
 }
 
-async function saveQGLProfiles() {
-    if (!_qglProfilesCache) return;
+async function savePerAppProfile(pkg, content) {
+    if (!pkg || pkg === '__global__') return;
     setLoading(true);
     try {
-        const json = JSON.stringify(_qglProfilesCache, null, 2);
-        const safe = json.replace(/'/g, "'\\''");
-        const tmpPath = QGL_PROFILES_PATH + '.tmp';
-        const res = await exec(`printf '%s' '${safe}' > "${tmpPath}" && mv -f "${tmpPath}" "${QGL_PROFILES_PATH}"`);
+        const filePath = `${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}.${pkg}`;
+        const tmpPath = filePath + '.tmp';
+        const safeContent = content.replace(/'/g, "'\\''");
+        const res = await exec(`printf '%s' '${safeContent}' > "${tmpPath}" && mv -f "${tmpPath}" "${filePath}"`);
         if (res && res.errno === 0) {
-            logToTerminal('💾 QGL profiles saved', 'success');
+            logToTerminal(`Saved per-app QGL profile for ${pkg}`, 'success');
             incrementStat('configChanges');
         } else {
-            logToTerminal('❌ Failed to save QGL profiles', 'error');
+            logToTerminal(`Failed to save per-app QGL profile for ${pkg}`, 'error');
         }
     } catch (e) {
-        logToTerminal('❌ Failed to save QGL profiles: ' + (e.message || e), 'error');
+        logToTerminal('Failed to save per-app profile: ' + (e.message || e), 'error');
     } finally {
         setLoading(false);
     }
@@ -5338,17 +5319,23 @@ function initPerAppQGL() {
     // APK uninstall button
     document.getElementById('btnUninstallQGLApk')?.addEventListener('click', uninstallQGLApk);
 
-    // Global profile toggle
+    // Global profile toggle — enables/disables default qgl_config.txt
     document.getElementById('globalQGLEnabled')?.addEventListener('change', async (e) => {
-        if (_qglProfilesCache && _qglProfilesCache.global) {
-            _qglProfilesCache.global.enabled = e.target.checked;
-            const row = e.target.closest('.setting-item');
-            if (row) row.classList.toggle('is-on', e.target.checked);
-            await saveQGLProfiles();
-            logToTerminal(`🌐 Global QGL profile ${e.target.checked ? 'enabled' : 'disabled'}`, 'info');
-            showToast(e.target.checked
-                ? (currentTranslations.msgGlobalQGLEnabled || 'Global QGL enabled')
-                : (currentTranslations.msgGlobalQGLDisabled || 'Global QGL disabled'));
+        const row = e.target.closest('.setting-item');
+        if (row) row.classList.toggle('is-on', e.target.checked);
+        const defaultPath = `${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}`;
+        const bakPath = `${QGL_CONFIG_DIR}/qgl_config.txt.disabled`;
+        if (e.target.checked) {
+            const bakExists = await exec(`[ -f "${bakPath}" ] && echo "yes" || echo "no"`);
+            if (bakExists && bakExists.stdout && bakExists.stdout.includes('yes')) {
+                await exec(`mv -f "${bakPath}" "${defaultPath}"`);
+            }
+            logToTerminal('Global QGL profile enabled', 'info');
+            showToast(currentTranslations.msgGlobalQGLEnabled || 'Global QGL enabled');
+        } else {
+            await exec(`[ -f "${defaultPath}" ] && mv -f "${defaultPath}" "${bakPath}"`);
+            logToTerminal('Global QGL profile disabled', 'info');
+            showToast(currentTranslations.msgGlobalQGLDisabled || 'Global QGL disabled');
         }
     });
 
@@ -5396,21 +5383,20 @@ function initPerAppQGL() {
     });
 
     // ── App Profile Editor: Reset button ──
-    document.getElementById('btnResetAppProfile')?.addEventListener('click', () => {
+    document.getElementById('btnResetAppProfile')?.addEventListener('click', async () => {
         const el = document.getElementById('appProfileEditor');
         if (!el || !_currentEditPkg) return;
-        const profile = _currentEditPkg === '__global__'
-            ? _qglProfilesCache?.global
-            : _qglProfilesCache?.apps?.[_currentEditPkg];
-        if (profile && profile.keys) {
-            el.value = profile.keys.join('\n');
-            updateAppProfileLineCount();
-            showToast('♻️ Reset to last saved state');
+        if (_currentEditPkg === '__global__') {
+            const defaultPath = `${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}`;
+            const res = await exec(`cat "${defaultPath}" 2>/dev/null`);
+            el.value = (res && res.stdout) ? res.stdout : '';
         } else {
-            el.value = '';
-            updateAppProfileLineCount();
-            showToast('♻️ Cleared (no saved state)');
+            const filePath = `${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}.${_currentEditPkg}`;
+            const res = await exec(`cat "${filePath}" 2>/dev/null`);
+            el.value = (res && res.stdout) ? res.stdout : '';
         }
+        updateAppProfileLineCount();
+        showToast('Reset to last saved state');
     });
 
     // ── App Profile Editor: Live line counter ──
@@ -5524,23 +5510,23 @@ async function uninstallQGLApk() {
     }
 }
 
-function renderAppProfilesList() {
+async function renderAppProfilesList() {
     const container = document.getElementById('appProfilesList');
     const noMsg = document.getElementById('noAppProfilesMsg');
     if (!container) return;
 
-    // Remove existing profile items
     container.querySelectorAll('.app-profile-item').forEach(el => el.remove());
 
-    if (!_qglProfilesCache || !_qglProfilesCache.apps || Object.keys(_qglProfilesCache.apps).length === 0) {
+    await loadQGLProfiles();
+
+    if (!_perAppProfilesCache || Object.keys(_perAppProfilesCache).length === 0) {
         if (noMsg) noMsg.style.display = '';
         return;
     }
 
     if (noMsg) noMsg.style.display = 'none';
 
-    const apps = _qglProfilesCache.apps;
-    Object.entries(apps).forEach(([pkg, profile]) => {
+    Object.entries(_perAppProfilesCache).forEach(([pkg, info]) => {
         const item = document.createElement('div');
         item.className = 'setting-item ripple-target hover-lift app-profile-item';
         item.dataset.pkg = pkg;
@@ -5556,15 +5542,15 @@ function renderAppProfilesList() {
         title.textContent = pkg;
 
         const badge = document.createElement('span');
-        badge.className = profile.enabled ? 'badge badge-success' : 'badge badge-warning';
-        badge.textContent = profile.enabled ? 'ON' : 'OFF';
+        badge.className = 'badge badge-success';
+        badge.textContent = 'ON';
 
         header.appendChild(title);
         header.appendChild(badge);
 
         const desc = document.createElement('div');
         desc.className = 'setting-desc';
-        desc.textContent = `${profile.keys.length} QGL keys`;
+        desc.textContent = `qgl_config.txt.${pkg}`;
 
         textCol.appendChild(header);
         textCol.appendChild(desc);
@@ -5608,8 +5594,6 @@ function handleAppProfileAction(e) {
 }
 
 async function openAppProfileEditor(pkg) {
-    if (!_qglProfilesCache) return;
-
     const modal = document.getElementById('appProfileModal');
     const pkgInput = document.getElementById('appProfilePkg');
     const editor = document.getElementById('appProfileEditor');
@@ -5621,9 +5605,16 @@ async function openAppProfileEditor(pkg) {
 
     _currentEditPkg = pkg;
     const isGlobal = pkg === '__global__';
-    const profile = isGlobal
-        ? _qglProfilesCache.global
-        : (_qglProfilesCache.apps[pkg] || { keys: [], enabled: true });
+
+    let fileContent = '';
+    if (isGlobal) {
+        const res = await exec(`cat "${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}" 2>/dev/null`);
+        fileContent = (res && res.stdout) ? res.stdout : '';
+    } else {
+        const filePath = `${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}.${pkg}`;
+        const res = await exec(`cat "${filePath}" 2>/dev/null`);
+        fileContent = (res && res.stdout) ? res.stdout : '';
+    }
 
     title.textContent = isGlobal
         ? (currentTranslations.globalQGLProfile || 'Global QGL Profile')
@@ -5633,8 +5624,8 @@ async function openAppProfileEditor(pkg) {
         : (currentTranslations.appProfileModalSub || 'Per-app QGL configuration');
     pkgInput.value = isGlobal ? 'global (all apps)' : pkg;
     pkgInput.readOnly = true;
-    enabledToggle.checked = profile.enabled;
-    editor.value = profile.keys.join('\n');
+    enabledToggle.checked = true;
+    editor.value = fileContent;
     updateAppProfileLineCount();
 
     modal.style.display = 'flex';
@@ -5652,45 +5643,54 @@ async function saveAppProfile() {
     const editor = document.getElementById('appProfileEditor');
     const enabledToggle = document.getElementById('appProfileEnabled');
 
-    if (!pkgInput || !editor || !_qglProfilesCache) return;
+    if (!pkgInput || !editor) return;
 
     const isGlobal = pkgInput.value.includes('global');
-    const keys = editor.value.split('\n').map(k => k.trim()).filter(k => k.length > 0);
+    const content = editor.value;
 
-    if (keys.length === 0) {
+    if (!content.trim()) {
         showToast(currentTranslations.msgNoQGLKeys || 'No QGL keys entered.');
         return;
     }
 
-    if (isGlobal) {
-        _qglProfilesCache.global = {
-            keys: keys,
-            enabled: enabledToggle.checked
-        };
-    } else {
-        const pkg = _currentEditPkg;
-        if (!pkg) return;
-        if (!_qglProfilesCache.apps) _qglProfilesCache.apps = {};
-        _qglProfilesCache.apps[pkg] = {
-            keys: keys,
-            enabled: enabledToggle.checked
-        };
+    setLoading(true);
+    try {
+        let targetPath;
+        if (isGlobal) {
+            targetPath = `${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}`;
+        } else {
+            const pkg = _currentEditPkg;
+            if (!pkg) return;
+            targetPath = `${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}.${pkg}`;
+        }
+
+        const safeContent = content.replace(/'/g, "'\\''");
+        const tmpPath = targetPath + '.tmp';
+        const res = await exec(`printf '%s' '${safeContent}' > "${tmpPath}" && mv -f "${tmpPath}" "${targetPath}"`);
+
+        if (res && res.errno === 0) {
+            const lines = content.split('\n').filter(l => l.trim()).length;
+            logToTerminal(`QGL profile saved for ${isGlobal ? 'global' : _currentEditPkg} (${lines} lines)`, 'success');
+            incrementStat('configChanges');
+        } else {
+            logToTerminal('Failed to save QGL profile', 'error');
+        }
+    } catch (e) {
+        logToTerminal('Failed to save QGL profile: ' + (e.message || e), 'error');
+    } finally {
+        setLoading(false);
     }
 
-    await saveQGLProfiles();
     closeQGLModal('appProfileModal');
     renderAppProfilesList();
 
     const t = currentTranslations;
     showToast(isGlobal
-        ? (t.msgGlobalQGLSaved || '✅ Global QGL profile saved')
-        : `${t.msgAppProfileSaved || '✅ App QGL profile saved'} (${keys.length} keys)`);
-    logToTerminal(`✅ QGL profile saved for ${isGlobal ? 'global' : _currentEditPkg} (${keys.length} keys)`, 'success');
+        ? (t.msgGlobalQGLSaved || 'Global QGL profile saved')
+        : `${t.msgAppProfileSaved || 'App QGL profile saved'}`);
 }
 
 async function deleteAppProfile(pkg) {
-    if (!_qglProfilesCache || !_qglProfilesCache.apps) return;
-
     const confirmed = await ConfirmDialog.show(
         currentTranslations.confirmDeleteProfileTitle || 'Delete Profile',
         currentTranslations.confirmDeleteProfileMsg || `Are you sure you want to delete the QGL profile for ${pkg}?`,
@@ -5698,12 +5698,19 @@ async function deleteAppProfile(pkg) {
     );
     if (!confirmed) return;
 
-    delete _qglProfilesCache.apps[pkg];
-    await saveQGLProfiles();
-    renderAppProfilesList();
+    setLoading(true);
+    try {
+        const filePath = `${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}.${pkg}`;
+        await exec(`rm -f "${filePath}"`);
+        logToTerminal(`Deleted QGL profile for ${pkg}`, 'info');
+    } catch (e) {
+        logToTerminal('Failed to delete QGL profile: ' + (e.message || e), 'error');
+    } finally {
+        setLoading(false);
+    }
 
-    showToast(currentTranslations.msgAppProfileDeleted || '🗑️ App profile deleted');
-    logToTerminal(`🗑️ Deleted QGL profile for ${pkg}`, 'info');
+    renderAppProfilesList();
+    showToast(currentTranslations.msgAppProfileDeleted || 'App profile deleted');
 }
 
 async function openAppPicker() {
@@ -5725,7 +5732,7 @@ async function openAppPicker() {
         }
 
         const packages = res.stdout.trim().split('\n').filter(p => p.trim());
-        const existingApps = _qglProfilesCache && _qglProfilesCache.apps ? Object.keys(_qglProfilesCache.apps) : [];
+        const existingApps = _perAppProfilesCache ? Object.keys(_perAppProfilesCache) : [];
 
         list.innerHTML = '';
         packages.forEach(pkg => {

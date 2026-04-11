@@ -21,6 +21,8 @@ private const val NOTIFICATION_ID = 1001
 private const val QGL_TARGET = "/data/vendor/gpu/qgl_config.txt"
 private const val QGL_DIR = "/data/vendor/gpu"
 private const val SELINUX_CONTEXT = "u:object_r:same_process_hal_file:s0"
+private const val CONFIG_DIR_SD = "/sdcard/Adreno_Driver/Config"
+private const val CONFIG_DIR_DATA = "/data/local/tmp"
 
 private val SYSTEM_UI_PACKAGES = setOf(
     "com.android.systemui",
@@ -42,6 +44,7 @@ class QGLAccessibilityService : AccessibilityService() {
 
     private var lastAppPackage: String? = null
     private var lastSwitchTime: Long = 0L
+    private var lastAppliedConfig: String? = null
 
     @Volatile private var persistentShell: Process? = null
     @Volatile private var shellStdin: DataOutputStream? = null
@@ -92,26 +95,46 @@ class QGLAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun findConfigFile(packageName: String): String? {
+        val perAppFileName = "qgl_config.txt.$packageName"
+        val defaultFileName = "qgl_config.txt"
+
+        for (dir in listOf(CONFIG_DIR_SD, CONFIG_DIR_DATA)) {
+            val perApp = java.io.File(dir, perAppFileName)
+            if (perApp.exists() && perApp.canRead() && perApp.length() > 0) {
+                Log.d(TAG, "Found per-app config for $packageName at ${perApp.absolutePath}")
+                return perApp.absolutePath
+            }
+        }
+
+        for (dir in listOf(CONFIG_DIR_SD, CONFIG_DIR_DATA)) {
+            val default = java.io.File(dir, defaultFileName)
+            if (default.exists() && default.canRead() && default.length() > 0) {
+                Log.d(TAG, "Using default config for $packageName from ${default.absolutePath}")
+                return default.absolutePath
+            }
+        }
+
+        return null
+    }
+
     private fun handleAppSwitch(packageName: String) {
-        val baselineFlag = java.io.File("/data/vendor/gpu/.qgl_boot_baseline_ready")
-        var waited = 0L
-        while (!baselineFlag.exists() && waited < 15000L) {
-            Thread.sleep(500)
-            waited += 500
-        }
-        if (!baselineFlag.exists()) {
-            Log.w(TAG, "Boot baseline flag not found after ${waited}ms — skipping QGL for $packageName")
+        val srcPath = findConfigFile(packageName)
+        if (srcPath == null) {
+            Log.d(TAG, "No QGL config found for $packageName, skipping")
             return
         }
 
-        val keys = ProfileManager.getKeysForPackage(packageName)
-        if (keys.isNullOrEmpty()) {
-            Log.d(TAG, "No QGL profile configured for $packageName, skipping")
+        val srcFile = java.io.File(srcPath)
+        val contentHash = srcFile.absolutePath + ":" + srcFile.lastModified()
+        if (contentHash == lastAppliedConfig) {
+            Log.d(TAG, "Same config already applied for $packageName, skipping")
             return
         }
 
-        Log.d(TAG, "Applying QGL config for $packageName with ${keys.size} keys")
-        executeQGLWrite(packageName, keys)
+        Log.d(TAG, "Applying QGL config for $packageName from $srcPath")
+        executeQGLCopy(srcPath)
+        lastAppliedConfig = contentHash
     }
 
     private fun getOrCreateShell(): DataOutputStream? {
@@ -187,34 +210,28 @@ class QGLAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun executeQGLWrite(packageName: String, keys: List<String>) {
+    private fun executeQGLCopy(srcPath: String) {
         val stdin = getOrCreateShell() ?: run {
-            Log.e(TAG, "No root shell available for $packageName")
+            Log.e(TAG, "No root shell available")
             return
         }
 
-        val magicHeader = "0x0=0x8675309"
         val tmpFile = "${QGL_TARGET}.tmp.${android.os.Process.myPid()}"
         val cmds = mutableListOf<String>()
 
         cmds.add("mkdir -p $QGL_DIR 2>/dev/null")
         cmds.add("chcon $SELINUX_CONTEXT $QGL_DIR 2>/dev/null || true")
-        cmds.add("{")
-        cmds.add("printf '%s\\n' '$magicHeader'")
-        for (key in keys) {
-            val escaped = key.replace("'", "'\\''")
-            cmds.add("printf '%s\\n' '$escaped'")
-        }
-        cmds.add("} > $tmpFile 2>/dev/null")
+        cmds.add("cp -f '$srcPath' $tmpFile 2>/dev/null || echo QGL_WRITE_FAIL")
         cmds.add("chcon $SELINUX_CONTEXT $tmpFile 2>/dev/null || true")
         cmds.add("mv -f $tmpFile $QGL_TARGET 2>/dev/null || echo QGL_WRITE_FAIL")
         cmds.add("touch $QGL_TARGET 2>/dev/null || true")
         cmds.add("chcon $SELINUX_CONTEXT $QGL_TARGET 2>/dev/null || true")
 
         if (writeToShell(cmds)) {
-            Log.d(TAG, "QGL config applied for $packageName (${keys.size} keys)")
+            Log.d(TAG, "QGL config applied from $srcPath")
         } else {
-            Log.w(TAG, "Failed to write QGL config for $packageName, shell will respawn")
+            Log.w(TAG, "Failed to write QGL config from $srcPath, shell will respawn")
+            lastAppliedConfig = null
         }
     }
 
