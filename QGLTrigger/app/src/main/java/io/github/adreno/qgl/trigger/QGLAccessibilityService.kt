@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -13,8 +14,6 @@ import java.io.IOException
 import java.io.InputStreamReader
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-
-private data class QGLConfigResult(val srcPath: String?, val isNoQGL: Boolean)
 
 private const val TAG = "QGLTrigger"
 private const val DEBOUNCE_MS = 2000L
@@ -84,6 +83,15 @@ class QGLAccessibilityService : AccessibilityService() {
             return
         }
 
+        val componentName = event.componentName
+        if (componentName != null) {
+            try {
+                packageManager.getActivityInfo(componentName, 0)
+            } catch (_: PackageManager.NameNotFoundException) {
+                return
+            }
+        }
+
         val now = System.currentTimeMillis()
         if (packageName == lastAppPackage && (now - lastSwitchTime) < DEBOUNCE_MS) {
             return
@@ -98,67 +106,126 @@ class QGLAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun findConfigFile(packageName: String): QGLConfigResult {
-        val perAppFileName = "qgl_config.txt.$packageName"
-        val defaultFileName = "qgl_config.txt"
+    private fun queryQGLState(packageName: String): Triple<String, String?, String> {
+        val script = """
+            if [ -f $QGL_DISABLED_MARKER ]; then
+                echo "DISABLED"
+            else
+                pkg='$packageName'
+                _r="NONE"
+                _m="0"
+                for dir in $CONFIG_DIR_DATA $CONFIG_DIR_SD; do
+                    f="${'$'}dir/qgl_config.txt.${'$'}pkg"
+                    [ -f "${'$'}f" ] || continue
+                    if [ -s "${'$'}f" ]; then _r="PATH:${'$'}f"; _m=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null || echo '0'); else _r="NOQGL"; fi
+                    break
+                done
+                if [ "${'$'}_r" = "NONE" ]; then
+                    for dir in $CONFIG_DIR_DATA $CONFIG_DIR_SD; do
+                        f="${'$'}dir/qgl_config.txt"
+                        [ -f "${'$'}f" ] && [ -s "${'$'}f" ] && { _r="PATH:${'$'}f"; _m=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null || echo '0'); break; }
+                    done
+                fi
+                echo "${'$'}_r"
+                echo "${'$'}_m"
+            fi
+        """.trimIndent()
 
-        for (dir in listOf(CONFIG_DIR_SD, CONFIG_DIR_DATA)) {
-            val perApp = java.io.File(dir, perAppFileName)
-            if (perApp.exists() && perApp.canRead()) {
-                if (perApp.length() == 0L) {
-                    Log.d(TAG, "No-QGL profile for $packageName (empty file at ${perApp.absolutePath})")
-                    return QGLConfigResult(srcPath = null, isNoQGL = true)
+        val output = runShellScript(script)
+        val lines = output.lines().filter { it.isNotBlank() }
+
+        return when {
+            lines.isEmpty() -> Triple("NONE", null, "0")
+            lines[0] == "DISABLED" -> Triple("DISABLED", null, "0")
+            lines[0] == "NOQGL" -> Triple("NOQGL", null, "0")
+            lines[0].startsWith("PATH:") -> {
+                val path = lines[0].substring(5)
+                val mtime = lines.getOrElse(1) { "0" }
+                Triple("PATH", path, mtime)
+            }
+            else -> Triple("NONE", null, "0")
+        }
+    }
+
+    private fun runShellScript(script: String): String {
+        val stdin: DataOutputStream
+        val stdout: BufferedReader
+        synchronized(shellLock) {
+            stdin = shellStdin ?: return "NONE"
+            stdout = shellStdout ?: return "NONE"
+        }
+
+        return try {
+            val marker = "QGL_RESULT_${android.os.Process.myPid()}_${System.nanoTime()}"
+            stdin.writeBytes("{ $script; } 2>/dev/null\n")
+            stdin.writeBytes("echo $marker\n")
+            stdin.flush()
+
+            val buf = CharArray(4096)
+            val sb = StringBuilder()
+            val deadline = System.currentTimeMillis() + 5000
+            while (System.currentTimeMillis() < deadline) {
+                if (stdout.ready()) {
+                    val n = stdout.read(buf)
+                    if (n > 0) sb.append(buf, 0, n)
+                    if (sb.contains(marker)) {
+                        val output = sb.toString()
+                        val markerIdx = output.lastIndexOf(marker)
+                        return output.substring(0, markerIdx).trimEnd()
+                    }
+                } else {
+                    Thread.sleep(50)
                 }
-                Log.d(TAG, "Found per-app config for $packageName at ${perApp.absolutePath}")
-                return QGLConfigResult(srcPath = perApp.absolutePath, isNoQGL = false)
             }
-        }
-
-        for (dir in listOf(CONFIG_DIR_SD, CONFIG_DIR_DATA)) {
-            val default = java.io.File(dir, defaultFileName)
-            if (default.exists() && default.canRead() && default.length() > 0) {
-                Log.d(TAG, "Using default config for $packageName from ${default.absolutePath}")
-                return QGLConfigResult(srcPath = default.absolutePath, isNoQGL = false)
+            Log.w(TAG, "runShellScript timed out")
+            "NONE"
+        } catch (e: IOException) {
+            Log.w(TAG, "runShellScript failed", e)
+            synchronized(shellLock) {
+                persistentShell?.destroyForcibly()
+                persistentShell = null
+                shellStdin = null
+                shellStdout = null
             }
+            "NONE"
         }
-
-        return QGLConfigResult(srcPath = null, isNoQGL = false)
     }
 
     private fun handleAppSwitch(packageName: String) {
-        if (java.io.File(QGL_DISABLED_MARKER).exists()) {
-            if (lastAppliedConfig == "NO_QGL") {
-                Log.d(TAG, "QGL disabled marker present, already in no-QGL state, skipping")
-                return
-            }
-            Log.d(TAG, "QGL disabled marker present — removing QGL config")
-            executeQGLRemove()
-            lastAppliedConfig = "NO_QGL"
-            return
-        }
+        val (state, srcPath, mtime) = queryQGLState(packageName)
 
-        val result = findConfigFile(packageName)
-
-        if (result.isNoQGL) {
-            if (lastAppliedConfig == "NO_QGL") {
-                Log.d(TAG, "Already in no-QGL state for $packageName, skipping")
-                return
+        when (state) {
+            "DISABLED" -> {
+                if (lastAppliedConfig == "NO_QGL") {
+                    Log.d(TAG, "QGL disabled marker present, already in no-QGL state, skipping")
+                    return
+                }
+                Log.d(TAG, "QGL disabled marker present — removing QGL config")
+                executeQGLRemove()
+                lastAppliedConfig = "NO_QGL"
             }
-            Log.d(TAG, "Removing QGL config for no-QGL app: $packageName")
-            executeQGLRemove()
-            lastAppliedConfig = "NO_QGL"
-        } else if (result.srcPath != null) {
-            val srcFile = java.io.File(result.srcPath)
-            val contentHash = srcFile.absolutePath + ":" + srcFile.lastModified()
-            if (contentHash == lastAppliedConfig) {
-                Log.d(TAG, "Same config already applied for $packageName, skipping")
-                return
+            "NOQGL" -> {
+                if (lastAppliedConfig == "NO_QGL") {
+                    Log.d(TAG, "Already in no-QGL state for $packageName, skipping")
+                    return
+                }
+                Log.d(TAG, "Removing QGL config for no-QGL app: $packageName")
+                executeQGLRemove()
+                lastAppliedConfig = "NO_QGL"
             }
-            Log.d(TAG, "Applying QGL config for $packageName from ${result.srcPath}")
-            executeQGLCopy(result.srcPath)
-            lastAppliedConfig = contentHash
-        } else {
-            Log.d(TAG, "No QGL config found for $packageName, skipping")
+            "PATH" -> {
+                val contentHash = "$srcPath:$mtime"
+                if (contentHash == lastAppliedConfig) {
+                    Log.d(TAG, "Same config already applied for $packageName, skipping")
+                    return
+                }
+                Log.d(TAG, "Applying QGL config for $packageName from $srcPath")
+                executeQGLCopy(srcPath)
+                lastAppliedConfig = contentHash
+            }
+            else -> {
+                Log.d(TAG, "No QGL config found for $packageName, skipping")
+            }
         }
     }
 
@@ -236,7 +303,7 @@ class QGLAccessibilityService : AccessibilityService() {
     }
 
     private fun executeQGLCopy(srcPath: String) {
-        val stdin = getOrCreateShell() ?: run {
+        getOrCreateShell() ?: run {
             Log.e(TAG, "No root shell available")
             return
         }
@@ -248,9 +315,15 @@ class QGLAccessibilityService : AccessibilityService() {
         cmds.add("chcon $SELINUX_CONTEXT $QGL_DIR 2>/dev/null || true")
         cmds.add("cp -f '$srcPath' $tmpFile 2>/dev/null || echo QGL_WRITE_FAIL")
         cmds.add("chcon $SELINUX_CONTEXT $tmpFile 2>/dev/null || true")
-        cmds.add("mv -f $tmpFile $QGL_TARGET 2>/dev/null || echo QGL_WRITE_FAIL")
-        cmds.add("touch $QGL_TARGET 2>/dev/null || true")
-        cmds.add("chcon $SELINUX_CONTEXT $QGL_TARGET 2>/dev/null || true")
+        cmds.add("chmod 0644 $tmpFile 2>/dev/null || true")
+        cmds.add("if mv -f $tmpFile $QGL_TARGET 2>/dev/null; then")
+        cmds.add("  touch $QGL_TARGET 2>/dev/null || true")
+        cmds.add("  chcon $SELINUX_CONTEXT $QGL_TARGET 2>/dev/null || true")
+        cmds.add("  chmod 0644 $QGL_TARGET 2>/dev/null || true")
+        cmds.add("else")
+        cmds.add("  rm -f $tmpFile 2>/dev/null || true")
+        cmds.add("  echo QGL_WRITE_FAIL")
+        cmds.add("fi")
 
         if (writeToShell(cmds)) {
             Log.d(TAG, "QGL config applied from $srcPath")

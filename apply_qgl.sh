@@ -164,10 +164,12 @@ if [ "$MODE" = "boot" ]; then
 
   touch "$_qtmp" 2>/dev/null || true
   chcon u:object_r:same_process_hal_file:s0 "$_qtmp" 2>/dev/null || true
+  chmod 0644 "$_qtmp" 2>/dev/null || true
 
   if mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
     touch "$QGL_TARGET" 2>/dev/null || true
     chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
+    chmod 0644 "$QGL_TARGET" 2>/dev/null || true
 
     _lines=$(wc -l < "$QGL_TARGET" 2>/dev/null || echo '?')
     _qgl_log "[BOOT] QGL applied successfully ($_lines lines)"
@@ -235,10 +237,12 @@ elif [ "$MODE" = "apply-now" ]; then
 
   touch "$_qtmp" 2>/dev/null || true
   chcon u:object_r:same_process_hal_file:s0 "$_qtmp" 2>/dev/null || true
+  chmod 0644 "$_qtmp" 2>/dev/null || true
 
   if mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
     touch "$QGL_TARGET" 2>/dev/null || true
     chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
+    chmod 0644 "$QGL_TARGET" 2>/dev/null || true
     _lines=$(wc -l < "$QGL_TARGET" 2>/dev/null || echo '?')
     _qgl_log "[APPLY-NOW] QGL applied successfully ($_lines lines)"
     _qgl_diag "APPLY_NOW_RESULT: SUCCESS - $_lines lines from $_qsrc"
@@ -262,6 +266,7 @@ elif [ "$MODE" = "apply-now" ]; then
           *.disabled|*.tmp|*.tmp.*) continue ;;
         esac
         if cp -f "$_f" "$_dt_qgl_dir/$_base" 2>/dev/null; then
+          chmod 0644 "$_dt_qgl_dir/$_base" 2>/dev/null || true
           _count=$((_count + 1))
         fi
       done

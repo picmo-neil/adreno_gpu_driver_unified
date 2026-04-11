@@ -290,11 +290,11 @@ else
         if [ -f "$QGL_TEMP" ] && [ -s "$QGL_TEMP" ]; then
           _qgl_diag "FILE_OP: cp succeeded, size: $(wc -c < "$QGL_TEMP" 2>/dev/null || echo '?') bytes"
           
-          # LYB COMPAT: touch (NO chmod, NO chown per ADR-008)
           touch "$QGL_TEMP" 2>/dev/null || true
           
           # Set SELinux context on temp file BEFORE mv (avoids window with wrong context)
           chcon u:object_r:same_process_hal_file:s0 "$QGL_TEMP" 2>/dev/null || true
+          chmod 0644 "$QGL_TEMP" 2>/dev/null || true
           
           # Atomic rename — mv overwrites target atomically, no rm needed
           if mv -f "$QGL_TEMP" "$QGL_TARGET" 2>/dev/null; then
@@ -307,6 +307,7 @@ else
               
               # Re-verify SELinux context on final file
               chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
+              chmod 0644 "$QGL_TARGET" 2>/dev/null || true
               
               # Verify
               EXPECTED_SIZE=$(stat -c%s "$MODDIR/qgl_config.txt" 2>/dev/null || echo 0)

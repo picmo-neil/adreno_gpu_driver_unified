@@ -18,7 +18,7 @@ on:
       - 'module.prop'
       - 'adreno_config.txt'
       - 'qgl_config.txt'
-      - 'qgl_profiles.json'
+      - 'webroot/**'
       - 'apply_qgl.sh'
       - 'QGLTrigger/**'
       - 'AGENTS.md'
@@ -235,7 +235,7 @@ jobs:
             customize.sh post-fs-data.sh service.sh uninstall.sh \
             boot-completed.sh apply_qgl.sh \
             common.sh \
-            adreno_config.txt qgl_config.txt qgl_profiles.json sepolicy.rule \
+            adreno_config.txt qgl_config.txt sepolicy.rule \
             files.sh banner AGENTS.md; do
             [ -f "$f" ] && cp "$f" "${S}/" && echo "  + $f"
           done

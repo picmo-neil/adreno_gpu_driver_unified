@@ -720,6 +720,7 @@ if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ]; then
       [ -f "$_f" ] || continue
       _base="${_f##*/}"
       if cp -f "$_f" "$_dt_qgl_dir/$_base" 2>/dev/null; then
+        chmod 0644 "$_dt_qgl_dir/$_base" 2>/dev/null || true
         _count=$((_count + 1))
       fi
     done

@@ -20,7 +20,7 @@ QGL=n
 # Only applies when QGL=y. Ignored entirely when QGL=n.
 #
 # y = per-app mode: QGLTrigger APK (AccessibilityService) monitors every app
-#     switch and applies the matching profile from qgl_profiles.json atomically.
+#     switch and applies the matching qgl_config.txt.<package> file atomically.
 #     The APK is auto-installed and root-granted during module flash.
 #
 # n = static mode: a single qgl_config.txt is written once at boot from the
