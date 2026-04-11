@@ -497,6 +497,9 @@ const DEFAULT_EN = {
     qglSub: "Reminder: Better to use lyb kernel manager",
     qglPerappName: "Per-App QGL",
     qglPerappDesc: "APK applies matching QGL profile at each app launch (like LYB). Off = single static config at boot.",
+    qglSystemAppsName: "QGL for System Apps",
+    qglSystemAppsDesc: "Off (default) = skip system apps. On = apply QGL to ALL apps — may cause black screen.",
+    qglSystemAppsCaution: "⚠️ Enabling QGL for system apps may cause black screen on some devices. The AccessibilityService will apply QGL to SystemUI, launcher, and other system apps — these already have active Vulkan devices that cannot re-read the config. Only enable if you understand the risk.",
     skiavkPerappWarning: "⚠️ skiavk + Per-App QGL Off: Apps launched before boot_completed+3s receive NO QGL config at Vulkan init time. This degrades benchmark scores.",
     applyQGLNowTitle: "Apply QGL Config Now",
     applyQGLNowDesc: "Apply QGL changes immediately without rebooting. Copies or removes the QGL config file and mirrors per-app profiles. Kill & reopen apps to see effect.",
@@ -803,6 +806,9 @@ const BUILTIN_ZH_CN = {
     qglSub: "提醒：最好使用 lyb Kernel Manager",
     qglPerappName: "Per-App QGL",
     qglPerappDesc: "APK在每次应用启动时应用匹配的QGL配置（类似LYB）。关闭=启动时单一静态配置。",
+    qglSystemAppsName: "系统应用QGL",
+    qglSystemAppsDesc: "关闭（默认）=跳过系统应用。开启=对所有应用应用QGL — 可能导致黑屏。",
+    qglSystemAppsCaution: "⚠️ 启用系统应用QGL可能导致某些设备黑屏。无障碍服务会将QGL应用到系统界面、启动器等系统应用 — 这些应用已有活动的Vulkan设备，无法重新读取配置。仅在了解风险的情况下启用。",
     skiavkPerappWarning: "⚠️ skiavk + Per-App QGL关闭：boot_completed+3秒前启动的应用在Vulkan初始化时无法获得QGL配置。这会降低基准测试分数。",
     applyQGLNowTitle: "立即应用QGL配置",
     applyQGLNowDesc: "无需重启，立即应用QGL更改。复制或删除QGL配置文件并同步Per-App配置。关闭并重新打开应用以查看效果。",
@@ -1109,6 +1115,9 @@ const BUILTIN_ZH_TW = {
     qglSub: "提醒：最好使用 lyb Kernel Manager",
     qglPerappName: "Per-App QGL",
     qglPerappDesc: "APK在每次應用程式啟動時套用相符的QGL設定（類似LYB）。關閉=開機時單一靜態設定。",
+    qglSystemAppsName: "系統應用QGL",
+    qglSystemAppsDesc: "關閉（預設）=跳過系統應用。開啟=對所有應用套用QGL — 可能導致黑畫面。",
+    qglSystemAppsCaution: "⚠️ 啟用系統應用QGL可能導致某些裝置黑畫面。無障礙服務會將QGL套用到系統介面、啟動器等系統應用 — 這些應用已有活動的Vulkan裝置，無法重新讀取設定。僅在了解風險的情況下啟用。",
     skiavkPerappWarning: "⚠️ skiavk + Per-App QGL關閉：boot_completed+3秒前啟動的應用程式在Vulkan初始化時無法獲得QGL設定。這會降低基準測試分數。",
     applyQGLNowTitle: "立即套用QGL設定",
     applyQGLNowDesc: "無需重啟，立即套用QGL變更。複製或移除QGL設定檔並同步Per-App設定。關閉並重新開啟應用程式以查看效果。",
@@ -1973,18 +1982,22 @@ async function loadConfig() {
     setToggle('PLT', config.PLT);
     setToggle('QGL', config.QGL);
     setToggle('QGL_PERAPP', config.QGL_PERAPP);
+    setToggle('QGL_SYSTEM_APPS', config.QGL_SYSTEM_APPS);
     setToggle('ARM64_OPT', config.ARM64_OPT);
     setToggle('VERBOSE', config.VERBOSE);
     setSelect('RENDER_MODE', config.RENDER_MODE);
     // Show/hide QGL_PERAPP row based on QGL state
     const _qglPerappRow = document.getElementById('qglPerappRow');
     if (_qglPerappRow) _qglPerappRow.style.display = config.QGL === 'y' ? '' : 'none';
+    // Show/hide QGL_SYSTEM_APPS row based on QGL + QGL_PERAPP state
+    const _qglSystemAppsRow = document.getElementById('qglSystemAppsRow');
+    if (_qglSystemAppsRow) _qglSystemAppsRow.style.display = (config.QGL === 'y' && config.QGL_PERAPP === 'y') ? '' : 'none';
     // Update Per-App QGL section visibility after config loads
-    setTimeout(() => {
+    requestAnimationFrame(() => {
         try {
             updatePerAppSectionVisibility();
         } catch(e) { console.error('updatePerAppSectionVisibility error:', e); }
-    }, 100);
+    });
     // Load FORCE_SKIAVKTHREADED_BACKEND toggle
     const _ftb = document.getElementById('FORCE_SKIAVKTHREADED_BACKEND');
     if (_ftb) _ftb.checked = config.FORCE_SKIAVKTHREADED_BACKEND === 'y';
@@ -2591,9 +2604,11 @@ async function applyQGLNow() {
     setLoading(true);
     const qglToggle = document.getElementById('QGL');
     const qglPerappToggle = document.getElementById('QGL_PERAPP');
+    const qglSystemAppsToggle = document.getElementById('QGL_SYSTEM_APPS');
     const qglEnabled = qglToggle ? qglToggle.checked : false;
     const qglPerapp = qglPerappToggle ? qglPerappToggle.checked : false;
-    logToTerminal(`Applying QGL NOW: QGL=${qglEnabled ? 'y' : 'n'} QGL_PERAPP=${qglPerapp ? 'y' : 'n'}`, 'info');
+    const qglSystemApps = qglSystemAppsToggle ? qglSystemAppsToggle.checked : false;
+    logToTerminal(`Applying QGL NOW: QGL=${qglEnabled ? 'y' : 'n'} QGL_PERAPP=${qglPerapp ? 'y' : 'n'} QGL_SYSTEM_APPS=${qglSystemApps ? 'y' : 'n'}`, 'info');
 
     try {
         const adrenoConfigPath = '/sdcard/Adreno_Driver/Config/adreno_config.txt';
@@ -2610,10 +2625,11 @@ async function applyQGLNow() {
         const lines = configContent.split('\n');
         const filtered = lines.filter(l => {
             const trimmed = l.trim();
-            return !trimmed.startsWith('QGL=') && !trimmed.startsWith('QGL_PERAPP=');
+            return !trimmed.startsWith('QGL=') && !trimmed.startsWith('QGL_PERAPP=') && !trimmed.startsWith('QGL_SYSTEM_APPS=');
         });
         filtered.push(`QGL=${qglEnabled ? 'y' : 'n'}`);
         filtered.push(`QGL_PERAPP=${qglPerapp ? 'y' : 'n'}`);
+        filtered.push(`QGL_SYSTEM_APPS=${qglSystemApps ? 'y' : 'n'}`);
         const newContent = filtered.join('\n');
 
         const tmpPath = `${adrenoConfigPath}.tmp`;
@@ -2677,13 +2693,14 @@ async function saveConfig() {
     const plt           = getValue('PLT');
     const qgl           = getValue('QGL');
     const qglPerapp     = getValue('QGL_PERAPP');
+    const qglSystemApps = getValue('QGL_SYSTEM_APPS');
     const arm           = getValue('ARM64_OPT');
     const verbose       = getValue('VERBOSE');
     const forceThreaded = getValue('FORCE_SKIAVKTHREADED_BACKEND');
     const theme         = currentTheme || 'purple';
 
     const writeConfig = (path) =>
-        exec(`printf 'PLT=%s\\nQGL=%s\\nQGL_PERAPP=%s\\nARM64_OPT=%s\\nVERBOSE=%s\\nRENDER_MODE=%s\\nFORCE_SKIAVKTHREADED_BACKEND=%s\\nTHEME=%s\\n' '${plt}' '${qgl}' '${qglPerapp}' '${arm}' '${verbose}' '${finalRenderMode}' '${forceThreaded}' '${theme}' > "${path}" 2>/dev/null`);
+        exec(`printf 'PLT=%s\\nQGL=%s\\nQGL_PERAPP=%s\\nQGL_SYSTEM_APPS=%s\\nARM64_OPT=%s\\nVERBOSE=%s\\nRENDER_MODE=%s\\nFORCE_SKIAVKTHREADED_BACKEND=%s\\nTHEME=%s\\n' '${plt}' '${qgl}' '${qglPerapp}' '${qglSystemApps}' '${arm}' '${verbose}' '${finalRenderMode}' '${forceThreaded}' '${theme}' > "${path}" 2>/dev/null`);
 
     await writeConfig(`${SD_CONFIG}/adreno_config.txt`);
     await writeConfig(`${MOD_PATH}/adreno_config.txt`);
@@ -4841,10 +4858,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         cb.addEventListener('change', () => syncSettingRowState(cb));
     });
 
-    // QGL toggle: show/hide QGL_PERAPP row
+    // QGL toggle: show/hide QGL_PERAPP and QGL_SYSTEM_APPS rows
     document.getElementById('QGL')?.addEventListener('change', (e) => {
         const _qpr = document.getElementById('qglPerappRow');
         if (_qpr) _qpr.style.display = e.target.checked ? '' : 'none';
+        const _qsr = document.getElementById('qglSystemAppsRow');
+        const _qpa = document.getElementById('QGL_PERAPP')?.checked || false;
+        if (_qsr) _qsr.style.display = (e.target.checked && _qpa) ? '' : 'none';
     });
 
     // skiavk + QGL_PERAPP=n warning
@@ -4914,13 +4934,32 @@ document.addEventListener('DOMContentLoaded', async () => {
         } catch(e) { console.error('updatePerAppSectionVisibility error:', e); }
     }
 
-    // Initialize visibility on load (wrapped in setTimeout to ensure DOM is ready)
-    setTimeout(() => {
+    // Initialize visibility on load
+    requestAnimationFrame(() => {
         try {
             updatePerAppSectionVisibility();
         } catch(e) { console.error('updatePerAppSectionVisibility init error:', e); }
-    }, 100);
+    });
     // Update on toggle changes
+    // QGL_SYSTEM_APPS caution dialog
+    document.getElementById('QGL_SYSTEM_APPS')?.addEventListener('change', async (e) => {
+        if (e.target.checked) {
+            const confirmed = await ConfirmDialog.show(
+                currentTranslations?.qglSystemAppsName || 'QGL for System Apps',
+                currentTranslations?.qglSystemAppsCaution || '⚠️ Enabling QGL for system apps may cause black screen on some devices. Only enable if you understand the risk.',
+                '⚠️'
+            );
+            if (!confirmed) {
+                e.target.checked = false;
+                const row = e.target.closest('.setting-item');
+                if (row) row.classList.remove('is-on');
+            } else {
+                const row = e.target.closest('.setting-item');
+                if (row) row.classList.add('is-on');
+            }
+        }
+    });
+
     document.getElementById('QGL')?.addEventListener('change', () => {
         setTimeout(() => {
             try { updatePerAppSectionVisibility(); } catch(e) { console.error(e); }
@@ -4928,7 +4967,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     document.getElementById('QGL_PERAPP')?.addEventListener('change', () => {
         setTimeout(() => {
-            try { updatePerAppSectionVisibility(); } catch(e) { console.error(e); }
+            try {
+                updatePerAppSectionVisibility();
+                const _qgl = document.getElementById('QGL')?.checked || false;
+                const _qpa = document.getElementById('QGL_PERAPP')?.checked || false;
+                const _qsr = document.getElementById('qglSystemAppsRow');
+                if (_qsr) _qsr.style.display = (_qgl && _qpa) ? '' : 'none';
+            } catch(e) { console.error(e); }
         }, 50);
     });
 
@@ -5110,7 +5155,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (confirmed) {
             setLoading(true);
             try {
-                const defaults = `PLT=n\nQGL=n\nQGL_PERAPP=y\nARM64_OPT=n\nVERBOSE=n\nRENDER_MODE=normal\nTHEME=purple`;
+                const defaults = `PLT=n\nQGL=n\nQGL_PERAPP=y\nQGL_SYSTEM_APPS=n\nARM64_OPT=n\nVERBOSE=n\nRENDER_MODE=normal\nTHEME=purple`;
                 const escapedDefaults = defaults.replace(/'/g, "'\\''");
                 await exec(`printf '%s\\n' '${escapedDefaults}' > "${SD_CONFIG}/adreno_config.txt"`);
                 await exec(`printf '%s\\n' '${escapedDefaults}' > "${MOD_PATH}/adreno_config.txt"`);
@@ -5339,17 +5384,54 @@ document.addEventListener('DOMContentLoaded', async () => {
 // PER-APP QGL PROFILES (File-based)
 // Per-app configs stored as qgl_config.txt.<package_name> in Config dir.
 // Default config is qgl_config.txt (no suffix).
+// No-QGL packages listed in no_qgl_packages.txt.
 // QGLTrigger APK copies the matching file to /data/vendor/gpu/qgl_config.txt.
 // ══════════════════════════════════════════════════════════════════════════
 
 const QGL_CONFIG_DIR = '/sdcard/Adreno_Driver/Config';
 const QGL_CONFIG_PREFIX = 'qgl_config.txt';
+const NO_QGL_PACKAGES_FILE = '/sdcard/Adreno_Driver/Config/no_qgl_packages.txt';
 let _perAppProfilesCache = null;
+let _noQglPackagesCache = new Set();
 let _currentEditPkg = null;
+
+async function addNoQGLPackage(pkg) {
+    if (!pkg || _noQglPackagesCache.has(pkg)) return;
+    const tmpPath = NO_QGL_PACKAGES_FILE + '.tmp';
+    await exec(`printf '%s\\n' '${pkg}' >> "${NO_QGL_PACKAGES_FILE}" 2>/dev/null`);
+    _noQglPackagesCache.add(pkg);
+}
+
+async function removeNoQGLPackage(pkg) {
+    if (!pkg) return;
+    const tmpPath = NO_QGL_PACKAGES_FILE + '.tmp';
+    const res = await exec(`cat "${NO_QGL_PACKAGES_FILE}" 2>/dev/null`);
+    if (res && res.stdout) {
+        const lines = res.stdout.split('\n').filter(l => l.trim() && l.trim() !== pkg);
+        if (lines.length > 0) {
+            const content = lines.join('\n') + '\n';
+            const safeContent = content.replace(/'/g, "'\\''");
+            await exec(`printf '%s' '${safeContent}' > "${tmpPath}" && mv -f "${tmpPath}" "${NO_QGL_PACKAGES_FILE}"`);
+        } else {
+            await exec(`printf '' > "${tmpPath}" && mv -f "${tmpPath}" "${NO_QGL_PACKAGES_FILE}"`);
+        }
+    }
+    _noQglPackagesCache.delete(pkg);
+}
 
 async function loadQGLProfiles() {
     const _isTempSuffix = (s) => s === 'disabled' || s === 'tmp' || s.startsWith('tmp.');
     try {
+        // Load no-QGL packages list
+        _noQglPackagesCache = new Set();
+        const noQglRes = await exec(`cat "${NO_QGL_PACKAGES_FILE}" 2>/dev/null`);
+        if (noQglRes && noQglRes.stdout && noQglRes.stdout.trim()) {
+            noQglRes.stdout.trim().split('\n').forEach(line => {
+                const pkg = line.trim();
+                if (pkg) _noQglPackagesCache.add(pkg);
+            });
+        }
+
         const res = await exec(`ls "${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}".* 2>/dev/null`);
         _perAppProfilesCache = {};
         if (res && res.stdout && res.stdout.trim()) {
@@ -5358,26 +5440,9 @@ async function loadQGLProfiles() {
                 const fileName = filePath.split('/').pop();
                 const suffix = fileName.substring(QGL_CONFIG_PREFIX.length + 1);
                 if (suffix && suffix.length > 0 && !_isTempSuffix(suffix)) {
-                    _perAppProfilesCache[suffix] = { filePath, exists: true, isNoQGL: false };
+                    _perAppProfilesCache[suffix] = { filePath, exists: true, isNoQGL: _noQglPackagesCache.has(suffix) };
                 }
             });
-            const pkgList = Object.keys(_perAppProfilesCache);
-            if (pkgList.length > 0) {
-                const emptyCheckCmd = pkgList.map(pkg =>
-                    `[ -f "${_perAppProfilesCache[pkg].filePath}" ] && [ ! -s "${_perAppProfilesCache[pkg].filePath}" ] && echo "EMPTY:${pkg}" || true`
-                ).join('; ');
-                const emptyRes = await exec(emptyCheckCmd);
-                if (emptyRes && emptyRes.stdout && emptyRes.stdout.trim()) {
-                    emptyRes.stdout.trim().split('\n').forEach(line => {
-                        if (line.startsWith('EMPTY:')) {
-                            const epkg = line.substring(6);
-                            if (_perAppProfilesCache[epkg]) {
-                                _perAppProfilesCache[epkg].isNoQGL = true;
-                            }
-                        }
-                    });
-                }
-            }
         }
         logToTerminal('QGL per-app profiles loaded', 'info');
     } catch (e) {
@@ -5621,14 +5686,21 @@ async function renderAppProfilesList() {
 
     await loadQGLProfiles();
 
-    if (!_perAppProfilesCache || Object.keys(_perAppProfilesCache).length === 0) {
+    if (!_perAppProfilesCache || (Object.keys(_perAppProfilesCache).length === 0 && _noQglPackagesCache.size === 0)) {
         if (noMsg) noMsg.style.display = '';
         return;
     }
 
     if (noMsg) noMsg.style.display = 'none';
 
-    Object.entries(_perAppProfilesCache).forEach(([pkg, info]) => {
+    // Merge no-QGL-only packages (in no_qgl_packages.txt but no qgl_config.txt.<pkg> file)
+    const allPkgs = new Set([...Object.keys(_perAppProfilesCache), ..._noQglPackagesCache]);
+    const sortedPkgs = [...allPkgs].sort();
+
+    sortedPkgs.forEach(pkg => {
+        const info = _perAppProfilesCache[pkg] || { filePath: '', exists: false, isNoQGL: true };
+        const isNoQGL = _noQglPackagesCache.has(pkg);
+        const hasFile = info.exists;
         const item = document.createElement('div');
         item.className = 'setting-item ripple-target hover-lift app-profile-item';
         item.dataset.pkg = pkg;
@@ -5644,7 +5716,7 @@ async function renderAppProfilesList() {
         title.textContent = pkg;
 
         const badge = document.createElement('span');
-        if (info.isNoQGL) {
+        if (isNoQGL) {
             badge.className = 'badge badge-danger';
             badge.textContent = 'NO QGL';
         } else {
@@ -5657,7 +5729,7 @@ async function renderAppProfilesList() {
 
         const desc = document.createElement('div');
         desc.className = 'setting-desc';
-        desc.textContent = info.isNoQGL
+        desc.textContent = isNoQGL
             ? (currentTranslations.noQGLProfileDesc || 'No QGL config for this app')
             : `qgl_config.txt.${pkg}`;
 
@@ -5714,18 +5786,17 @@ async function openAppProfileEditor(pkg) {
 
     _currentEditPkg = pkg;
     const isGlobal = pkg === '__global__';
+    const isNoQGL = !isGlobal && _noQglPackagesCache.has(pkg);
 
     let fileContent = '';
     if (isGlobal) {
         const res = await exec(`cat "${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}" 2>/dev/null`);
         fileContent = (res && res.stdout) ? res.stdout : '';
-    } else {
+    } else if (!isNoQGL) {
         const filePath = `${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}.${pkg}`;
         const res = await exec(`cat "${filePath}" 2>/dev/null`);
         fileContent = (res && res.stdout) ? res.stdout : '';
     }
-
-    const isNoQGL = !isGlobal && _perAppProfilesCache && _perAppProfilesCache[pkg] && _perAppProfilesCache[pkg].isNoQGL;
 
     title.textContent = isGlobal
         ? (currentTranslations.globalQGLProfile || 'Global QGL Profile')
@@ -5778,13 +5849,23 @@ async function saveAppProfile() {
         }
 
         let res;
-        if (!content.trim()) {
-            const tmpPath = targetPath + '.tmp';
-            res = await exec(`touch "${tmpPath}" && mv -f "${tmpPath}" "${targetPath}"`);
-        } else {
+        if (!content.trim() && !isGlobal) {
+            // Empty per-app content = add to no_qgl_packages.txt (no-QGL marker)
+            const pkg = _currentEditPkg;
+            await addNoQGLPackage(pkg);
+            // Remove any existing per-app config file
+            await exec(`rm -f "${targetPath}" 2>/dev/null`);
+            res = { errno: 0 };
+        } else if (content.trim()) {
             const safeContent = content.replace(/'/g, "'\\''");
             const tmpPath = targetPath + '.tmp';
             res = await exec(`printf '%s' '${safeContent}' > "${tmpPath}" && mv -f "${tmpPath}" "${targetPath}"`);
+            // If this package was in no-QGL list, remove it (now has custom config)
+            if (!isGlobal && _noQglPackagesCache.has(_currentEditPkg)) {
+                await removeNoQGLPackage(_currentEditPkg);
+            }
+        } else {
+            res = { errno: 0 };
         }
 
         if (res && res.errno === 0) {
@@ -5820,8 +5901,13 @@ async function deleteAppProfile(pkg) {
 
     setLoading(true);
     try {
+        // Remove per-app config file if it exists
         const filePath = `${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}.${pkg}`;
         await exec(`rm -f "${filePath}"`);
+        // Remove from no-QGL list if present
+        if (_noQglPackagesCache.has(pkg)) {
+            await removeNoQGLPackage(pkg);
+        }
         logToTerminal(`Deleted QGL profile for ${pkg}`, 'info');
     } catch (e) {
         logToTerminal('Failed to delete QGL profile: ' + (e.message || e), 'error');
@@ -5864,9 +5950,9 @@ async function openAppPicker() {
             pkg = pkg.trim();
             if (!pkg) return;
 
-            const hasProfile = existingApps.includes(pkg);
+            const hasProfile = existingApps.includes(pkg) || _noQglPackagesCache.has(pkg);
             const profileInfo = hasProfile && _perAppProfilesCache ? _perAppProfilesCache[pkg] : null;
-            const isNoQGL = profileInfo && profileInfo.isNoQGL;
+            const isNoQGL = _noQglPackagesCache.has(pkg);
 
             const item = document.createElement('div');
             item.className = 'setting-item app-picker-item';
@@ -5956,9 +6042,7 @@ async function showProfileTypeChoice(pkg) {
             cleanup();
             setLoading(true);
             try {
-                const filePath = `${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}.${pkg}`;
-                const tmpPath = filePath + '.tmp';
-                await exec(`touch "${tmpPath}" && mv -f "${tmpPath}" "${filePath}"`);
+                await addNoQGLPackage(pkg);
                 logToTerminal(`No-QGL profile set for ${pkg}`, 'success');
                 incrementStat('configChanges');
             } catch (e) {

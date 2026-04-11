@@ -30,6 +30,21 @@ QGL=n
 # Recommended: y (default)
 QGL_PERAPP=y
 
+# QGL for System Apps
+# Only applies when QGL=y and QGL_PERAPP=y.
+#
+# n = (default) skip system apps — the AccessibilityService ignores app switches
+#     from system apps (SystemUI, launcher, settings, etc.). This prevents black
+#     screens caused by applying QGL to apps that already have an active Vulkan
+#     device at switch time.
+#
+# y = apply QGL to ALL apps including system apps. Use with caution — may cause
+#     black screen on some devices if QGL is applied while the app's Vulkan
+#     device is already active.
+#
+# Recommended: n
+QGL_SYSTEM_APPS=n
+
 # ========================================
 # Advanced Options
 # ========================================

@@ -1782,6 +1782,13 @@ if [ -f "$MODPATH/qgl_config.txt" ]; then
   fi
 fi
 
+# Create no_qgl_packages.txt if not present
+if [ ! -f "$SD_CONFIG_DIR/no_qgl_packages.txt" ]; then
+  touch "$SD_CONFIG_DIR/no_qgl_packages.txt" 2>/dev/null && \
+    log_only "Created empty no_qgl_packages.txt" || \
+    log_only "WARNING: Failed to create no_qgl_packages.txt"
+fi
+
 # Install QGL Trigger APK silently (user enables via Settings > Accessibility)
 if [ -f "$MODPATH/QGLTrigger.apk" ]; then
   log_only "QGL Trigger APK bundled — install via: pm install $MODPATH/QGLTrigger.apk"

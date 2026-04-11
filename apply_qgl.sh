@@ -1,18 +1,16 @@
 #!/system/bin/sh
-# Adreno GPU Driver — Per-App QGL Config Applier
+# Adreno GPU Driver — QGL Config Applier
 #
-# Called by boot-completed.sh for the initial boot apply.
 # The QGL Trigger APK (AccessibilityService) handles runtime app switches
 # directly via cp — it does NOT call this script.
 #
 # USAGE:
-#   apply_qgl.sh --boot                  # Boot mode (from boot-completed.sh)
 #   apply_qgl.sh --apply-now             # Immediate apply (from WebUI)
 #
-# BEHAVIOR:
-#   1. Finds qgl_config.txt in /sdcard/Adreno_Driver/Config/ (or /data/local/tmp/)
-#   2. Copies to /data/vendor/gpu/qgl_config.txt atomically (tmp + chcon + mv)
-#   3. Sets SELinux context to same_process_hal_file on BOTH dir and file
+# BEHAVIOR (--apply-now):
+#   QGL=y → copies qgl_config.txt to target atomically, removes disabled
+#           marker, mirrors per-app configs to /data/local/tmp
+#   QGL=n → removes target, writes disabled marker
 #
 # FILE-BASED PER-APP QGL:
 #   Per-app configs are stored as qgl_config.txt.<package_name> in the Config dir.
@@ -76,26 +74,20 @@ for _lf in "$LOG_FILE" "$DIAG_FILE"; do
   fi
 done
 
-MODE=""
-PKG=""
 case "$1" in
-  --boot)
-    MODE="boot"
-    ;;
-  --apply-now)
-    MODE="apply-now"
-    ;;
+  --apply-now) ;;
   *)
-    _qgl_log "[FATAL] Unknown argument: $1 (only --boot and --apply-now are supported)"
+    _qgl_log "[FATAL] Unknown argument: $1 (only --apply-now is supported)"
     exit 1
     ;;
 esac
 
-_qgl_log "[START] apply_qgl.sh MODE=$MODE"
-_qgl_diag "APPLY_QGL.SH STARTED MODE=$MODE PID=$$"
+_qgl_log "[START] apply_qgl.sh --apply-now"
+_qgl_diag "APPLY_QGL.SH STARTED MODE=apply-now PID=$$"
 
 _qgl_enabled="n"
 _qgl_perapp="n"
+_qgl_system_apps="n"
 for _cfg in \
     "/sdcard/Adreno_Driver/Config/adreno_config.txt" \
     "/data/local/tmp/adreno_config.txt" \
@@ -105,119 +97,51 @@ for _cfg in \
     case "$_k" in
       QGL) case "$_v" in [Yy]*|1) _qgl_enabled="y" ;; esac ;;
       QGL_PERAPP) case "$_v" in [Yy]*|1) _qgl_perapp="y" ;; esac ;;
+      QGL_SYSTEM_APPS) case "$_v" in [Yy]*|1) _qgl_system_apps="y" ;; esac ;;
     esac
   done < "$_cfg"
   [ "$_qgl_enabled" = "y" ] && break
 done
 unset _cfg _k _v
 
-_qgl_log "[CFG] QGL=$_qgl_enabled QGL_PERAPP=$_qgl_perapp"
+_qgl_log "[CFG] QGL=$_qgl_enabled QGL_PERAPP=$_qgl_perapp QGL_SYSTEM_APPS=$_qgl_system_apps"
 
-if [ "$MODE" = "boot" ]; then
-
-  if [ "$_qgl_enabled" != "y" ]; then
-    _qgl_log "[SKIP] QGL disabled in adreno_config.txt"
-    exit 0
-  fi
-
-  _qgl_state_capture "BEFORE_OPERATIONS"
-
-  if ! mkdir -p "$QGL_DIR" 2>/dev/null; then
-    _qgl_log "[FATAL] mkdir -p $QGL_DIR failed"
-    exit 1
-  fi
-
-  chcon u:object_r:same_process_hal_file:s0 "$QGL_DIR" 2>/dev/null || true
-
-  _qsrc=""
-  for _dir in "$CONFIG_DIR_SD" "$CONFIG_DIR_DATA"; do
-    _f="$_dir/qgl_config.txt"
-    if [ -f "$_f" ] && [ -r "$_f" ]; then
-      _qsrc="$_f"
-      break
-    fi
-  done
-
-  if [ -z "$_qsrc" ]; then
-    for _dir in "$CONFIG_DIR_SD" "$CONFIG_DIR_DATA"; do
-      _f="$_dir/qgl_config.txt"
-      [ -f "$_f" ] && { _qsrc="$_f"; break; }
-    done
-
-    if [ -z "$_qsrc" ]; then
-      _qgl_log "[BOOT] ERROR: No QGL config source found"
-      _qgl_diag "BOOT_RESULT: FAIL - No config source"
-      exit 1
-    fi
-  fi
-
-  _qgl_log "[BOOT] Applying QGL from $_qsrc"
-  _qgl_diag "BOOT_SOURCE: $_qsrc"
-
-  _qtmp="${QGL_TARGET}.tmp.$$"
-
-  if ! cp -f "$_qsrc" "$_qtmp" 2>/dev/null; then
-    _qgl_log "[BOOT] FAILED: cp to temp file"
-    rm -f "$_qtmp" 2>/dev/null || true
-    exit 1
-  fi
-
-  touch "$_qtmp" 2>/dev/null || true
-  chcon u:object_r:same_process_hal_file:s0 "$_qtmp" 2>/dev/null || true
-  chmod 0644 "$_qtmp" 2>/dev/null || true
-
-  if mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
-    touch "$QGL_TARGET" 2>/dev/null || true
-    chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
-    chmod 0644 "$QGL_TARGET" 2>/dev/null || true
-
-    _lines=$(wc -l < "$QGL_TARGET" 2>/dev/null || echo '?')
-    _qgl_log "[BOOT] QGL applied successfully ($_lines lines)"
-    _qgl_diag "BOOT_RESULT: SUCCESS - $_lines lines from $_qsrc"
-    _qgl_state_capture "AFTER_BOOT_APPLY"
-  else
-    rm -f "$_qtmp" 2>/dev/null || true
-    _qgl_log "[BOOT] FAILED to apply QGL (mv failed)"
-    _qgl_diag "BOOT_RESULT: FAIL - mv failed"
-    _qgl_state_capture "AFTER_BOOT_APPLY_FAILED"
-    exit 1
-  fi
-
-  _qgl_log "[END] apply_qgl.sh completed"
+if [ "$_qgl_enabled" != "y" ]; then
+  _qgl_log "[APPLY-NOW] QGL is disabled — removing QGL target and writing disabled marker"
+  rm -f "$QGL_TARGET" 2>/dev/null || true
+  _qgl_diag "APPLY_NOW: Removed QGL target"
+  touch "/data/local/tmp/.qgl_disabled" 2>/dev/null || true
+  _qgl_log "[APPLY-NOW] Disabled marker written to /data/local/tmp/.qgl_disabled"
+  _qgl_state_capture "AFTER_APPLY_NOW_DISABLE"
+  _qgl_log "[END] apply_qgl.sh --apply-now completed (QGL disabled)"
   exit 0
+fi
 
-elif [ "$MODE" = "apply-now" ]; then
+_qgl_log "[APPLY-NOW] QGL is enabled — applying QGL config immediately"
 
-  if [ "$_qgl_enabled" != "y" ]; then
-    _qgl_log "[APPLY-NOW] QGL is disabled — removing QGL target and writing disabled marker"
-    rm -f "$QGL_TARGET" 2>/dev/null || true
-    _qgl_diag "APPLY_NOW: Removed QGL target"
-    touch "/data/local/tmp/.qgl_disabled" 2>/dev/null || true
-    _qgl_log "[APPLY-NOW] Disabled marker written to /data/local/tmp/.qgl_disabled"
-    _qgl_state_capture "AFTER_APPLY_NOW_DISABLE"
-    _qgl_log "[END] apply_qgl.sh --apply-now completed (QGL disabled)"
-    exit 0
+rm -f "/data/local/tmp/.qgl_disabled" 2>/dev/null || true
+_qgl_log "[APPLY-NOW] Removed disabled marker"
+
+if ! mkdir -p "$QGL_DIR" 2>/dev/null; then
+  _qgl_log "[FATAL] mkdir -p $QGL_DIR failed"
+  exit 1
+fi
+
+chcon u:object_r:same_process_hal_file:s0 "$QGL_DIR" 2>/dev/null || true
+
+_qsrc=""
+for _dir in "$CONFIG_DIR_SD" "$CONFIG_DIR_DATA"; do
+  _f="$_dir/qgl_config.txt"
+  if [ -f "$_f" ] && [ -r "$_f" ]; then
+    _qsrc="$_f"
+    break
   fi
+done
 
-  _qgl_log "[APPLY-NOW] QGL is enabled — applying QGL config immediately"
-
-  rm -f "/data/local/tmp/.qgl_disabled" 2>/dev/null || true
-  _qgl_log "[APPLY-NOW] Removed disabled marker"
-
-  if ! mkdir -p "$QGL_DIR" 2>/dev/null; then
-    _qgl_log "[FATAL] mkdir -p $QGL_DIR failed"
-    exit 1
-  fi
-
-  chcon u:object_r:same_process_hal_file:s0 "$QGL_DIR" 2>/dev/null || true
-
-  _qsrc=""
+if [ -z "$_qsrc" ]; then
   for _dir in "$CONFIG_DIR_SD" "$CONFIG_DIR_DATA"; do
     _f="$_dir/qgl_config.txt"
-    if [ -f "$_f" ] && [ -r "$_f" ]; then
-      _qsrc="$_f"
-      break
-    fi
+    [ -f "$_f" ] && { _qsrc="$_f"; break; }
   done
 
   if [ -z "$_qsrc" ]; then
@@ -225,58 +149,62 @@ elif [ "$MODE" = "apply-now" ]; then
     _qgl_diag "APPLY_NOW_RESULT: FAIL - No config source"
     exit 1
   fi
-
-  _qgl_log "[APPLY-NOW] Applying QGL from $_qsrc"
-  _qtmp="${QGL_TARGET}.tmp.$$"
-
-  if ! cp -f "$_qsrc" "$_qtmp" 2>/dev/null; then
-    _qgl_log "[APPLY-NOW] FAILED: cp to temp file"
-    rm -f "$_qtmp" 2>/dev/null || true
-    exit 1
-  fi
-
-  touch "$_qtmp" 2>/dev/null || true
-  chcon u:object_r:same_process_hal_file:s0 "$_qtmp" 2>/dev/null || true
-  chmod 0644 "$_qtmp" 2>/dev/null || true
-
-  if mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
-    touch "$QGL_TARGET" 2>/dev/null || true
-    chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
-    chmod 0644 "$QGL_TARGET" 2>/dev/null || true
-    _lines=$(wc -l < "$QGL_TARGET" 2>/dev/null || echo '?')
-    _qgl_log "[APPLY-NOW] QGL applied successfully ($_lines lines)"
-    _qgl_diag "APPLY_NOW_RESULT: SUCCESS - $_lines lines from $_qsrc"
-    _qgl_state_capture "AFTER_APPLY_NOW_ENABLE"
-  else
-    rm -f "$_qtmp" 2>/dev/null || true
-    _qgl_log "[APPLY-NOW] FAILED to apply QGL (mv failed)"
-    _qgl_diag "APPLY_NOW_RESULT: FAIL - mv failed"
-    exit 1
-  fi
-
-  if [ "$_qgl_perapp" = "y" ]; then
-    _sd_qgl_dir="$CONFIG_DIR_SD"
-    _dt_qgl_dir="$CONFIG_DIR_DATA"
-    if [ -d "$_sd_qgl_dir" ]; then
-      _count=0
-      for _f in "$_sd_qgl_dir"/qgl_config.txt.*; do
-        [ -f "$_f" ] || continue
-        _base="${_f##*/}"
-        case "$_base" in
-          *.disabled|*.tmp|*.tmp.*) continue ;;
-        esac
-        if cp -f "$_f" "$_dt_qgl_dir/$_base" 2>/dev/null; then
-          chmod 0644 "$_dt_qgl_dir/$_base" 2>/dev/null || true
-          _count=$((_count + 1))
-        fi
-      done
-      [ "$_count" -gt 0 ] && _qgl_log "[APPLY-NOW] Mirrored $_count per-app QGL configs to $_dt_qgl_dir"
-      unset _count _f _base
-    fi
-    unset _sd_qgl_dir _dt_qgl_dir
-  fi
-
-  _qgl_log "[END] apply_qgl.sh --apply-now completed (QGL enabled)"
-  exit 0
-
 fi
+
+_qgl_log "[APPLY-NOW] Applying QGL from $_qsrc"
+_qtmp="${QGL_TARGET}.tmp.$$"
+
+if ! cp -f "$_qsrc" "$_qtmp" 2>/dev/null; then
+  _qgl_log "[APPLY-NOW] FAILED: cp to temp file"
+  rm -f "$_qtmp" 2>/dev/null || true
+  exit 1
+fi
+
+touch "$_qtmp" 2>/dev/null || true
+chcon u:object_r:same_process_hal_file:s0 "$_qtmp" 2>/dev/null || true
+chmod 0644 "$_qtmp" 2>/dev/null || true
+
+if mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
+  touch "$QGL_TARGET" 2>/dev/null || true
+  chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
+  chmod 0644 "$QGL_TARGET" 2>/dev/null || true
+  _lines=$(wc -l < "$QGL_TARGET" 2>/dev/null || echo '?')
+  _qgl_log "[APPLY-NOW] QGL applied successfully ($_lines lines)"
+  _qgl_diag "APPLY_NOW_RESULT: SUCCESS - $_lines lines from $_qsrc"
+  _qgl_state_capture "AFTER_APPLY_NOW_ENABLE"
+else
+  rm -f "$_qtmp" 2>/dev/null || true
+  _qgl_log "[APPLY-NOW] FAILED to apply QGL (mv failed)"
+  _qgl_diag "APPLY_NOW_RESULT: FAIL - mv failed"
+  exit 1
+fi
+
+if [ "$_qgl_perapp" = "y" ]; then
+  _sd_qgl_dir="$CONFIG_DIR_SD"
+  _dt_qgl_dir="$CONFIG_DIR_DATA"
+  if [ -d "$_sd_qgl_dir" ]; then
+    _count=0
+    for _f in "$_sd_qgl_dir"/qgl_config.txt.*; do
+      [ -f "$_f" ] || continue
+      _base="${_f##*/}"
+      case "$_base" in
+        *.disabled|*.tmp|*.tmp.*) continue ;;
+      esac
+      if cp -f "$_f" "$_dt_qgl_dir/$_base" 2>/dev/null; then
+        chmod 0644 "$_dt_qgl_dir/$_base" 2>/dev/null || true
+        _count=$((_count + 1))
+      fi
+    done
+    if [ -f "$_sd_qgl_dir/no_qgl_packages.txt" ]; then
+      if cp -f "$_sd_qgl_dir/no_qgl_packages.txt" "$_dt_qgl_dir/no_qgl_packages.txt" 2>/dev/null; then
+        chmod 0644 "$_dt_qgl_dir/no_qgl_packages.txt" 2>/dev/null || true
+        _count=$((_count + 1))
+      fi
+    fi
+    [ "$_count" -gt 0 ] && _qgl_log "[APPLY-NOW] Mirrored $_count per-app QGL configs to $_dt_qgl_dir"
+    unset _count _f _base
+  fi
+  unset _sd_qgl_dir _dt_qgl_dir
+fi
+
+_qgl_log "[END] apply_qgl.sh --apply-now completed (QGL enabled)"

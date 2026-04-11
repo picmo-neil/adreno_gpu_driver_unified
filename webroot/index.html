@@ -384,6 +384,27 @@
 
             <div class="divider elegant-divider"></div>
 
+            <div class="setting-item ripple-target hover-lift" id="qglSystemAppsRow" style="display:none;">
+                <div class="text-col">
+                    <div class="setting-header">
+                        <div class="setting-title" data-i18n="qglSystemAppsName">QGL for System Apps</div>
+                        <div class="info-tooltip" data-tooltip="Apply QGL to system apps (SystemUI, launcher, settings). May cause black screen on some devices.">
+                            <span class="tooltip-icon">ℹ️</span>
+                        </div>
+                    </div>
+                    <div class="setting-desc" data-i18n="qglSystemAppsDesc">Off (default) = skip system apps. On = apply QGL to ALL apps — may cause black screen.</div>
+                </div>
+                <label class="switch modern-switch" aria-label="QGL for System Apps Toggle">
+                    <input type="checkbox" id="QGL_SYSTEM_APPS" role="switch">
+                    <span class="slider modern-slider">
+                        <span class="slider-text off">OFF</span>
+                        <span class="slider-text on">ON</span>
+                    </span>
+                </label>
+            </div>
+
+            <div class="divider elegant-divider"></div>
+
             <div class="apply-now-row">
                 <div class="text-col">
                     <div class="setting-title" data-i18n="applyQGLNowTitle">Apply QGL Config Now</div>

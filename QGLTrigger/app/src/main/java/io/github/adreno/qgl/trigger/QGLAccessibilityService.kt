@@ -5,6 +5,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.ComponentName
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
@@ -26,28 +27,15 @@ private const val QGL_DISABLED_MARKER = "/data/local/tmp/.qgl_disabled"
 private const val SELINUX_CONTEXT = "u:object_r:same_process_hal_file:s0"
 private const val CONFIG_DIR_SD = "/sdcard/Adreno_Driver/Config"
 private const val CONFIG_DIR_DATA = "/data/local/tmp"
-
-private val SYSTEM_UI_PACKAGES = setOf(
-    "com.android.systemui",
-    "com.android.launcher",
-    "com.android.launcher2",
-    "com.android.launcher3",
-    "com.miui.home",
-    "com.sec.android.app.launcher",
-    "com.oppo.launcher",
-    "com.vivo.launcher",
-    "com.huawei.android.launcher",
-    "com.google.android.googlequicksearchbox",
-    "com.google.android.apps.nexuslauncher",
-    "android",
-    "com.android.settings"
-)
+private const val CONFIG_PATH_SD = "/sdcard/Adreno_Driver/Config/adreno_config.txt"
+private const val CONFIG_PATH_DATA = "/data/local/tmp/adreno_config.txt"
 
 class QGLAccessibilityService : AccessibilityService() {
 
     private var lastAppPackage: String? = null
     private var lastSwitchTime: Long = 0L
     private var lastAppliedConfig: String? = null
+    private var qglSystemAppsEnabled = false
 
     @Volatile private var persistentShell: Process? = null
     @Volatile private var shellStdin: DataOutputStream? = null
@@ -63,7 +51,8 @@ class QGLAccessibilityService : AccessibilityService() {
         Log.d(TAG, "AccessibilityService connected")
         startForegroundNotification()
         getOrCreateShell()
-        Log.d(TAG, "QGL Accessibility Service started and ready to monitor app switches")
+        qglSystemAppsEnabled = readQGLSystemApps()
+        Log.d(TAG, "QGL Accessibility Service ready — QGL_SYSTEM_APPS=$qglSystemAppsEnabled")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -77,12 +66,6 @@ class QGLAccessibilityService : AccessibilityService() {
         if (packageName.isNullOrEmpty()) return
 
         if (packageName == applicationContext.packageName) return
-
-        if (SYSTEM_UI_PACKAGES.any { pkg ->
-                packageName == pkg || packageName.startsWith("$pkg.")
-            }) {
-            return
-        }
 
         val className = event.className?.toString()
         if (!className.isNullOrEmpty()) {
@@ -102,49 +85,145 @@ class QGLAccessibilityService : AccessibilityService() {
         lastAppPackage = packageName
         lastSwitchTime = now
 
+        val isSystemPkg = isSystemApp(packageName) && !qglSystemAppsEnabled
+
         scriptExecutor.execute {
-            handleAppSwitch(packageName)
+            handleAppSwitch(packageName, isSystemPkg)
         }
     }
 
-    private fun queryQGLState(packageName: String): Triple<String, String?, String> {
+    private fun isSystemApp(packageName: String): Boolean {
+        return try {
+            val appInfo = packageManager.getApplicationInfo(packageName, 0)
+            (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+        } catch (_: PackageManager.NameNotFoundException) {
+            true
+        }
+    }
+
+    private fun readQGLSystemApps(): Boolean {
+        val result = runShellScript("for f in $CONFIG_PATH_DATA $CONFIG_PATH_SD; do [ -f \"\$f\" ] && { grep -q '^QGL_SYSTEM_APPS=y' \"\$f\" && echo y || echo n; break; } 2>/dev/null; done").trim()
+        return result == "y"
+    }
+
+    private fun handleAppSwitch(packageName: String, isSystemPkg: Boolean) {
+        val last = lastAppliedConfig ?: ""
+        val sysFlag = if (isSystemPkg) "1" else "0"
+        val S = "$" // shell variable prefix
+
         val script = """
+            _last='$last'
+            _sys=$sysFlag
             if [ -f $QGL_DISABLED_MARKER ]; then
-                echo "DISABLED"
+                if [ "$S{_last}" = "NO_QGL" ]; then
+                    echo "SAME"
+                else
+                    rm -f $QGL_TARGET 2>/dev/null || true
+                    echo "REMOVED:DISABLED"
+                fi
             else
                 pkg='$packageName'
-                _r="NONE"
-                _m="0"
+                _src=""
+                _mt=""
+                _is_noqgl=0
                 for dir in $CONFIG_DIR_DATA $CONFIG_DIR_SD; do
-                    f="${'$'}dir/qgl_config.txt.${'$'}pkg"
-                    [ -f "${'$'}f" ] || continue
-                    if [ -s "${'$'}f" ]; then _r="PATH:${'$'}f"; _m=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null || echo '0'); else _r="NOQGL"; fi
-                    break
+                    f="$S{dir}/no_qgl_packages.txt"
+                    if [ -f "$S{f}" ] && grep -qx "$S{pkg}" "$S{f}" 2>/dev/null; then
+                        _is_noqgl=1
+                        break
+                    fi
                 done
-                if [ "${'$'}_r" = "NONE" ]; then
+                if [ "$S{_is_noqgl}" = "1" ]; then
+                    if [ "$S{_last}" = "NO_QGL" ]; then
+                        echo "SAME"
+                    else
+                        rm -f $QGL_TARGET 2>/dev/null || true
+                        echo "REMOVED:NOQGL"
+                    fi
+                else
                     for dir in $CONFIG_DIR_DATA $CONFIG_DIR_SD; do
-                        f="${'$'}dir/qgl_config.txt"
-                        [ -f "${'$'}f" ] && [ -s "${'$'}f" ] && { _r="PATH:${'$'}f"; _m=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null || echo '0'); break; }
+                        f="$S{dir}/qgl_config.txt.$S{pkg}"
+                        if [ -f "$S{f}" ] && [ -s "$S{f}" ]; then
+                            _src="$S{f}"
+                            _mt=$S(stat -c '%Y' "$S{f}" 2>/dev/null || echo '0')
+                            break
+                        fi
                     done
+                    if [ -z "$S{_src}" ]; then
+                        for dir in $CONFIG_DIR_DATA $CONFIG_DIR_SD; do
+                            f="$S{dir}/qgl_config.txt"
+                            if [ -f "$S{f}" ] && [ -s "$S{f}" ]; then
+                                _src="$S{f}"
+                                _mt=$S(stat -c '%Y' "$S{f}" 2>/dev/null || echo '0')
+                                break
+                            fi
+                        done
+                    fi
+                    if [ -n "$S{_src}" ]; then
+                        _hash="$S{_src}:$S{_mt}"
+                        if [ "$S{_hash}" = "$S{_last}" ]; then
+                            echo "SAME:$S{_hash}"
+                        else
+                            _tmp="${QGL_TARGET}.tmp.$S$S"
+                            mkdir -p $QGL_DIR 2>/dev/null
+                            chcon $SELINUX_CONTEXT $QGL_DIR 2>/dev/null || true
+                            if cp -f "$S{_src}" "$S{_tmp}" 2>/dev/null; then
+                                chcon $SELINUX_CONTEXT "$S{_tmp}" 2>/dev/null || true
+                                chmod 0644 "$S{_tmp}" 2>/dev/null || true
+                                if mv -f "$S{_tmp}" $QGL_TARGET 2>/dev/null; then
+                                    touch $QGL_TARGET 2>/dev/null || true
+                                    chcon $SELINUX_CONTEXT $QGL_TARGET 2>/dev/null || true
+                                    chmod 0644 $QGL_TARGET 2>/dev/null || true
+                                    echo "APPLIED:$S{_hash}"
+                                else
+                                    rm -f "$S{_tmp}" 2>/dev/null || true
+                                    echo "FAIL:mv"
+                                fi
+                            else
+                                rm -f "$S{_tmp}" 2>/dev/null || true
+                                echo "FAIL:cp"
+                            fi
+                        fi
+                    else
+                        if [ "$S{_sys}" = "1" ]; then
+                            if [ "$S{_last}" = "NO_QGL" ]; then
+                                echo "SAME"
+                            else
+                                rm -f $QGL_TARGET 2>/dev/null || true
+                                echo "REMOVED:SYS"
+                            fi
+                        else
+                            echo "NONE"
+                        fi
+                    fi
                 fi
-                echo "${'$'}_r"
-                echo "${'$'}_m"
             fi
         """.trimIndent()
 
-        val output = runShellScript(script)
-        val lines = output.lines().filter { it.isNotBlank() }
+        val output = runShellScript(script).trim()
+        Log.d(TAG, "QGL switch for $packageName: $output")
 
-        return when {
-            lines.isEmpty() -> Triple("NONE", null, "0")
-            lines[0] == "DISABLED" -> Triple("DISABLED", null, "0")
-            lines[0] == "NOQGL" -> Triple("NOQGL", null, "0")
-            lines[0].startsWith("PATH:") -> {
-                val path = lines[0].substring(5)
-                val mtime = lines.getOrElse(1) { "0" }
-                Triple("PATH", path, mtime)
+        when {
+            output.startsWith("APPLIED:") -> {
+                lastAppliedConfig = output.substring(8)
             }
-            else -> Triple("NONE", null, "0")
+            output.startsWith("REMOVED:") -> {
+                lastAppliedConfig = "NO_QGL"
+            }
+            output.startsWith("SAME") -> {
+                // no change needed
+            }
+            output.startsWith("FAIL:") -> {
+                Log.w(TAG, "QGL apply failed: $output")
+                lastAppliedConfig = null
+            }
+            output == "NONE" -> {
+                // no config, skip
+            }
+            else -> {
+                Log.w(TAG, "Unexpected QGL output: $output")
+                lastAppliedConfig = null
+            }
         }
     }
 
@@ -175,7 +254,7 @@ class QGLAccessibilityService : AccessibilityService() {
                         return output.substring(0, markerIdx).trimEnd()
                     }
                 } else {
-                    Thread.sleep(50)
+                    Thread.sleep(10)
                 }
             }
             Log.w(TAG, "runShellScript timed out")
@@ -189,48 +268,6 @@ class QGLAccessibilityService : AccessibilityService() {
                 shellStdout = null
             }
             "NONE"
-        }
-    }
-
-    private fun handleAppSwitch(packageName: String) {
-        val (state, srcPath, mtime) = queryQGLState(packageName)
-
-        when (state) {
-            "DISABLED" -> {
-                if (lastAppliedConfig == "NO_QGL") {
-                    Log.d(TAG, "QGL disabled marker present, already in no-QGL state, skipping")
-                    return
-                }
-                Log.d(TAG, "QGL disabled marker present — removing QGL config")
-                executeQGLRemove()
-                lastAppliedConfig = "NO_QGL"
-            }
-            "NOQGL" -> {
-                if (lastAppliedConfig == "NO_QGL") {
-                    Log.d(TAG, "Already in no-QGL state for $packageName, skipping")
-                    return
-                }
-                Log.d(TAG, "Removing QGL config for no-QGL app: $packageName")
-                executeQGLRemove()
-                lastAppliedConfig = "NO_QGL"
-            }
-            "PATH" -> {
-                if (srcPath == null) {
-                    Log.w(TAG, "PATH state but null srcPath for $packageName, skipping")
-                    return
-                }
-                val contentHash = "$srcPath:$mtime"
-                if (contentHash == lastAppliedConfig) {
-                    Log.d(TAG, "Same config already applied for $packageName, skipping")
-                    return
-                }
-                Log.d(TAG, "Applying QGL config for $packageName from $srcPath")
-                executeQGLCopy(srcPath)
-                lastAppliedConfig = contentHash
-            }
-            else -> {
-                Log.d(TAG, "No QGL config found for $packageName, skipping")
-            }
         }
     }
 
@@ -258,109 +295,12 @@ class QGLAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun writeToShell(cmds: List<String>): Boolean {
-        val stdin: DataOutputStream
-        val stdout: BufferedReader
-        synchronized(shellLock) {
-            stdin = shellStdin ?: return false
-            stdout = shellStdout ?: return false
-        }
-
-        return try {
-            val marker = "QGL_DONE_${android.os.Process.myPid()}_${System.nanoTime()}"
-            for (cmd in cmds) {
-                stdin.writeBytes("$cmd\n")
-            }
-            stdin.writeBytes("echo $marker\n")
-            stdin.flush()
-
-            val buf = CharArray(4096)
-            val sb = StringBuilder()
-            val deadline = System.currentTimeMillis() + 5000
-            while (System.currentTimeMillis() < deadline) {
-                if (stdout.ready()) {
-                    val n = stdout.read(buf)
-                    if (n > 0) sb.append(buf, 0, n)
-                    if (sb.contains(marker)) {
-                        val output = sb.toString()
-                        if (output.contains("QGL_WRITE_FAIL")) {
-                            Log.w(TAG, "Shell command reported failure")
-                            return false
-                        }
-                        return true
-                    }
-                } else {
-                    Thread.sleep(50)
-                }
-            }
-            Log.w(TAG, "Shell command timed out waiting for marker")
-            true
-        } catch (e: IOException) {
-            Log.w(TAG, "Shell write failed, will respawn on next switch", e)
-            synchronized(shellLock) {
-                persistentShell?.destroyForcibly()
-                persistentShell = null
-                shellStdin = null
-                shellStdout = null
-            }
-            false
-        }
-    }
-
-    private fun executeQGLCopy(srcPath: String) {
-        getOrCreateShell() ?: run {
-            Log.e(TAG, "No root shell available")
-            return
-        }
-
-        val tmpFile = "${QGL_TARGET}.tmp.${android.os.Process.myPid()}"
-        val cmds = mutableListOf<String>()
-
-        cmds.add("mkdir -p $QGL_DIR 2>/dev/null")
-        cmds.add("chcon $SELINUX_CONTEXT $QGL_DIR 2>/dev/null || true")
-        cmds.add("cp -f '$srcPath' $tmpFile 2>/dev/null || echo QGL_WRITE_FAIL")
-        cmds.add("chcon $SELINUX_CONTEXT $tmpFile 2>/dev/null || true")
-        cmds.add("chmod 0644 $tmpFile 2>/dev/null || true")
-        cmds.add("if mv -f $tmpFile $QGL_TARGET 2>/dev/null; then")
-        cmds.add("  touch $QGL_TARGET 2>/dev/null || true")
-        cmds.add("  chcon $SELINUX_CONTEXT $QGL_TARGET 2>/dev/null || true")
-        cmds.add("  chmod 0644 $QGL_TARGET 2>/dev/null || true")
-        cmds.add("else")
-        cmds.add("  rm -f $tmpFile 2>/dev/null || true")
-        cmds.add("  echo QGL_WRITE_FAIL")
-        cmds.add("fi")
-
-        if (writeToShell(cmds)) {
-            Log.d(TAG, "QGL config applied from $srcPath")
-        } else {
-            Log.w(TAG, "Failed to write QGL config from $srcPath, shell will respawn")
-            lastAppliedConfig = null
-        }
-    }
-
-    private fun executeQGLRemove() {
-        getOrCreateShell() ?: run {
-            Log.e(TAG, "No root shell available")
-            return
-        }
-
-        val cmds = mutableListOf<String>()
-        cmds.add("rm -f $QGL_TARGET 2>/dev/null || true")
-
-        if (writeToShell(cmds)) {
-            Log.d(TAG, "QGL config removed (no-QGL mode)")
-        } else {
-            Log.w(TAG, "Failed to remove QGL config, shell will respawn")
-            lastAppliedConfig = null
-        }
-    }
-
     override fun onInterrupt() {
         Log.w(TAG, "AccessibilityService interrupted")
     }
 
     override fun onDestroy() {
-        Log.w(TAG, "AccessibilityService destroyed — closing persistent shell")
+        Log.d(TAG, "AccessibilityService destroyed — closing persistent shell")
         synchronized(shellLock) {
             try {
                 shellStdin?.writeBytes("exit\n")

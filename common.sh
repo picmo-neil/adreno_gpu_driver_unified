@@ -464,7 +464,7 @@ load_config() {
     _v="${_v%"$_CR"}"
     # Normalise boolean keys
     case "$_k" in
-      VERBOSE|ARM64_OPT|QGL|QGL_PERAPP|PLT|FORCE_SKIAVKTHREADED_BACKEND)
+      VERBOSE|ARM64_OPT|QGL|QGL_PERAPP|QGL_SYSTEM_APPS|PLT|FORCE_SKIAVKTHREADED_BACKEND)
         case "$_v" in
           [Yy]|[Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee]) _v='y' ;;
           *) _v='n' ;;
@@ -489,6 +489,7 @@ load_config() {
       ARM64_OPT)   ARM64_OPT="$_v" ;;
       QGL)         QGL="$_v" ;;
       QGL_PERAPP)  QGL_PERAPP="$_v" ;;
+      QGL_SYSTEM_APPS) QGL_SYSTEM_APPS="$_v" ;;
       PLT)         PLT="$_v" ;;
       RENDER_MODE) RENDER_MODE="$_v" ;;
       FORCE_SKIAVKTHREADED_BACKEND) FORCE_SKIAVKTHREADED_BACKEND="$_v" ;;

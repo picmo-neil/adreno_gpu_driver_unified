@@ -37,6 +37,7 @@ VERBOSE="n"
 ARM64_OPT="n"
 QGL="n"
 QGL_PERAPP="n"
+QGL_SYSTEM_APPS="n"
 PLT="n"
 RENDER_MODE="normal"
 FORCE_SKIAVKTHREADED_BACKEND="n"
@@ -59,6 +60,7 @@ fi
 [ "$ARM64_OPT" != "y" ] && ARM64_OPT="n"
 [ "$QGL" != "y" ]       && QGL="n"
 [ "$QGL_PERAPP" != "y" ] && QGL_PERAPP="n"
+[ "$QGL_SYSTEM_APPS" != "y" ] && QGL_SYSTEM_APPS="n"
 [ "$PLT" != "y" ]       && PLT="n"
 [ -z "$RENDER_MODE" ]   && RENDER_MODE="normal"
 # BUG7 FIX: Normalize RENDER_MODE to lowercase so case statements match
@@ -208,7 +210,7 @@ else
   log_service "No config file found, using defaults"
 fi
 
-log_service "Configuration: ARM64_OPT=$ARM64_OPT, QGL=$QGL, QGL_PERAPP=$QGL_PERAPP, PLT=$PLT, RENDER_MODE=$RENDER_MODE, FORCE_SKIAVKTHREADED_BACKEND=$FORCE_SKIAVKTHREADED_BACKEND"
+  log_service "Configuration: ARM64_OPT=$ARM64_OPT, QGL=$QGL, QGL_PERAPP=$QGL_PERAPP, QGL_SYSTEM_APPS=$QGL_SYSTEM_APPS, PLT=$PLT, RENDER_MODE=$RENDER_MODE, FORCE_SKIAVKTHREADED_BACKEND=$FORCE_SKIAVKTHREADED_BACKEND"
 
 # ── skiavk + QGL_PERAPP=n warning ────────────────────────────────────────
 if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "n" ] && [ "$RENDER_MODE" = "skiavk" ]; then
@@ -708,22 +710,53 @@ if [ -f "$_sd_cfg" ]; then
 fi
 unset _sd_cfg _dt_cfg
 
-# Mirror per-app QGL config files (qgl_config.txt.*) to /data/local/tmp so the
-# QGLTrigger APK can read them before /sdcard is mounted (AccessibilityService
-# starts at BOOT_COMPLETED but FUSE/sdcardfs may not be ready yet).
+# Mirror per-app QGL config files (qgl_config.txt.*) and no_qgl_packages.txt
+# to /data/local/tmp so the QGLTrigger APK can read them before /sdcard is mounted
+# (AccessibilityService starts at BOOT_COMPLETED but FUSE/sdcardfs may not be ready yet).
 if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ]; then
   _sd_qgl_dir="/sdcard/Adreno_Driver/Config"
   _dt_qgl_dir="/data/local/tmp"
+
+  # Migration: empty qgl_config.txt.<pkg> files → no_qgl_packages.txt
+  if [ -d "$_sd_qgl_dir" ]; then
+    _noqgl_file="$_sd_qgl_dir/no_qgl_packages.txt"
+    _migrated=0
+    for _f in "$_sd_qgl_dir"/qgl_config.txt.*; do
+      [ -f "$_f" ] || continue
+      [ ! -s "$_f" ] || continue
+      _base="${_f##*/}"
+      _pkg="${_base#qgl_config.txt.}"
+      case "$_pkg" in *.disabled|*.tmp|*.tmp.*) continue ;; esac
+      [ -n "$_pkg" ] || continue
+      grep -qx "$_pkg" "$_noqgl_file" 2>/dev/null || echo "$_pkg" >> "$_noqgl_file"
+      rm -f "$_f" 2>/dev/null || true
+      _migrated=$((_migrated + 1))
+    done
+    if [ "$_migrated" -gt 0 ]; then
+      log_service "[MIGRATE] Migrated $_migrated empty per-app QGL files to no_qgl_packages.txt"
+      [ -f "$_noqgl_file" ] && sort -u -o "$_noqgl_file" "$_noqgl_file" 2>/dev/null || true
+    fi
+    unset _noqgl_file _migrated _f _base _pkg
+  fi
+
   if [ -d "$_sd_qgl_dir" ]; then
     _count=0
     for _f in "$_sd_qgl_dir"/qgl_config.txt*; do
       [ -f "$_f" ] || continue
       _base="${_f##*/}"
+      case "$_base" in *.disabled|*.tmp|*.tmp.*) continue ;; esac
       if cp -f "$_f" "$_dt_qgl_dir/$_base" 2>/dev/null; then
         chmod 0644 "$_dt_qgl_dir/$_base" 2>/dev/null || true
         _count=$((_count + 1))
       fi
     done
+    # Mirror no_qgl_packages.txt
+    if [ -f "$_sd_qgl_dir/no_qgl_packages.txt" ]; then
+      if cp -f "$_sd_qgl_dir/no_qgl_packages.txt" "$_dt_qgl_dir/no_qgl_packages.txt" 2>/dev/null; then
+        chmod 0644 "$_dt_qgl_dir/no_qgl_packages.txt" 2>/dev/null || true
+        _count=$((_count + 1))
+      fi
+    fi
     if [ "$_count" -gt 0 ]; then
       log_service "[OK] QGL config files mirrored to $_dt_qgl_dir ($_count files)"
     else
