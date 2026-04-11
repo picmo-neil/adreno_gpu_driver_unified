@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.ComponentName
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
@@ -83,10 +84,10 @@ class QGLAccessibilityService : AccessibilityService() {
             return
         }
 
-        val componentName = event.componentName
-        if (componentName != null) {
+        val className = event.className?.toString()
+        if (!className.isNullOrEmpty()) {
             try {
-                packageManager.getActivityInfo(componentName, 0)
+                packageManager.getActivityInfo(ComponentName(packageName, className), 0)
             } catch (_: PackageManager.NameNotFoundException) {
                 return
             }
@@ -214,6 +215,10 @@ class QGLAccessibilityService : AccessibilityService() {
                 lastAppliedConfig = "NO_QGL"
             }
             "PATH" -> {
+                if (srcPath == null) {
+                    Log.w(TAG, "PATH state but null srcPath for $packageName, skipping")
+                    return
+                }
                 val contentHash = "$srcPath:$mtime"
                 if (contentHash == lastAppliedConfig) {
                     Log.d(TAG, "Same config already applied for $packageName, skipping")
