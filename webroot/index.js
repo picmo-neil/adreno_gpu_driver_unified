@@ -498,6 +498,9 @@ const DEFAULT_EN = {
     qglPerappName: "Per-App QGL",
     qglPerappDesc: "APK applies matching QGL profile at each app launch (like LYB). Off = single static config at boot.",
     skiavkPerappWarning: "⚠️ skiavk + Per-App QGL Off: Apps launched before boot_completed+3s receive NO QGL config at Vulkan init time. This degrades benchmark scores.",
+    applyQGLNowTitle: "Apply QGL Config Now",
+    applyQGLNowDesc: "Apply QGL changes immediately without rebooting. Copies or removes the QGL config file and mirrors per-app profiles. Kill & reopen apps to see effect.",
+    applyQGLNow: "Apply Now",
     edit: "Edit",
     armName: "ARM64 Optimization",
     armDesc: "Remove 32-bit libraries for unsupported ROMs",
@@ -748,7 +751,13 @@ const DEFAULT_EN = {
     noAppsFound: "No third-party apps found",
     hasProfile: "Has QGL profile",
     noProfile: "Uses global profile",
-    msgLoadAppsFail: "Failed to load apps"
+    msgLoadAppsFail: "Failed to load apps",
+    chooseProfileType: "Choose profile type",
+    customConfig: "Custom Config",
+    noQGLConfig: "No QGL",
+    noQGLProfileDesc: "No QGL config for this app",
+    noQGLProfileSubtitle: "No QGL config — GPU runs stock. Add keys to convert to custom config.",
+    msgNoQGLSet: "No QGL profile set"
 };
 
 const BUILTIN_ZH_CN = {
@@ -795,6 +804,9 @@ const BUILTIN_ZH_CN = {
     qglPerappName: "Per-App QGL",
     qglPerappDesc: "APK在每次应用启动时应用匹配的QGL配置（类似LYB）。关闭=启动时单一静态配置。",
     skiavkPerappWarning: "⚠️ skiavk + Per-App QGL关闭：boot_completed+3秒前启动的应用在Vulkan初始化时无法获得QGL配置。这会降低基准测试分数。",
+    applyQGLNowTitle: "立即应用QGL配置",
+    applyQGLNowDesc: "无需重启，立即应用QGL更改。复制或删除QGL配置文件并同步Per-App配置。关闭并重新打开应用以查看效果。",
+    applyQGLNow: "立即应用",
     edit: "编辑",
     armName: "ARM64优化",
     armDesc: "移除32位库，用于不支持32位的ROM",
@@ -1045,7 +1057,13 @@ const BUILTIN_ZH_CN = {
     noAppsFound: "未找到第三方应用",
     hasProfile: "已有QGL配置",
     noProfile: "使用全局配置",
-    msgLoadAppsFail: "加载应用失败"
+    msgLoadAppsFail: "加载应用失败",
+    chooseProfileType: "选择配置类型",
+    customConfig: "自定义配置",
+    noQGLConfig: "无QGL",
+    noQGLProfileDesc: "此应用无QGL配置",
+    noQGLProfileSubtitle: "无QGL配置 — GPU使用默认设置。添加键值可转换为自定义配置。",
+    msgNoQGLSet: "已设置无QGL配置"
 };
 
 const BUILTIN_ZH_TW = {
@@ -1092,6 +1110,9 @@ const BUILTIN_ZH_TW = {
     qglPerappName: "Per-App QGL",
     qglPerappDesc: "APK在每次應用程式啟動時套用相符的QGL設定（類似LYB）。關閉=開機時單一靜態設定。",
     skiavkPerappWarning: "⚠️ skiavk + Per-App QGL關閉：boot_completed+3秒前啟動的應用程式在Vulkan初始化時無法獲得QGL設定。這會降低基準測試分數。",
+    applyQGLNowTitle: "立即套用QGL設定",
+    applyQGLNowDesc: "無需重啟，立即套用QGL變更。複製或移除QGL設定檔並同步Per-App設定。關閉並重新開啟應用程式以查看效果。",
+    applyQGLNow: "立即套用",
     edit: "編輯",
     armName: "ARM64優化",
     armDesc: "移除32位元庫，用於不支援32位元的ROM",
@@ -1341,7 +1362,13 @@ const BUILTIN_ZH_TW = {
     noAppsFound: "找不到第三方應用程式",
     hasProfile: "已有QGL設定檔",
     noProfile: "使用全域設定檔",
-    msgLoadAppsFail: "載入應用程式失敗"
+    msgLoadAppsFail: "載入應用程式失敗",
+    chooseProfileType: "選擇設定檔類型",
+    customConfig: "自訂設定檔",
+    noQGLConfig: "無QGL",
+    noQGLProfileDesc: "此應用程式無QGL設定",
+    noQGLProfileSubtitle: "無QGL設定 — GPU使用預設值。新增鍵值可轉換為自訂設定檔。",
+    msgNoQGLSet: "已設定無QGL設定檔"
 };
 
 // ============================================
@@ -2555,6 +2582,62 @@ async function applyRenderNow() {
     } catch (e) {
         logToTerminal('applyRenderNow error: ' + (e.message || e), 'error');
         showToast('❌ Failed to apply render mode');
+    } finally {
+        setLoading(false);
+    }
+}
+
+async function applyQGLNow() {
+    setLoading(true);
+    const qglToggle = document.getElementById('QGL');
+    const qglPerappToggle = document.getElementById('QGL_PERAPP');
+    const qglEnabled = qglToggle ? qglToggle.checked : false;
+    const qglPerapp = qglPerappToggle ? qglPerappToggle.checked : false;
+    logToTerminal(`Applying QGL NOW: QGL=${qglEnabled ? 'y' : 'n'} QGL_PERAPP=${qglPerapp ? 'y' : 'n'}`, 'info');
+
+    try {
+        const adrenoConfigPath = '/sdcard/Adreno_Driver/Config/adreno_config.txt';
+        const configDir = '/sdcard/Adreno_Driver/Config';
+
+        await exec(`mkdir -p "${configDir}" 2>/dev/null`);
+
+        let configContent = '';
+        const readRes = await exec(`cat "${adrenoConfigPath}" 2>/dev/null`);
+        if (readRes && readRes.stdout) {
+            configContent = readRes.stdout;
+        }
+
+        const lines = configContent.split('\n');
+        const filtered = lines.filter(l => {
+            const trimmed = l.trim();
+            return !trimmed.startsWith('QGL=') && !trimmed.startsWith('QGL_PERAPP=');
+        });
+        filtered.push(`QGL=${qglEnabled ? 'y' : 'n'}`);
+        filtered.push(`QGL_PERAPP=${qglPerapp ? 'y' : 'n'}`);
+        const newContent = filtered.join('\n');
+
+        const tmpPath = `${adrenoConfigPath}.tmp`;
+        const safeContent = newContent.replace(/'/g, "'\\''");
+        await exec(`printf '%s' '${safeContent}' > "${tmpPath}" && mv -f "${tmpPath}" "${adrenoConfigPath}"`);
+        logToTerminal('Updated adreno_config.txt with QGL settings', 'info');
+
+        const applyRes = await exec(`sh /data/adb/modules/${MOD_ID}/apply_qgl.sh --apply-now 2>&1`);
+        if (applyRes && applyRes.errno === 0) {
+            if (qglEnabled) {
+                showToast('✅ QGL config applied immediately');
+                logToTerminal('QGL config applied immediately via apply_qgl.sh --apply-now', 'success');
+            } else {
+                showToast('✅ QGL config removed immediately');
+                logToTerminal('QGL removed immediately via apply_qgl.sh --apply-now', 'success');
+            }
+        } else {
+            const errDetail = (applyRes && applyRes.stderr) ? applyRes.stderr.trim() : 'unknown error';
+            showToast('❌ Failed to apply QGL immediately');
+            logToTerminal('apply_qgl.sh --apply-now failed: ' + errDetail, 'error');
+        }
+    } catch (e) {
+        logToTerminal('applyQGLNow error: ' + (e.message || e), 'error');
+        showToast('❌ Failed to apply QGL immediately');
     } finally {
         setLoading(false);
     }
@@ -5042,6 +5125,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
     bind('btnApplyRenderNow', applyRenderNow);
+    bind('btnApplyQGLNow', applyQGLNow);
     bind('btnExportLogs', () => {
         const logText = terminalCache.entries.map(e => `${e.timestamp} ${e.message}`).join('\n');
         const blob = new Blob([logText], { type: 'text/plain' });
@@ -5264,6 +5348,7 @@ let _perAppProfilesCache = null;
 let _currentEditPkg = null;
 
 async function loadQGLProfiles() {
+    const _isTempSuffix = (s) => s === 'disabled' || s === 'tmp' || s.startsWith('tmp.');
     try {
         const res = await exec(`ls "${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}".* 2>/dev/null`);
         _perAppProfilesCache = {};
@@ -5271,11 +5356,28 @@ async function loadQGLProfiles() {
             const files = res.stdout.trim().split('\n').filter(f => f.trim());
             files.forEach(filePath => {
                 const fileName = filePath.split('/').pop();
-                const pkg = fileName.substring(QGL_CONFIG_PREFIX.length + 1);
-                if (pkg && pkg.length > 0) {
-                    _perAppProfilesCache[pkg] = { filePath, exists: true };
+                const suffix = fileName.substring(QGL_CONFIG_PREFIX.length + 1);
+                if (suffix && suffix.length > 0 && !_isTempSuffix(suffix)) {
+                    _perAppProfilesCache[suffix] = { filePath, exists: true, isNoQGL: false };
                 }
             });
+            const pkgList = Object.keys(_perAppProfilesCache);
+            if (pkgList.length > 0) {
+                const emptyCheckCmd = pkgList.map(pkg =>
+                    `[ -f "${_perAppProfilesCache[pkg].filePath}" ] && [ ! -s "${_perAppProfilesCache[pkg].filePath}" ] && echo "EMPTY:${pkg}" || true`
+                ).join('; ');
+                const emptyRes = await exec(emptyCheckCmd);
+                if (emptyRes && emptyRes.stdout && emptyRes.stdout.trim()) {
+                    emptyRes.stdout.trim().split('\n').forEach(line => {
+                        if (line.startsWith('EMPTY:')) {
+                            const epkg = line.substring(6);
+                            if (_perAppProfilesCache[epkg]) {
+                                _perAppProfilesCache[epkg].isNoQGL = true;
+                            }
+                        }
+                    });
+                }
+            }
         }
         logToTerminal('QGL per-app profiles loaded', 'info');
     } catch (e) {
@@ -5542,15 +5644,22 @@ async function renderAppProfilesList() {
         title.textContent = pkg;
 
         const badge = document.createElement('span');
-        badge.className = 'badge badge-success';
-        badge.textContent = 'ON';
+        if (info.isNoQGL) {
+            badge.className = 'badge badge-danger';
+            badge.textContent = 'NO QGL';
+        } else {
+            badge.className = 'badge badge-success';
+            badge.textContent = 'ON';
+        }
 
         header.appendChild(title);
         header.appendChild(badge);
 
         const desc = document.createElement('div');
         desc.className = 'setting-desc';
-        desc.textContent = `qgl_config.txt.${pkg}`;
+        desc.textContent = info.isNoQGL
+            ? (currentTranslations.noQGLProfileDesc || 'No QGL config for this app')
+            : `qgl_config.txt.${pkg}`;
 
         textCol.appendChild(header);
         textCol.appendChild(desc);
@@ -5616,12 +5725,16 @@ async function openAppProfileEditor(pkg) {
         fileContent = (res && res.stdout) ? res.stdout : '';
     }
 
+    const isNoQGL = !isGlobal && _perAppProfilesCache && _perAppProfilesCache[pkg] && _perAppProfilesCache[pkg].isNoQGL;
+
     title.textContent = isGlobal
         ? (currentTranslations.globalQGLProfile || 'Global QGL Profile')
         : `${currentTranslations.appProfileModalTitle || 'App QGL Profile'}: ${pkg}`;
     subtitle.textContent = isGlobal
         ? (currentTranslations.globalQGLProfileDesc || 'Applied to all apps without a specific profile')
-        : (currentTranslations.appProfileModalSub || 'Per-app QGL configuration');
+        : isNoQGL
+            ? (currentTranslations.noQGLProfileSubtitle || 'No QGL config — GPU runs stock. Add keys to convert to custom config.')
+            : (currentTranslations.appProfileModalSub || 'Per-app QGL configuration');
     pkgInput.value = isGlobal ? 'global (all apps)' : pkg;
     pkgInput.readOnly = true;
     enabledToggle.checked = true;
@@ -5648,8 +5761,8 @@ async function saveAppProfile() {
     const isGlobal = pkgInput.value.includes('global');
     const content = editor.value;
 
-    if (!content.trim()) {
-        showToast(currentTranslations.msgNoQGLKeys || 'No QGL keys entered.');
+    if (isGlobal && !content.trim()) {
+        showToast(currentTranslations.msgNoQGLKeys || 'Global profile cannot be empty.');
         return;
     }
 
@@ -5664,13 +5777,20 @@ async function saveAppProfile() {
             targetPath = `${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}.${pkg}`;
         }
 
-        const safeContent = content.replace(/'/g, "'\\''");
-        const tmpPath = targetPath + '.tmp';
-        const res = await exec(`printf '%s' '${safeContent}' > "${tmpPath}" && mv -f "${tmpPath}" "${targetPath}"`);
+        let res;
+        if (!content.trim()) {
+            const tmpPath = targetPath + '.tmp';
+            res = await exec(`touch "${tmpPath}" && mv -f "${tmpPath}" "${targetPath}"`);
+        } else {
+            const safeContent = content.replace(/'/g, "'\\''");
+            const tmpPath = targetPath + '.tmp';
+            res = await exec(`printf '%s' '${safeContent}' > "${tmpPath}" && mv -f "${tmpPath}" "${targetPath}"`);
+        }
 
         if (res && res.errno === 0) {
+            const isNoQGL = !isGlobal && !content.trim();
             const lines = content.split('\n').filter(l => l.trim()).length;
-            logToTerminal(`QGL profile saved for ${isGlobal ? 'global' : _currentEditPkg} (${lines} lines)`, 'success');
+            logToTerminal(`QGL profile saved for ${isGlobal ? 'global' : _currentEditPkg}${isNoQGL ? ' (no-QGL)' : ` (${lines} lines)`}`, 'success');
             incrementStat('configChanges');
         } else {
             logToTerminal('Failed to save QGL profile', 'error');
@@ -5717,8 +5837,13 @@ async function openAppPicker() {
     const modal = document.getElementById('appPickerModal');
     const list = document.getElementById('appPickerList');
     const search = document.getElementById('appPickerSearch');
+    const choiceEl = document.getElementById('profileTypeChoice');
 
     if (!modal || !list) return;
+
+    if (choiceEl) choiceEl.style.display = 'none';
+    list.style.display = '';
+    if (search) search.style.display = '';
 
     list.innerHTML = `<div style="text-align:center;padding:20px;opacity:0.5;">${currentTranslations.loadingApps || 'Loading installed apps...'}</div>`;
     modal.style.display = 'flex';
@@ -5740,6 +5865,8 @@ async function openAppPicker() {
             if (!pkg) return;
 
             const hasProfile = existingApps.includes(pkg);
+            const profileInfo = hasProfile && _perAppProfilesCache ? _perAppProfilesCache[pkg] : null;
+            const isNoQGL = profileInfo && profileInfo.isNoQGL;
 
             const item = document.createElement('div');
             item.className = 'setting-item app-picker-item';
@@ -5756,33 +5883,100 @@ async function openAppPicker() {
 
             const desc = document.createElement('div');
             desc.className = 'setting-desc';
-            desc.textContent = hasProfile
-                ? (currentTranslations.hasProfile || 'Has QGL profile')
-                : (currentTranslations.noProfile || 'Uses global profile');
+            desc.textContent = isNoQGL
+                ? (currentTranslations.noQGLProfileDesc || 'No QGL config for this app')
+                : hasProfile
+                    ? (currentTranslations.hasProfile || 'Has QGL profile')
+                    : (currentTranslations.noProfile || 'Uses global profile');
 
             textCol.appendChild(title);
             textCol.appendChild(desc);
 
             if (hasProfile) {
                 const badge = document.createElement('span');
-                badge.className = 'badge badge-success';
-                badge.textContent = '✓';
+                badge.className = isNoQGL ? 'badge badge-danger' : 'badge badge-success';
+                badge.textContent = isNoQGL ? '🚫' : '✓';
                 item.appendChild(textCol);
                 item.appendChild(badge);
+
+                item.addEventListener('click', () => {
+                    closeQGLModal('appPickerModal');
+                    openAppProfileEditor(pkg);
+                });
             } else {
                 item.appendChild(textCol);
-            }
 
-            item.addEventListener('click', () => {
-                closeQGLModal('appPickerModal');
-                openAppProfileEditor(pkg);
-            });
+                item.addEventListener('click', () => {
+                    showProfileTypeChoice(pkg);
+                });
+            }
 
             list.appendChild(item);
         });
     } catch (e) {
         list.innerHTML = `<div style="text-align:center;padding:20px;color:var(--danger,#ef4444);">${currentTranslations.msgLoadAppsFail || 'Failed to load apps'}: ${e.message || e}</div>`;
     }
+}
+
+async function showProfileTypeChoice(pkg) {
+    const choiceEl = document.getElementById('profileTypeChoice');
+    const pickerList = document.getElementById('appPickerList');
+    const pickerSearch = document.getElementById('appPickerSearch');
+    const choiceAppName = document.getElementById('choiceAppName');
+    if (!choiceEl || !pickerList) return;
+
+    pickerList.style.display = 'none';
+    if (pickerSearch) pickerSearch.style.display = 'none';
+    choiceEl.style.display = '';
+    if (choiceAppName) choiceAppName.textContent = pkg;
+
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    return new Promise((resolve) => {
+        const cBtn = document.getElementById('btnChoiceCustom');
+        const nBtn = document.getElementById('btnChoiceNoQGL');
+        const bBtn = document.getElementById('btnChoiceBack');
+
+        const cleanup = () => {
+            controller.abort();
+            choiceEl.style.display = 'none';
+            pickerList.style.display = '';
+            if (pickerSearch) pickerSearch.style.display = '';
+        };
+
+        if (cBtn) cBtn.addEventListener('click', () => {
+            cleanup();
+            closeQGLModal('appPickerModal');
+            openAppProfileEditor(pkg);
+            resolve();
+        }, { once: true, signal });
+
+        if (nBtn) nBtn.addEventListener('click', async () => {
+            cleanup();
+            setLoading(true);
+            try {
+                const filePath = `${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}.${pkg}`;
+                const tmpPath = filePath + '.tmp';
+                await exec(`touch "${tmpPath}" && mv -f "${tmpPath}" "${filePath}"`);
+                logToTerminal(`No-QGL profile set for ${pkg}`, 'success');
+                incrementStat('configChanges');
+            } catch (e) {
+                logToTerminal('Failed to set no-QGL profile: ' + (e.message || e), 'error');
+            } finally {
+                setLoading(false);
+            }
+            closeQGLModal('appPickerModal');
+            renderAppProfilesList();
+            showToast(currentTranslations.msgNoQGLSet || `No QGL profile set for ${pkg}`);
+            resolve();
+        }, { once: true, signal });
+
+        if (bBtn) bBtn.addEventListener('click', () => {
+            cleanup();
+            resolve();
+        }, { once: true, signal });
+    });
 }
 
 function filterAppPicker(query) {

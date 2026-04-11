@@ -532,7 +532,9 @@ if [ "$QGL" = "n" ]; then
       log_boot "QGL disabled → no qgl_config.txt present"
     fi
   fi
+  touch "/data/local/tmp/.qgl_disabled" 2>/dev/null || true
 else
+  rm -f "/data/local/tmp/.qgl_disabled" 2>/dev/null || true
   log_boot "QGL enabled → file will be installed below"
 fi
 

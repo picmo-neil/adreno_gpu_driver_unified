@@ -121,6 +121,9 @@ if [ "$QGL" != "y" ]; then
   exit 0
 fi
 
+rm -f "/data/local/tmp/.qgl_disabled" 2>/dev/null || true
+_qgl_log "[BOOT] Removed .qgl_disabled marker (QGL enabled)"
+
 # Capture initial state
 _qgl_state_capture "BEFORE_BOOT_QGL"
 

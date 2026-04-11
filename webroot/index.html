@@ -384,6 +384,19 @@
 
             <div class="divider elegant-divider"></div>
 
+            <div class="apply-now-row">
+                <div class="text-col">
+                    <div class="setting-title" data-i18n="applyQGLNowTitle">Apply QGL Config Now</div>
+                    <div class="setting-desc" data-i18n="applyQGLNowDesc">Apply QGL changes immediately without rebooting. Kill &amp; reopen apps to see effect.</div>
+                </div>
+                <button class="btn-apply-now ripple-effect" id="btnApplyQGLNow" aria-label="Apply QGL config now without rebooting">
+                    <span class="btn-icon">⚡</span>
+                    <span data-i18n="applyQGLNow">Apply Now</span>
+                </button>
+            </div>
+
+            <div class="divider elegant-divider"></div>
+
             <div class="setting-item ripple-target hover-lift">
                 <div class="text-col">
                     <div class="setting-header">
@@ -1035,6 +1048,25 @@
         </div>
         <div id="appPickerList" style="overflow-y: auto; max-height: 50vh; padding: 0 12px 12px;">
             <!-- App list rendered dynamically -->
+        </div>
+        <div id="profileTypeChoice" style="display:none; padding: 20px 12px;">
+            <div style="text-align: center; margin-bottom: 16px;">
+                <div style="font-size: 1.1em; font-weight: 600; margin-bottom: 4px;" data-i18n="chooseProfileType">Choose profile type</div>
+                <div style="opacity: 0.7; font-size: 0.9em;"><span id="choiceAppName"></span></div>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 10px;">
+                <button id="btnChoiceCustom" class="btn-small ripple-effect modern-btn" style="width: 100%; padding: 12px; font-size: 0.95em;">
+                    <span class="btn-icon">✏️</span>
+                    <span data-i18n="customConfig">Custom Config</span>
+                </button>
+                <button id="btnChoiceNoQGL" class="btn-small ripple-effect modern-btn" style="width: 100%; padding: 12px; font-size: 0.95em; background: var(--error-bg); border-color: rgba(248,113,113,0.3); color: var(--error);">
+                    <span class="btn-icon">🚫</span>
+                    <span data-i18n="noQGLConfig">No QGL</span>
+                </button>
+                <button id="btnChoiceBack" class="btn-small ripple-effect modern-btn" style="width: 100%; padding: 8px; font-size: 0.85em; opacity: 0.6;">
+                    <span data-i18n="back">← Back</span>
+                </button>
+            </div>
         </div>
     </div>
 </div>

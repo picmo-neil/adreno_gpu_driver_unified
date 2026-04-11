@@ -32,6 +32,7 @@ QGL_CONFIG_MOD="$MODDIR/qgl_config.txt"
 QGL_CONFIG_DIR_SD="/sdcard/Adreno_Driver/Config"
 QGL_TARGET="/data/vendor/gpu/qgl_config.txt"
 QGL_DIR="/data/vendor/gpu"
+QGL_DISABLED_MARKER="/data/local/tmp/.qgl_disabled"
 
 # Log files
 QGL_TRIGGER_LOG="/sdcard/Adreno_Driver/qgl_trigger.log"
