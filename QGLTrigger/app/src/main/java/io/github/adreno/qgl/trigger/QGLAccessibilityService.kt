@@ -129,8 +129,13 @@ class QGLAccessibilityService : AccessibilityService() {
                 if [ "$S{_last}" = "NO_QGL" ]; then
                     echo "SAME"
                 else
-                    rm -f $QGL_TARGET 2>/dev/null || true
-                    echo "REMOVED:DISABLED"
+                    if rm -f $QGL_TARGET; then
+                        echo "REMOVED:DISABLED"
+                    elif truncate -s 0 $QGL_TARGET 2>/dev/null; then
+                        echo "REMOVED:DISABLED:TRUNCATED"
+                    else
+                        echo "FAIL:rm_disabled"
+                    fi
                 fi
             else
                 pkg='$packageName'
@@ -149,8 +154,13 @@ class QGLAccessibilityService : AccessibilityService() {
                     if [ "$S{_last}" = "NO_QGL" ]; then
                         echo "SAME"
                     else
-                        rm -f $QGL_TARGET 2>/dev/null || true
-                        echo "REMOVED:NOQGL"
+                        if rm -f $QGL_TARGET; then
+                            echo "REMOVED:NOQGL"
+                        elif truncate -s 0 $QGL_TARGET 2>/dev/null; then
+                            echo "REMOVED:NOQGL:TRUNCATED"
+                        else
+                            echo "FAIL:rm_noqgl"
+                        fi
                     fi
                 else
                     for dir in $CONFIG_DIR_SD $CONFIG_DIR_DATA; do
@@ -178,8 +188,13 @@ class QGLAccessibilityService : AccessibilityService() {
                             if [ "$S{_last}" = "NO_QGL" ]; then
                                 echo "SAME"
                             else
-                                rm -f $QGL_TARGET 2>/dev/null || true
-                                echo "REMOVED:SYS_DEFAULT"
+                                if rm -f $QGL_TARGET; then
+                                    echo "REMOVED:SYS_DEFAULT"
+                                elif truncate -s 0 $QGL_TARGET 2>/dev/null; then
+                                    echo "REMOVED:SYS_DEFAULT:TRUNCATED"
+                                else
+                                    echo "FAIL:rm_sys_default"
+                                fi
                             fi
                         else
                             _hash="$S{_src}:$S{_mt}"
@@ -188,18 +203,26 @@ class QGLAccessibilityService : AccessibilityService() {
                             else
                                 _tmp="${QGL_TARGET}.tmp.$S$S"
                                 mkdir -p $QGL_DIR 2>/dev/null
-                                chcon $SELINUX_CONTEXT $QGL_DIR 2>/dev/null || true
-                                if cp -f "$S{_src}" "$S{_tmp}" 2>/dev/null; then
-                                    chcon $SELINUX_CONTEXT "$S{_tmp}" 2>/dev/null || true
-                                    chmod 0644 "$S{_tmp}" 2>/dev/null || true
-                                    if mv -f "$S{_tmp}" $QGL_TARGET 2>/dev/null; then
-                                        touch $QGL_TARGET 2>/dev/null || true
-                                        chcon $SELINUX_CONTEXT $QGL_TARGET 2>/dev/null || true
-                                        chmod 0644 $QGL_TARGET 2>/dev/null || true
-                                        echo "APPLIED:$S{_hash}"
+                                chcon $SELINUX_CONTEXT $QGL_DIR || echo "DIAG:chcon_dir_failed:$S?"
+                                if cp -f "$S{_src}" "$S{_tmp}"; then
+                                    if chcon $SELINUX_CONTEXT "$S{_tmp}"; then
+                                        if chmod 0644 "$S{_tmp}"; then
+                                            if mv -f "$S{_tmp}" $QGL_TARGET; then
+                                                touch $QGL_TARGET 2>/dev/null || true
+                                                chcon $SELINUX_CONTEXT $QGL_TARGET || echo "DIAG:chcon_target_failed"
+                                                chmod 0644 $QGL_TARGET 2>/dev/null || echo "DIAG:chmod_target_failed"
+                                                echo "APPLIED:$S{_hash}"
+                                            else
+                                                rm -f "$S{_tmp}" 2>/dev/null || true
+                                                echo "FAIL:mv"
+                                            fi
+                                        else
+                                            rm -f "$S{_tmp}" 2>/dev/null || true
+                                            echo "FAIL:chmod_tmp"
+                                        fi
                                     else
                                         rm -f "$S{_tmp}" 2>/dev/null || true
-                                        echo "FAIL:mv"
+                                        echo "FAIL:chcon_tmp"
                                     fi
                                 else
                                     rm -f "$S{_tmp}" 2>/dev/null || true
@@ -209,8 +232,13 @@ class QGLAccessibilityService : AccessibilityService() {
                         fi
                     else
                         if [ "$S{_last}" != "NO_QGL" ]; then
-                            rm -f $QGL_TARGET 2>/dev/null || true
-                            echo "REMOVED:NO_CONFIG"
+                            if rm -f $QGL_TARGET; then
+                                echo "REMOVED:NO_CONFIG"
+                            elif truncate -s 0 $QGL_TARGET 2>/dev/null; then
+                                echo "REMOVED:NO_CONFIG:TRUNCATED"
+                            else
+                                echo "FAIL:rm_no_config"
+                            fi
                         else
                             echo "SAME"
                         fi
@@ -293,20 +321,81 @@ class QGLAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun createShellInternal(): Boolean {
+    private fun drainStderr(process: Process) {
+        Thread({
+            try {
+                val reader = BufferedReader(InputStreamReader(process.errorStream))
+                val buf = CharArray(1024)
+                while (reader.read(buf) != -1) {
+                    // drain only — discard
+                }
+            } catch (_: IOException) {
+            }
+        }, "QGL-StderrDrain").apply { isDaemon = true }.start()
+    }
+
+    private data class VerifiedShell(
+        val process: Process,
+        val stdin: DataOutputStream,
+        val stdout: BufferedReader
+    )
+
+    private fun tryCreateShell(command: String): VerifiedShell? {
         return try {
-            val p = Runtime.getRuntime().exec("su")
-            persistentShell = p
-            shellStdin = DataOutputStream(p.outputStream)
-            shellStdout = BufferedReader(InputStreamReader(p.inputStream))
-            Log.d(TAG, "Persistent root shell created")
-            true
+            val p = Runtime.getRuntime().exec(command)
+            drainStderr(p)
+            val stdin = DataOutputStream(p.outputStream)
+            val stdout = BufferedReader(InputStreamReader(p.inputStream))
+            stdin.writeBytes("id\n")
+            stdin.writeBytes("echo QGL_SHELL_READY\n")
+            stdin.flush()
+            val deadline = System.currentTimeMillis() + 3000
+            val sb = StringBuilder()
+            val buf = CharArray(256)
+            while (System.currentTimeMillis() < deadline) {
+                if (stdout.ready()) {
+                    val n = stdout.read(buf)
+                    if (n > 0) sb.append(buf, 0, n)
+                    if (sb.contains("QGL_SHELL_READY")) {
+                        val idLine = sb.toString().lines().firstOrNull { it.contains("uid=") } ?: ""
+                        if (idLine.contains("uid=0")) {
+                            Log.d(TAG, "Root shell verified via '$command': $idLine")
+                            return VerifiedShell(p, stdin, stdout)
+                        } else {
+                            Log.w(TAG, "Shell '$command' is NOT root: $idLine")
+                            p.destroyForcibly()
+                            return null
+                        }
+                    }
+                } else {
+                    Thread.sleep(10)
+                }
+            }
+            Log.w(TAG, "Shell '$command' verification timed out")
+            p.destroyForcibly()
+            null
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to create persistent root shell", e)
+            Log.w(TAG, "Shell '$command' creation failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun createShellInternal(): Boolean {
+        synchronized(shellLock) {
+            for (cmd in arrayOf("su", "/system/xbin/su", "/system/bin/su", "/sbin/su")) {
+                val vs = tryCreateShell(cmd)
+                if (vs != null) {
+                    persistentShell = vs.process
+                    shellStdin = vs.stdin
+                    shellStdout = vs.stdout
+                    return true
+                }
+            }
+            Log.e(TAG, "All su paths failed — no root access available. Grant root to QGLTrigger via Magisk/KSU/APatch manager.")
             persistentShell = null
             shellStdin = null
             shellStdout = null
-            false
+            return false
         }
     }
 

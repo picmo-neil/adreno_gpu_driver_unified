@@ -448,6 +448,7 @@ detect_metamodule() {
         "meta-mountify" "metamountify" "MetaMountify" \
         "meta-hybrid" "meta-hybrid-mount" "meta_hybrid_mount" "MetaHybrid" \
         "magic_mount" "overlayfs_module" \
+        "magic_mount_rs" "magic-mount-rs" "MagicMountRS" "magicmountrs" \
         "ksu_overlayfs" "overlayfs-ksu" "ksu-mm" "ksumagic" "meta-ksu-overlay" \
         "MKSU_Module" "mksu_module" \
         "meta-apatch" "meta-ap" "apatch-overlay" "apatch-mount" "meta_apatch_overlay" "apatch-mm"; do
@@ -489,6 +490,15 @@ if [ "$ROOT_TYPE" = "KernelSU" ]; then
     ui_print "  Module mounting may fail without a metamodule"
     log_only "WARNING: KernelSU detected but no metamodule found"
     MAGIC_MOUNT_KSU=true
+  fi
+  if [ "$METAMODULE_ID" = "magic_mount_rs" ] || [ "$METAMODULE_ID" = "magic-mount-rs" ] || [ "$METAMODULE_ID" = "MagicMountRS" ]; then
+    ui_print " "
+    ui_print "[!] ⚠️  Magic Mount RS (Rust rewrite) detected!"
+    ui_print "    Known bug: attribute copy on read-only mount fails,"
+    ui_print "    causing wrong SELinux contexts on vendor GPU libs."
+    ui_print "    This can cause bootloops on some devices."
+    ui_print "    Fix: Update Magic Mount RS or switch to meta-overlayfs."
+    log_only "WARNING: Magic Mount RS detected — known bootloop risk"
   fi
 elif [ "$ROOT_TYPE" = "APatch" ]; then
   METAMODULE_INSTALLED=true
@@ -1441,7 +1451,7 @@ log_only "Setting SELinux contexts for module files..."
 
 SELINUX_SET=0
 
-if command_exists chcon; then
+if chcon --help >/dev/null 2>&1; then
   for libdir in "$MODPATH/system/vendor/lib/egl" "$MODPATH/system/vendor/lib64/egl" \
                 "$MODPATH/system/vendor/lib" "$MODPATH/system/vendor/lib64"; do
     if [ -d "$libdir" ]; then

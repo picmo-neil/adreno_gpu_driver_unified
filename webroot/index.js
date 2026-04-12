@@ -2637,6 +2637,9 @@ async function applyQGLNow() {
         await exec(`printf '%s' '${safeContent}' > "${tmpPath}" && mv -f "${tmpPath}" "${adrenoConfigPath}"`);
         logToTerminal('Updated adreno_config.txt with QGL settings', 'info');
 
+        await exec(`cp -f "${adrenoConfigPath}" "/data/local/tmp/adreno_config.txt" && chmod 0644 "/data/local/tmp/adreno_config.txt"`);
+        logToTerminal('Mirrored adreno_config.txt to /data/local/tmp', 'info');
+
         const applyRes = await exec(`sh /data/adb/modules/${MOD_ID}/apply_qgl.sh --apply-now 2>&1`);
         if (applyRes && applyRes.errno === 0) {
             if (qglEnabled) {

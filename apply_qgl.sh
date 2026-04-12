@@ -108,7 +108,10 @@ _qgl_log "[CFG] QGL=$_qgl_enabled QGL_PERAPP=$_qgl_perapp QGL_SYSTEM_APPS=$_qgl_
 
 if [ "$_qgl_enabled" != "y" ]; then
   _qgl_log "[APPLY-NOW] QGL is disabled — removing QGL target and writing disabled marker"
-  rm -f "$QGL_TARGET" 2>/dev/null || true
+  if ! rm -f "$QGL_TARGET"; then
+    truncate -s 0 "$QGL_TARGET" 2>/dev/null || true
+    _qgl_log "[APPLY-NOW] rm failed, truncated QGL target as fallback"
+  fi
   _qgl_diag "APPLY_NOW: Removed QGL target"
   touch "/data/local/tmp/.qgl_disabled" 2>/dev/null || true
   _qgl_log "[APPLY-NOW] Disabled marker written to /data/local/tmp/.qgl_disabled"
@@ -161,13 +164,23 @@ if ! cp -f "$_qsrc" "$_qtmp" 2>/dev/null; then
 fi
 
 touch "$_qtmp" 2>/dev/null || true
-chcon u:object_r:same_process_hal_file:s0 "$_qtmp" 2>/dev/null || true
-chmod 0644 "$_qtmp" 2>/dev/null || true
+if ! chcon u:object_r:same_process_hal_file:s0 "$_qtmp"; then
+  rm -f "$_qtmp" 2>/dev/null || true
+  _qgl_log "[APPLY-NOW] FAILED: chcon on tmp file"
+  _qgl_diag "APPLY_NOW_RESULT: FAIL - chcon tmp failed"
+  exit 1
+fi
+if ! chmod 0644 "$_qtmp"; then
+  rm -f "$_qtmp" 2>/dev/null || true
+  _qgl_log "[APPLY-NOW] FAILED: chmod on tmp file"
+  _qgl_diag "APPLY_NOW_RESULT: FAIL - chmod tmp failed"
+  exit 1
+fi
 
-if mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
+if mv -f "$_qtmp" "$QGL_TARGET"; then
   touch "$QGL_TARGET" 2>/dev/null || true
-  chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" 2>/dev/null || true
-  chmod 0644 "$QGL_TARGET" 2>/dev/null || true
+  chcon u:object_r:same_process_hal_file:s0 "$QGL_TARGET" || _qgl_diag "APPLY_NOW: chcon target failed"
+  chmod 0644 "$QGL_TARGET" || _qgl_diag "APPLY_NOW: chmod target failed"
   _lines=$(wc -l < "$QGL_TARGET" 2>/dev/null || echo '?')
   _qgl_log "[APPLY-NOW] QGL applied successfully ($_lines lines)"
   _qgl_diag "APPLY_NOW_RESULT: SUCCESS - $_lines lines from $_qsrc"
@@ -175,7 +188,7 @@ if mv -f "$_qtmp" "$QGL_TARGET" 2>/dev/null; then
 else
   rm -f "$_qtmp" 2>/dev/null || true
   _qgl_log "[APPLY-NOW] FAILED to apply QGL (mv failed)"
-  _qgl_diag "APPLY_NOW_RESULT: FAIL - mv failed"
+  _qgl_diag "APPLY_NOW_RESULT: FAIL - mv failed: $?"
   exit 1
 fi
 

@@ -464,6 +464,34 @@ if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ] && [ -f "$MODDIR/QGLTrigger.apk" 
       ;;
   esac
   settings put secure accessibility_enabled 1 2>/dev/null || true
+
+  # Auto-grant root to QGLTrigger APK so the AccessibilityService can use su
+  _apk_pkg="io.github.adreno.qgl.trigger"
+  _apk_uid=$(awk -v pkg="$_apk_pkg" '$1 == pkg {print $2; exit}' /data/system/packages.list 2>/dev/null || true)
+  if [ -n "$_apk_uid" ] && [ "$_apk_uid" -gt 0 ] 2>/dev/null; then
+    if [ -f /data/adb/magisk.db ]; then
+      if magisk --sqlite "INSERT OR REPLACE INTO policies (uid,policy,until,logging,notification) VALUES($_apk_uid,1,0,1,1);" 2>/dev/null; then
+        log_service "[QGL] Root granted to $_apk_pkg (uid=$_apk_uid) via Magisk"
+      elif sqlite3 /data/adb/magisk.db "INSERT OR REPLACE INTO policies (uid,policy,until,logging,notification) VALUES($_apk_uid,1,0,1,1);" 2>/dev/null; then
+        log_service "[QGL] Root granted to $_apk_pkg (uid=$_apk_uid) via sqlite3"
+      else
+        log_service "[QGL] Could not auto-grant root via Magisk — user must grant manually"
+      fi
+    elif [ -f /data/adb/ap/package_config ]; then
+      if ! grep -qF "$_apk_pkg" /data/adb/ap/package_config 2>/dev/null; then
+        printf '%s,0,1,%s,0,u:r:magisk:s0\n' "$_apk_pkg" "$_apk_uid" >> /data/adb/ap/package_config 2>/dev/null && \
+          log_service "[QGL] Root granted to $_apk_pkg (uid=$_apk_uid) via APatch (takes effect on next boot)" || \
+          log_service "[QGL] Could not auto-grant root via APatch"
+      else
+        log_service "[QGL] $_apk_pkg already in APatch package_config"
+      fi
+    else
+      log_service "[QGL] KernelSU detected — cannot auto-grant root from shell. Grant root to $_apk_pkg via KSU Manager app."
+    fi
+  else
+    log_service "[QGL] Could not find UID for $_apk_pkg — user must grant root manually"
+  fi
+  unset _apk_pkg _apk_uid
   unset _qgl_apk_pkg _qgl_apk_version _acc_comp _current
 fi
 
@@ -728,7 +756,7 @@ if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ]; then
       _pkg="${_base#qgl_config.txt.}"
       case "$_pkg" in *.disabled|*.tmp|*.tmp.*) continue ;; esac
       [ -n "$_pkg" ] || continue
-      grep -qx "$_pkg" "$_noqgl_file" 2>/dev/null || echo "$_pkg" >> "$_noqgl_file"
+      grep -qxF "$_pkg" "$_noqgl_file" 2>/dev/null || echo "$_pkg" >> "$_noqgl_file"
       rm -f "$_f" 2>/dev/null || true
       _migrated=$((_migrated + 1))
     done
