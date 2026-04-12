@@ -29,6 +29,7 @@ private const val CONFIG_DIR_SD = "/sdcard/Adreno_Driver/Config"
 private const val CONFIG_DIR_DATA = "/data/local/tmp"
 private const val CONFIG_PATH_SD = "/sdcard/Adreno_Driver/Config/adreno_config.txt"
 private const val CONFIG_PATH_DATA = "/data/local/tmp/adreno_config.txt"
+private const val SYSTEM_APPS_CACHE_MS = 30000L
 
 class QGLAccessibilityService : AccessibilityService() {
 
@@ -36,6 +37,7 @@ class QGLAccessibilityService : AccessibilityService() {
     private var lastSwitchTime: Long = 0L
     private var lastAppliedConfig: String? = null
     private var qglSystemAppsEnabled = false
+    private var qglSystemAppsCacheTime: Long = 0L
 
     @Volatile private var persistentShell: Process? = null
     @Volatile private var shellStdin: DataOutputStream? = null
@@ -85,9 +87,8 @@ class QGLAccessibilityService : AccessibilityService() {
         lastAppPackage = packageName
         lastSwitchTime = now
 
-        val isSystemPkg = isSystemApp(packageName) && !qglSystemAppsEnabled
-
         scriptExecutor.execute {
+            val isSystemPkg = isSystemApp(packageName) && !isQGLSystemAppsEnabled()
             handleAppSwitch(packageName, isSystemPkg)
         }
     }
@@ -101,15 +102,25 @@ class QGLAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun isQGLSystemAppsEnabled(): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - qglSystemAppsCacheTime < SYSTEM_APPS_CACHE_MS && qglSystemAppsCacheTime > 0) {
+            return qglSystemAppsEnabled
+        }
+        qglSystemAppsEnabled = readQGLSystemApps()
+        qglSystemAppsCacheTime = now
+        return qglSystemAppsEnabled
+    }
+
     private fun readQGLSystemApps(): Boolean {
-        val result = runShellScript("for f in $CONFIG_PATH_DATA $CONFIG_PATH_SD; do [ -f \"\$f\" ] && { grep -q '^QGL_SYSTEM_APPS=y' \"\$f\" && echo y || echo n; break; } 2>/dev/null; done").trim()
+        val result = runShellScript("for f in $CONFIG_PATH_SD $CONFIG_PATH_DATA; do [ -f \"\$f\" ] && { grep -q '^QGL_SYSTEM_APPS=y' \"\$f\" && echo y || echo n; break; } 2>/dev/null; done").trim()
         return result == "y"
     }
 
     private fun handleAppSwitch(packageName: String, isSystemPkg: Boolean) {
         val last = lastAppliedConfig ?: ""
         val sysFlag = if (isSystemPkg) "1" else "0"
-        val S = "$" // shell variable prefix
+        val S = "$"
 
         val script = """
             _last='$last'
@@ -125,10 +136,11 @@ class QGLAccessibilityService : AccessibilityService() {
                 pkg='$packageName'
                 _src=""
                 _mt=""
+                _type=""
                 _is_noqgl=0
-                for dir in $CONFIG_DIR_DATA $CONFIG_DIR_SD; do
+                for dir in $CONFIG_DIR_SD $CONFIG_DIR_DATA; do
                     f="$S{dir}/no_qgl_packages.txt"
-                    if [ -f "$S{f}" ] && grep -qx "$S{pkg}" "$S{f}" 2>/dev/null; then
+                    if [ -f "$S{f}" ] && grep -qxF "$S{pkg}" "$S{f}" 2>/dev/null; then
                         _is_noqgl=1
                         break
                     fi
@@ -141,59 +153,66 @@ class QGLAccessibilityService : AccessibilityService() {
                         echo "REMOVED:NOQGL"
                     fi
                 else
-                    for dir in $CONFIG_DIR_DATA $CONFIG_DIR_SD; do
+                    for dir in $CONFIG_DIR_SD $CONFIG_DIR_DATA; do
                         f="$S{dir}/qgl_config.txt.$S{pkg}"
                         if [ -f "$S{f}" ] && [ -s "$S{f}" ]; then
                             _src="$S{f}"
                             _mt=$S(stat -c '%Y' "$S{f}" 2>/dev/null || echo '0')
+                            _type="PERAPP"
                             break
                         fi
                     done
                     if [ -z "$S{_src}" ]; then
-                        for dir in $CONFIG_DIR_DATA $CONFIG_DIR_SD; do
+                        for dir in $CONFIG_DIR_SD $CONFIG_DIR_DATA; do
                             f="$S{dir}/qgl_config.txt"
                             if [ -f "$S{f}" ] && [ -s "$S{f}" ]; then
                                 _src="$S{f}"
                                 _mt=$S(stat -c '%Y' "$S{f}" 2>/dev/null || echo '0')
+                                _type="DEFAULT"
                                 break
                             fi
                         done
                     fi
                     if [ -n "$S{_src}" ]; then
-                        _hash="$S{_src}:$S{_mt}"
-                        if [ "$S{_hash}" = "$S{_last}" ]; then
-                            echo "SAME:$S{_hash}"
-                        else
-                            _tmp="${QGL_TARGET}.tmp.$S$S"
-                            mkdir -p $QGL_DIR 2>/dev/null
-                            chcon $SELINUX_CONTEXT $QGL_DIR 2>/dev/null || true
-                            if cp -f "$S{_src}" "$S{_tmp}" 2>/dev/null; then
-                                chcon $SELINUX_CONTEXT "$S{_tmp}" 2>/dev/null || true
-                                chmod 0644 "$S{_tmp}" 2>/dev/null || true
-                                if mv -f "$S{_tmp}" $QGL_TARGET 2>/dev/null; then
-                                    touch $QGL_TARGET 2>/dev/null || true
-                                    chcon $SELINUX_CONTEXT $QGL_TARGET 2>/dev/null || true
-                                    chmod 0644 $QGL_TARGET 2>/dev/null || true
-                                    echo "APPLIED:$S{_hash}"
-                                else
-                                    rm -f "$S{_tmp}" 2>/dev/null || true
-                                    echo "FAIL:mv"
-                                fi
-                            else
-                                rm -f "$S{_tmp}" 2>/dev/null || true
-                                echo "FAIL:cp"
-                            fi
-                        fi
-                    else
-                        if [ "$S{_sys}" = "1" ]; then
+                        if [ "$S{_sys}" = "1" ] && [ "$S{_type}" = "DEFAULT" ]; then
                             if [ "$S{_last}" = "NO_QGL" ]; then
                                 echo "SAME"
                             else
                                 rm -f $QGL_TARGET 2>/dev/null || true
-                                echo "REMOVED:SYS"
+                                echo "REMOVED:SYS_DEFAULT"
                             fi
                         else
-                            echo "NONE"
+                            _hash="$S{_src}:$S{_mt}"
+                            if [ "$S{_hash}" = "$S{_last}" ]; then
+                                echo "SAME:$S{_hash}"
+                            else
+                                _tmp="${QGL_TARGET}.tmp.$S$S"
+                                mkdir -p $QGL_DIR 2>/dev/null
+                                chcon $SELINUX_CONTEXT $QGL_DIR 2>/dev/null || true
+                                if cp -f "$S{_src}" "$S{_tmp}" 2>/dev/null; then
+                                    chcon $SELINUX_CONTEXT "$S{_tmp}" 2>/dev/null || true
+                                    chmod 0644 "$S{_tmp}" 2>/dev/null || true
+                                    if mv -f "$S{_tmp}" $QGL_TARGET 2>/dev/null; then
+                                        touch $QGL_TARGET 2>/dev/null || true
+                                        chcon $SELINUX_CONTEXT $QGL_TARGET 2>/dev/null || true
+                                        chmod 0644 $QGL_TARGET 2>/dev/null || true
+                                        echo "APPLIED:$S{_hash}"
+                                    else
+                                        rm -f "$S{_tmp}" 2>/dev/null || true
+                                        echo "FAIL:mv"
+                                    fi
+                                else
+                                    rm -f "$S{_tmp}" 2>/dev/null || true
+                                    echo "FAIL:cp"
+                                fi
+                            fi
+                        fi
+                    else
+                        if [ "$S{_last}" != "NO_QGL" ]; then
+                            rm -f $QGL_TARGET 2>/dev/null || true
+                            echo "REMOVED:NO_CONFIG"
+                        else
+                            echo "SAME"
                         fi
                     fi
                 fi
@@ -201,7 +220,7 @@ class QGLAccessibilityService : AccessibilityService() {
         """.trimIndent()
 
         val output = runShellScript(script).trim()
-        Log.d(TAG, "QGL switch for $packageName: $output")
+        Log.d(TAG, "QGL switch for $packageName (sys=$isSystemPkg): $output")
 
         when {
             output.startsWith("APPLIED:") -> {
@@ -211,14 +230,10 @@ class QGLAccessibilityService : AccessibilityService() {
                 lastAppliedConfig = "NO_QGL"
             }
             output.startsWith("SAME") -> {
-                // no change needed
             }
             output.startsWith("FAIL:") -> {
                 Log.w(TAG, "QGL apply failed: $output")
                 lastAppliedConfig = null
-            }
-            output == "NONE" -> {
-                // no config, skip
             }
             else -> {
                 Log.w(TAG, "Unexpected QGL output: $output")
@@ -228,6 +243,12 @@ class QGLAccessibilityService : AccessibilityService() {
     }
 
     private fun runShellScript(script: String): String {
+        synchronized(shellLock) {
+            if (shellStdin == null || shellStdout == null || persistentShell?.isAlive != true) {
+                if (!createShellInternal()) return "NONE"
+            }
+        }
+
         val stdin: DataOutputStream
         val stdout: BufferedReader
         synchronized(shellLock) {
@@ -266,8 +287,26 @@ class QGLAccessibilityService : AccessibilityService() {
                 persistentShell = null
                 shellStdin = null
                 shellStdout = null
+                createShellInternal()
             }
             "NONE"
+        }
+    }
+
+    private fun createShellInternal(): Boolean {
+        return try {
+            val p = Runtime.getRuntime().exec("su")
+            persistentShell = p
+            shellStdin = DataOutputStream(p.outputStream)
+            shellStdout = BufferedReader(InputStreamReader(p.inputStream))
+            Log.d(TAG, "Persistent root shell created")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create persistent root shell", e)
+            persistentShell = null
+            shellStdin = null
+            shellStdout = null
+            false
         }
     }
 
@@ -277,21 +316,7 @@ class QGLAccessibilityService : AccessibilityService() {
             if (shell != null && shell.isAlive) {
                 return shellStdin
             }
-            return try {
-                val p = Runtime.getRuntime().exec("su")
-                persistentShell = p
-                val stdin = DataOutputStream(p.outputStream)
-                shellStdin = stdin
-                shellStdout = BufferedReader(InputStreamReader(p.inputStream))
-                Log.d(TAG, "Persistent root shell created")
-                stdin
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to create persistent root shell", e)
-                persistentShell = null
-                shellStdin = null
-                shellStdout = null
-                null
-            }
+            return if (createShellInternal()) shellStdin else null
         }
     }
 

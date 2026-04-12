@@ -5390,33 +5390,59 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 const QGL_CONFIG_DIR = '/sdcard/Adreno_Driver/Config';
 const QGL_CONFIG_PREFIX = 'qgl_config.txt';
+const QGL_MIRROR_DIR = '/data/local/tmp';
 const NO_QGL_PACKAGES_FILE = '/sdcard/Adreno_Driver/Config/no_qgl_packages.txt';
 let _perAppProfilesCache = null;
 let _noQglPackagesCache = new Set();
 let _currentEditPkg = null;
 
+async function mirrorToDataLocalTmp(srcPath) {
+    const base = srcPath.split('/').pop();
+    if (!base) return;
+    const dst = `${QGL_MIRROR_DIR}/${base}`;
+    const tmp = `${dst}.tmp`;
+    await exec(`cp -f "${srcPath}" "${tmp}" 2>/dev/null && chmod 0644 "${tmp}" 2>/dev/null && mv -f "${tmp}" "${dst}" 2>/dev/null`);
+}
+
 async function addNoQGLPackage(pkg) {
     if (!pkg || _noQglPackagesCache.has(pkg)) return;
     const tmpPath = NO_QGL_PACKAGES_FILE + '.tmp';
-    await exec(`printf '%s\\n' '${pkg}' >> "${NO_QGL_PACKAGES_FILE}" 2>/dev/null`);
+    const res = await exec(`cat "${NO_QGL_PACKAGES_FILE}" 2>/dev/null`);
+    let lines = [];
+    if (res && res.stdout && res.stdout.trim()) {
+        lines = res.stdout.trim().split('\n').map(l => l.trim()).filter(l => l);
+    }
+    if (!lines.includes(pkg)) {
+        lines.push(pkg);
+    }
+    lines.sort();
+    const content = lines.join('\n') + '\n';
+    const safeContent = content.replace(/'/g, "'\\''");
+    await exec(`printf '%s' '${safeContent}' > "${tmpPath}" && mv -f "${tmpPath}" "${NO_QGL_PACKAGES_FILE}"`);
     _noQglPackagesCache.add(pkg);
+    await mirrorToDataLocalTmp(NO_QGL_PACKAGES_FILE);
 }
 
 async function removeNoQGLPackage(pkg) {
     if (!pkg) return;
-    const tmpPath = NO_QGL_PACKAGES_FILE + '.tmp';
-    const res = await exec(`cat "${NO_QGL_PACKAGES_FILE}" 2>/dev/null`);
-    if (res && res.stdout) {
-        const lines = res.stdout.split('\n').filter(l => l.trim() && l.trim() !== pkg);
-        if (lines.length > 0) {
-            const content = lines.join('\n') + '\n';
-            const safeContent = content.replace(/'/g, "'\\''");
-            await exec(`printf '%s' '${safeContent}' > "${tmpPath}" && mv -f "${tmpPath}" "${NO_QGL_PACKAGES_FILE}"`);
-        } else {
-            await exec(`printf '' > "${tmpPath}" && mv -f "${tmpPath}" "${NO_QGL_PACKAGES_FILE}"`);
+    try {
+        const tmpPath = NO_QGL_PACKAGES_FILE + '.tmp';
+        const res = await exec(`cat "${NO_QGL_PACKAGES_FILE}" 2>/dev/null`);
+        if (res && res.stdout) {
+            const lines = res.stdout.split('\n').filter(l => l.trim() && l.trim() !== pkg);
+            if (lines.length > 0) {
+                const content = lines.join('\n') + '\n';
+                const safeContent = content.replace(/'/g, "'\\''");
+                await exec(`printf '%s' '${safeContent}' > "${tmpPath}" && mv -f "${tmpPath}" "${NO_QGL_PACKAGES_FILE}"`);
+            } else {
+                await exec(`printf '' > "${tmpPath}" && mv -f "${tmpPath}" "${NO_QGL_PACKAGES_FILE}"`);
+            }
         }
+    } catch (e) {
+        logToTerminal('removeNoQGLPackage file error: ' + (e.message || e), 'warning');
     }
     _noQglPackagesCache.delete(pkg);
+    await mirrorToDataLocalTmp(NO_QGL_PACKAGES_FILE);
 }
 
 async function loadQGLProfiles() {
@@ -5855,11 +5881,13 @@ async function saveAppProfile() {
             await addNoQGLPackage(pkg);
             // Remove any existing per-app config file
             await exec(`rm -f "${targetPath}" 2>/dev/null`);
+            await exec(`rm -f "${QGL_MIRROR_DIR}/${QGL_CONFIG_PREFIX}.${pkg}" 2>/dev/null`);
             res = { errno: 0 };
         } else if (content.trim()) {
             const safeContent = content.replace(/'/g, "'\\''");
             const tmpPath = targetPath + '.tmp';
             res = await exec(`printf '%s' '${safeContent}' > "${tmpPath}" && mv -f "${tmpPath}" "${targetPath}"`);
+            if (!isGlobal) await mirrorToDataLocalTmp(targetPath);
             // If this package was in no-QGL list, remove it (now has custom config)
             if (!isGlobal && _noQglPackagesCache.has(_currentEditPkg)) {
                 await removeNoQGLPackage(_currentEditPkg);
@@ -5871,6 +5899,12 @@ async function saveAppProfile() {
         if (res && res.errno === 0) {
             const isNoQGL = !isGlobal && !content.trim();
             const lines = content.split('\n').filter(l => l.trim()).length;
+            if (!isGlobal && _currentEditPkg && content.trim()) {
+                _perAppProfilesCache[_currentEditPkg] = { filePath: `${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}.${_currentEditPkg}`, exists: true, isNoQGL: false };
+            }
+            if (isGlobal && content.trim()) {
+                await mirrorToDataLocalTmp(`${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}`);
+            }
             logToTerminal(`QGL profile saved for ${isGlobal ? 'global' : _currentEditPkg}${isNoQGL ? ' (no-QGL)' : ` (${lines} lines)`}`, 'success');
             incrementStat('configChanges');
         } else {
@@ -5904,6 +5938,7 @@ async function deleteAppProfile(pkg) {
         // Remove per-app config file if it exists
         const filePath = `${QGL_CONFIG_DIR}/${QGL_CONFIG_PREFIX}.${pkg}`;
         await exec(`rm -f "${filePath}"`);
+        await exec(`rm -f "${QGL_MIRROR_DIR}/${QGL_CONFIG_PREFIX}.${pkg}"`);
         // Remove from no-QGL list if present
         if (_noQglPackagesCache.has(pkg)) {
             await removeNoQGLPackage(pkg);
@@ -5936,7 +5971,9 @@ async function openAppPicker() {
     if (search) search.value = '';
 
     try {
-        const res = await exec('pm list packages -3 2>/dev/null | sed "s/package://" | sort');
+        const qglSystemAppsOn = document.getElementById('QGL_SYSTEM_APPS')?.checked || false;
+        const listCmd = qglSystemAppsOn ? 'pm list packages 2>/dev/null | sed "s/package://" | sort' : 'pm list packages -3 2>/dev/null | sed "s/package://" | sort';
+        const res = await exec(listCmd);
         if (!res || !res.stdout || !res.stdout.trim()) {
             list.innerHTML = `<div style="text-align:center;padding:20px;opacity:0.5;">${currentTranslations.noAppsFound || 'No third-party apps found'}</div>`;
             return;
