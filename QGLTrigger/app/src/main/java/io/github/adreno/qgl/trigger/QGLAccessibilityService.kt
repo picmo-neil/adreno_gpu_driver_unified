@@ -7,6 +7,7 @@ import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -15,6 +16,7 @@ import java.io.DataOutputStream
 import java.io.IOException
 import java.io.InputStreamReader
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
 private const val TAG = "QGLTrigger"
@@ -35,13 +37,13 @@ class QGLAccessibilityService : AccessibilityService() {
 
     private var lastAppPackage: String? = null
     private var lastSwitchTime: Long = 0L
-    private var lastAppliedConfig: String? = null
+    @Volatile private var lastAppliedConfig: String? = null
     private var qglSystemAppsEnabled = false
     private var qglSystemAppsCacheTime: Long = 0L
 
     @Volatile private var persistentShell: Process? = null
     @Volatile private var shellStdin: DataOutputStream? = null
-    @Volatile private var shellStdout: BufferedReader? = null
+    @Volatile private var shellLineQueue: LinkedBlockingQueue<String>? = null
     private val shellLock = Any()
 
     private val scriptExecutor = Executors.newSingleThreadExecutor { r ->
@@ -52,9 +54,17 @@ class QGLAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         Log.d(TAG, "AccessibilityService connected")
         startForegroundNotification()
-        getOrCreateShell()
-        qglSystemAppsEnabled = readQGLSystemApps()
-        Log.d(TAG, "QGL Accessibility Service ready — QGL_SYSTEM_APPS=$qglSystemAppsEnabled")
+        scriptExecutor.execute {
+            getOrCreateShell()
+            for (i in 1..10) {
+                val result = runShellScript("[ -f /data/local/tmp/.qgl_mirror_done ] && echo READY || echo WAITING").trim()
+                if (result == "READY") break
+                Log.d(TAG, "Waiting for QGL mirror ($i/10)...")
+                Thread.sleep(1000)
+            }
+            qglSystemAppsEnabled = readQGLSystemApps()
+            Log.d(TAG, "QGL Accessibility Service ready — QGL_SYSTEM_APPS=$qglSystemAppsEnabled")
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -74,7 +84,11 @@ class QGLAccessibilityService : AccessibilityService() {
             try {
                 packageManager.getActivityInfo(ComponentName(packageName, className), 0)
             } catch (_: PackageManager.NameNotFoundException) {
-                return
+                try {
+                    packageManager.getApplicationInfo(packageName, 0)
+                } catch (_: PackageManager.NameNotFoundException) {
+                    return
+                }
             }
         }
 
@@ -272,16 +286,16 @@ class QGLAccessibilityService : AccessibilityService() {
 
     private fun runShellScript(script: String): String {
         synchronized(shellLock) {
-            if (shellStdin == null || shellStdout == null || persistentShell?.isAlive != true) {
+            if (shellStdin == null || shellLineQueue == null || persistentShell?.isAlive != true) {
                 if (!createShellInternal()) return "NONE"
             }
         }
 
         val stdin: DataOutputStream
-        val stdout: BufferedReader
+        val lineQueue: LinkedBlockingQueue<String>
         synchronized(shellLock) {
             stdin = shellStdin ?: return "NONE"
-            stdout = shellStdout ?: return "NONE"
+            lineQueue = shellLineQueue ?: return "NONE"
         }
 
         return try {
@@ -290,33 +304,29 @@ class QGLAccessibilityService : AccessibilityService() {
             stdin.writeBytes("echo $marker\n")
             stdin.flush()
 
-            val buf = CharArray(4096)
             val sb = StringBuilder()
             val deadline = System.currentTimeMillis() + 5000
             while (System.currentTimeMillis() < deadline) {
-                if (stdout.ready()) {
-                    val n = stdout.read(buf)
-                    if (n > 0) sb.append(buf, 0, n)
-                    if (sb.contains(marker)) {
-                        val output = sb.toString()
-                        val markerIdx = output.lastIndexOf(marker)
-                        return output.substring(0, markerIdx).trimEnd()
-                    }
-                } else {
-                    Thread.sleep(10)
+                val remaining = deadline - System.currentTimeMillis()
+                if (remaining <= 0) break
+                val line = lineQueue.poll(minOf(remaining, 500), TimeUnit.MILLISECONDS) ?: continue
+                if (line.contains(marker)) {
+                    val markerIdx = line.indexOf(marker)
+                    if (markerIdx > 0) sb.append(line.substring(0, markerIdx))
+                    break
                 }
+                sb.append(line).append("\n")
             }
-            Log.w(TAG, "runShellScript timed out")
-            "NONE"
+            sb.toString().trimEnd()
         } catch (e: IOException) {
             Log.w(TAG, "runShellScript failed", e)
             synchronized(shellLock) {
                 persistentShell?.destroyForcibly()
                 persistentShell = null
                 shellStdin = null
-                shellStdout = null
-                createShellInternal()
+                shellLineQueue = null
             }
+            createShellInternal()
             "NONE"
         }
     }
@@ -337,76 +347,103 @@ class QGLAccessibilityService : AccessibilityService() {
     private data class VerifiedShell(
         val process: Process,
         val stdin: DataOutputStream,
-        val stdout: BufferedReader
+        val lineQueue: LinkedBlockingQueue<String>
     )
 
-    private fun tryCreateShell(command: String): VerifiedShell? {
+    private fun tryCreateShell(cmdParts: Array<String>): VerifiedShell? {
+        val cmdLabel = cmdParts.joinToString(" ")
         return try {
-            val p = Runtime.getRuntime().exec(command)
+            val p = Runtime.getRuntime().exec(cmdParts)
             drainStderr(p)
             val stdin = DataOutputStream(p.outputStream)
             val stdout = BufferedReader(InputStreamReader(p.inputStream))
+            val lineQueue = LinkedBlockingQueue<String>()
+
+            Thread({
+                try {
+                    var line: String?
+                    while (stdout.readLine().also { line = it } != null) {
+                        lineQueue.put(line!!)
+                    }
+                } catch (_: IOException) {
+                } catch (_: InterruptedException) {
+                }
+            }, "QGL-StdoutReader-${cmdParts.firstOrNull()}").apply { isDaemon = true }.start()
+
             stdin.writeBytes("id\n")
             stdin.writeBytes("echo QGL_SHELL_READY\n")
             stdin.flush()
-            val deadline = System.currentTimeMillis() + 3000
+
             val sb = StringBuilder()
-            val buf = CharArray(256)
+            val deadline = System.currentTimeMillis() + 5000
             while (System.currentTimeMillis() < deadline) {
-                if (stdout.ready()) {
-                    val n = stdout.read(buf)
-                    if (n > 0) sb.append(buf, 0, n)
-                    if (sb.contains("QGL_SHELL_READY")) {
-                        val idLine = sb.toString().lines().firstOrNull { it.contains("uid=") } ?: ""
-                        if (idLine.contains("uid=0")) {
-                            Log.d(TAG, "Root shell verified via '$command': $idLine")
-                            return VerifiedShell(p, stdin, stdout)
-                        } else {
-                            Log.w(TAG, "Shell '$command' is NOT root: $idLine")
-                            p.destroyForcibly()
-                            return null
-                        }
+                val line = lineQueue.poll(500, TimeUnit.MILLISECONDS) ?: continue
+                sb.append(line).append("\n")
+                if (line.contains("QGL_SHELL_READY")) {
+                    val rawOutput = sb.toString()
+                    val beforeMarker = rawOutput.substringBefore("QGL_SHELL_READY").trim()
+                    Log.d(TAG, "Shell '$cmdLabel' raw output: [$beforeMarker]")
+                    val isRoot = beforeMarker.contains("uid=0") ||
+                            beforeMarker.contains("gid=0") ||
+                            beforeMarker.contains("(root)") ||
+                            beforeMarker.trim() == "0"
+                    if (isRoot) {
+                        Log.d(TAG, "Root shell verified via '$cmdLabel': $beforeMarker")
+                        return VerifiedShell(p, stdin, lineQueue)
+                    } else {
+                        Log.w(TAG, "Shell '$cmdLabel' is NOT root: $beforeMarker")
+                        p.destroyForcibly()
+                        return null
                     }
-                } else {
-                    Thread.sleep(10)
                 }
             }
-            Log.w(TAG, "Shell '$command' verification timed out")
+            Log.w(TAG, "Shell '$cmdLabel' verification timed out (output so far: [${sb.toString().trim()}])")
             p.destroyForcibly()
             null
         } catch (e: Exception) {
-            Log.w(TAG, "Shell '$command' creation failed: ${e.message}")
+            Log.w(TAG, "Shell '$cmdLabel' creation failed: ${e.message}")
             null
         }
     }
 
     private fun createShellInternal(): Boolean {
-        synchronized(shellLock) {
-            for (cmd in arrayOf("su", "/system/xbin/su", "/system/bin/su", "/sbin/su")) {
-                val vs = tryCreateShell(cmd)
-                if (vs != null) {
+        val suCommands = arrayOf(
+            arrayOf("su", "--mount-master"),
+            arrayOf("su"),
+            arrayOf("/system/xbin/su", "--mount-master"),
+            arrayOf("/system/xbin/su"),
+            arrayOf("/system/bin/su", "--mount-master"),
+            arrayOf("/system/bin/su"),
+            arrayOf("/sbin/su", "--mount-master"),
+            arrayOf("/sbin/su")
+        )
+        for (cmd in suCommands) {
+            val vs = tryCreateShell(cmd)
+            if (vs != null) {
+                synchronized(shellLock) {
+                    persistentShell?.destroyForcibly()
                     persistentShell = vs.process
                     shellStdin = vs.stdin
-                    shellStdout = vs.stdout
-                    return true
+                    shellLineQueue = vs.lineQueue
                 }
+                return true
             }
-            Log.e(TAG, "All su paths failed — no root access available. Grant root to QGLTrigger via Magisk/KSU/APatch manager.")
+        }
+        Log.e(TAG, "All su paths failed — no root access available. Grant root to QGLTrigger via Magisk/KSU/APatch manager.")
+        synchronized(shellLock) {
             persistentShell = null
             shellStdin = null
-            shellStdout = null
-            return false
+            shellLineQueue = null
         }
+        return false
     }
 
     private fun getOrCreateShell(): DataOutputStream? {
-        synchronized(shellLock) {
-            val shell = persistentShell
-            if (shell != null && shell.isAlive) {
-                return shellStdin
-            }
-            return if (createShellInternal()) shellStdin else null
+        val shell = persistentShell
+        if (shell != null && shell.isAlive && shellStdin != null && shellLineQueue != null) {
+            return shellStdin
         }
+        return if (createShellInternal()) shellStdin else null
     }
 
     override fun onInterrupt() {
@@ -424,7 +461,7 @@ class QGLAccessibilityService : AccessibilityService() {
             persistentShell?.destroyForcibly()
             persistentShell = null
             shellStdin = null
-            shellStdout = null
+            shellLineQueue = null
         }
         scriptExecutor.shutdown()
         try {
@@ -460,7 +497,11 @@ class QGLAccessibilityService : AccessibilityService() {
             .build()
 
         try {
-            startForeground(NOTIFICATION_ID, notification)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
             Log.d(TAG, "Foreground notification started")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start foreground service", e)

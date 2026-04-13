@@ -27,6 +27,9 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Per-app Adreno GPU QGL config switching" />
         </service>
 
         <receiver
@@ -44,7 +47,11 @@
             android:name=".ForegroundKeepAliveService"
             android:exported="false"
             android:foregroundServiceType="specialUse"
-            android:process=":qgl_service" />
+            android:process=":qgl_service">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keep alive for QGL AccessibilityService" />
+        </service>
 
     </application>
 </manifest>

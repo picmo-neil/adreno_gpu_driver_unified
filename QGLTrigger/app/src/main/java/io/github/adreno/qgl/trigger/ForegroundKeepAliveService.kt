@@ -5,13 +5,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
 
 private const val TAG = "QGLTrigger"
 private const val KEEPALIVE_CHANNEL_ID = "qgl_trigger_channel"
-private const val KEEPALIVE_NOTIFICATION_ID = 1001
+private const val KEEPALIVE_NOTIFICATION_ID = 1002
 
 class ForegroundKeepAliveService : Service() {
 
@@ -26,7 +27,11 @@ class ForegroundKeepAliveService : Service() {
 
         val notification = buildNotification()
         try {
-            startForeground(KEEPALIVE_NOTIFICATION_ID, notification)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(KEEPALIVE_NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(KEEPALIVE_NOTIFICATION_ID, notification)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start foreground in keepalive service", e)
         }
@@ -52,7 +57,7 @@ class ForegroundKeepAliveService : Service() {
                 startService(restartIntent)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to restart keepalive service", e)
+            Log.w(TAG, "Failed to restart keepalive service: ${e.message}")
         }
     }
 

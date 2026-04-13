@@ -479,14 +479,27 @@ if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ] && [ -f "$MODDIR/QGLTrigger.apk" 
       fi
     elif [ -f /data/adb/ap/package_config ]; then
       if ! grep -qF "$_apk_pkg" /data/adb/ap/package_config 2>/dev/null; then
+        _needs_header=false
+        if [ ! -s /data/adb/ap/package_config ] || ! head -1 /data/adb/ap/package_config 2>/dev/null | grep -q 'pkg'; then
+          _needs_header=true
+        fi
+        if [ "$_needs_header" = "true" ]; then
+          printf 'pkg,exclude,allow,uid,to_uid,sctx\n' >> /data/adb/ap/package_config 2>/dev/null || true
+        fi
         printf '%s,0,1,%s,0,u:r:magisk:s0\n' "$_apk_pkg" "$_apk_uid" >> /data/adb/ap/package_config 2>/dev/null && \
           log_service "[QGL] Root granted to $_apk_pkg (uid=$_apk_uid) via APatch (takes effect on next boot)" || \
           log_service "[QGL] Could not auto-grant root via APatch"
+        unset _needs_header
       else
         log_service "[QGL] $_apk_pkg already in APatch package_config"
       fi
     else
-      log_service "[QGL] KernelSU detected — cannot auto-grant root from shell. Grant root to $_apk_pkg via KSU Manager app."
+      echo "QGL: KernelSU detected — cannot auto-grant root. Grant root to io.github.adreno.qgl.trigger via KSU Manager." > /dev/kmsg 2>/dev/null || true
+      _notice_dir="/sdcard/Adreno_Driver"
+      mkdir -p "$_notice_dir" 2>/dev/null || true
+      echo "Grant root to QGLTrigger (io.github.adreno.qgl.trigger) via KSU Manager app." > "$_notice_dir/NOTICE_KSU_MANUAL_ROOT_REQUIRED.txt" 2>/dev/null || true
+      log_service "[QGL] KernelSU detected — cannot auto-grant root. See $_notice_dir/NOTICE_KSU_MANUAL_ROOT_REQUIRED.txt"
+      unset _notice_dir
     fi
   else
     log_service "[QGL] Could not find UID for $_apk_pkg — user must grant root manually"
@@ -792,6 +805,7 @@ if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ]; then
     fi
   fi
   unset _sd_qgl_dir _dt_qgl_dir _count _f _base
+  touch /data/local/tmp/.qgl_mirror_done 2>/dev/null || true
 fi
 # ── END config mirror ────────────────────────────────────────────────────────
 

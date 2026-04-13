@@ -217,6 +217,12 @@ if [ "$_qgl_perapp" = "y" ]; then
     [ "$_count" -gt 0 ] && _qgl_log "[APPLY-NOW] Mirrored $_count per-app QGL configs to $_dt_qgl_dir"
     unset _count _f _base
   fi
+  if [ -f "$_sd_qgl_dir/adreno_config.txt" ]; then
+    if cp -f "$_sd_qgl_dir/adreno_config.txt" "$_dt_qgl_dir/adreno_config.txt" 2>/dev/null; then
+      chmod 0644 "$_dt_qgl_dir/adreno_config.txt" 2>/dev/null || true
+      _qgl_log "[APPLY-NOW] Mirrored adreno_config.txt"
+    fi
+  fi
   unset _sd_qgl_dir _dt_qgl_dir
 fi
 
