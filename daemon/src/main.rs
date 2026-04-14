@@ -36,7 +36,7 @@ fn log_kmsg(msg: &str) {
 
 fn set_selinux_context(path: &str, context: &[u8]) -> std::io::Result<()> {
     let path_c = CString::new(path).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let xattr_c = unsafe { XATTR_NAME.as_ptr() as *const libc::c_char };
+    let xattr_c = XATTR_NAME.as_ptr() as *const libc::c_char;
     let ctx_with_null: Vec<u8> = context.iter().chain(&[0]).copied().collect();
     let ret = unsafe {
         libc::setxattr(
@@ -152,21 +152,21 @@ fn find_config(pkg: &str) -> Option<(String, u64, bool)> {
     for dir in CONFIG_DIRS {
         let perapp = format!("{}/qgl_config.txt.{}", dir, pkg);
         if file_exists(&perapp) && file_is_nonempty(&perapp) {
-            return Some((perapp, file_mtime(&perapp), true));
+            return Some((perapp.clone(), file_mtime(&perapp), true));
         }
     }
 
     for dir in CONFIG_DIRS {
         let default_cfg = format!("{}/qgl_config.txt", dir);
         if file_exists(&default_cfg) && file_is_nonempty(&default_cfg) {
-            return Some((default_cfg, file_mtime(&default_cfg), false));
+            return Some((default_cfg.clone(), file_mtime(&default_cfg), false));
         }
     }
 
     if let Ok(moddir) = env::var("ADRENO_MODDIR") {
         let default_cfg = format!("{}/qgl_config.txt", moddir);
         if file_exists(&default_cfg) && file_is_nonempty(&default_cfg) {
-            return Some((default_cfg, file_mtime(&default_cfg), false));
+            return Some((default_cfg.clone(), file_mtime(&default_cfg), false));
         }
     }
 
@@ -287,7 +287,7 @@ fn handle_client(stream: std::os::unix::net::UnixStream) {
         return;
     }
 
-    let writer = match stream.try_clone() {
+    let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(e) => {
             log_msg(&format!("failed to clone stream for writing: {}", e));
