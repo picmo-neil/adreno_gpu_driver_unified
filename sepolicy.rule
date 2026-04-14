@@ -83,3 +83,12 @@ allow system_server same_process_hal_file file { read open getattr }
 # untrusted_app needs read access to /sys/class/kgsl/kgsl-3d0/gpuclk
 # for GPU frequency monitoring. Without this, benchmark apps get AVC denials.
 allow untrusted_app vendor_sysfs_kgsl_gpuclk file { read open getattr }
+
+# -- QGL daemon socket: app -> daemon abstract namespace UDS ----------------
+# The adreno_qgl_daemon runs as u:r:su:s0 or u:r:ksu:s0 (started by service.sh).
+# QGLTrigger APK (untrusted_app) connects to the abstract socket \0adreno_qgl.
+# Abstract namespace: no sock_file label needed, only connectto on the socket itself.
+# appdomain covers all app domains (untrusted_app, system_app, platform_app, etc.).
+allow appdomain su unix_stream_socket { connectto read write getattr }
+allow appdomain ksu unix_stream_socket { connectto read write getattr }
+allow appdomain magisk unix_stream_socket { connectto read write getattr }

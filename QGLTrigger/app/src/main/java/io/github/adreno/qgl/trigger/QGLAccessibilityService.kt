@@ -8,6 +8,8 @@ import android.content.ComponentName
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.net.LocalSocket
+import android.net.LocalSocketAddress
 import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -32,6 +34,58 @@ private const val CONFIG_DIR_DATA = "/data/local/tmp"
 private const val CONFIG_PATH_SD = "/sdcard/Adreno_Driver/Config/adreno_config.txt"
 private const val CONFIG_PATH_DATA = "/data/local/tmp/adreno_config.txt"
 private const val SYSTEM_APPS_CACHE_MS = 30000L
+private const val DAEMON_SOCKET_NAME = "adreno_qgl"
+
+class DaemonConnection {
+    private var socket: LocalSocket? = null
+    private var writer: DataOutputStream? = null
+    private var reader: BufferedReader? = null
+
+    fun connect(): Boolean {
+        disconnect()
+        return try {
+            val s = LocalSocket()
+            s.connect(LocalSocketAddress(DAEMON_SOCKET_NAME, LocalSocketAddress.Namespace.ABSTRACT))
+            s.soTimeout = 3000
+            socket = s
+            writer = DataOutputStream(s.outputStream)
+            reader = BufferedReader(InputStreamReader(s.inputStream))
+            val pong = sendCommand("PING")
+            pong == "PONG"
+        } catch (e: IOException) {
+            Log.d(TAG, "Daemon not available: ${e.message}")
+            disconnect()
+            false
+        }
+    }
+
+    fun isConnected(): Boolean {
+        return socket?.isConnected == true && writer != null && reader != null
+    }
+
+    fun sendCommand(cmd: String): String {
+        val w = writer ?: return "FAIL:disconnected"
+        val r = reader ?: return "FAIL:disconnected"
+        return try {
+            w.writeBytes("$cmd\n")
+            w.flush()
+            r.readLine() ?: "FAIL:null_response"
+        } catch (e: IOException) {
+            Log.d(TAG, "Daemon send failed: ${e.message}")
+            disconnect()
+            "FAIL:io_error"
+        }
+    }
+
+    fun disconnect() {
+        try { reader?.close() } catch (_: IOException) {}
+        try { writer?.close() } catch (_: IOException) {}
+        try { socket?.close() } catch (_: IOException) {}
+        reader = null
+        writer = null
+        socket = null
+    }
+}
 
 class QGLAccessibilityService : AccessibilityService() {
 
@@ -40,6 +94,9 @@ class QGLAccessibilityService : AccessibilityService() {
     @Volatile private var lastAppliedConfig: String? = null
     private var qglSystemAppsEnabled = false
     private var qglSystemAppsCacheTime: Long = 0L
+
+    @Volatile private var daemonConn: DaemonConnection? = null
+    @Volatile private var useDaemon: Boolean = false
 
     @Volatile private var persistentShell: Process? = null
     @Volatile private var shellStdin: DataOutputStream? = null
@@ -55,15 +112,30 @@ class QGLAccessibilityService : AccessibilityService() {
         Log.d(TAG, "AccessibilityService connected")
         startForegroundNotification()
         scriptExecutor.execute {
-            getOrCreateShell()
+            val dc = DaemonConnection()
+            if (dc.connect()) {
+                daemonConn = dc
+                useDaemon = true
+                Log.d(TAG, "Connected to QGL daemon via abstract socket")
+            } else {
+                Log.d(TAG, "Daemon not available, falling back to su shell")
+                getOrCreateShell()
+            }
             for (i in 1..10) {
-                val result = runShellScript("[ -f /data/local/tmp/.qgl_mirror_done ] && echo READY || echo WAITING").trim()
-                if (result == "READY") break
-                Log.d(TAG, "Waiting for QGL mirror ($i/10)...")
-                Thread.sleep(1000)
+                if (useDaemon) {
+                    val result = daemonConn?.sendCommand("PING") ?: "FAIL"
+                    if (result == "PONG") break
+                    Log.d(TAG, "Waiting for QGL daemon ($i/10)...")
+                    Thread.sleep(1000)
+                } else {
+                    val result = runShellScript("[ -f /data/local/tmp/.qgl_mirror_done ] && echo READY || echo WAITING").trim()
+                    if (result == "READY") break
+                    Log.d(TAG, "Waiting for QGL mirror ($i/10)...")
+                    Thread.sleep(1000)
+                }
             }
             qglSystemAppsEnabled = readQGLSystemApps()
-            Log.d(TAG, "QGL Accessibility Service ready — QGL_SYSTEM_APPS=$qglSystemAppsEnabled")
+            Log.d(TAG, "QGL Accessibility Service ready — daemon=$useDaemon QGL_SYSTEM_APPS=$qglSystemAppsEnabled")
         }
     }
 
@@ -127,6 +199,10 @@ class QGLAccessibilityService : AccessibilityService() {
     }
 
     private fun readQGLSystemApps(): Boolean {
+        if (useDaemon) {
+            val result = daemonConn?.sendCommand("READ_QGL_SYSTEM_APPS") ?: "QGL_SYSTEM_APPS=n"
+            return result.contains("QGL_SYSTEM_APPS=y")
+        }
         val result = runShellScript("for f in $CONFIG_PATH_SD $CONFIG_PATH_DATA; do [ -f \"\$f\" ] && { grep -q '^QGL_SYSTEM_APPS=y' \"\$f\" && echo y || echo n; break; } 2>/dev/null; done").trim()
         return result == "y"
     }
@@ -134,6 +210,62 @@ class QGLAccessibilityService : AccessibilityService() {
     private fun handleAppSwitch(packageName: String, isSystemPkg: Boolean) {
         val last = lastAppliedConfig ?: ""
         val sysFlag = if (isSystemPkg) "1" else "0"
+
+        if (useDaemon) {
+            handleAppSwitchDaemon(packageName, sysFlag, last)
+        } else {
+            handleAppSwitchShell(packageName, isSystemPkg, sysFlag, last)
+        }
+    }
+
+    private fun handleAppSwitchDaemon(packageName: String, sysFlag: String, last: String) {
+        val result = daemonConn?.sendCommand("SWITCH $packageName $sysFlag $last") ?: "FAIL:daemon_null"
+        Log.d(TAG, "QGL daemon switch for $packageName (sys=$sysFlag): $result")
+
+        if (result.startsWith("FAIL:io_error")) {
+            Log.w(TAG, "Daemon disconnected, reconnecting...")
+            val dc = DaemonConnection()
+            if (dc.connect()) {
+                daemonConn = dc
+                val retry = dc.sendCommand("SWITCH $packageName $sysFlag $last")
+                Log.d(TAG, "QGL daemon retry for $packageName: $retry")
+                processSwitchResult(retry)
+            } else {
+                Log.w(TAG, "Daemon reconnect failed, falling back to su shell")
+                daemonConn = null
+                useDaemon = false
+                getOrCreateShell()
+                val isSystemPkg = sysFlag == "1"
+                handleAppSwitchShell(packageName, isSystemPkg, sysFlag, last)
+            }
+            return
+        }
+
+        processSwitchResult(result)
+    }
+
+    private fun processSwitchResult(output: String) {
+        when {
+            output.startsWith("APPLIED:") -> {
+                lastAppliedConfig = output.substring(8)
+            }
+            output.startsWith("REMOVED:") -> {
+                lastAppliedConfig = "NO_QGL"
+            }
+            output.startsWith("SAME") -> {
+            }
+            output.startsWith("FAIL:") -> {
+                Log.w(TAG, "QGL apply failed: $output")
+                lastAppliedConfig = null
+            }
+            else -> {
+                Log.w(TAG, "Unexpected QGL output: $output")
+                lastAppliedConfig = null
+            }
+        }
+    }
+
+    private fun handleAppSwitchShell(packageName: String, isSystemPkg: Boolean, sysFlag: String, last: String) {
         val S = "$"
 
         val script = """
@@ -262,26 +394,9 @@ class QGLAccessibilityService : AccessibilityService() {
         """.trimIndent()
 
         val output = runShellScript(script).trim()
-        Log.d(TAG, "QGL switch for $packageName (sys=$isSystemPkg): $output")
+        Log.d(TAG, "QGL shell switch for $packageName (sys=$isSystemPkg): $output")
 
-        when {
-            output.startsWith("APPLIED:") -> {
-                lastAppliedConfig = output.substring(8)
-            }
-            output.startsWith("REMOVED:") -> {
-                lastAppliedConfig = "NO_QGL"
-            }
-            output.startsWith("SAME") -> {
-            }
-            output.startsWith("FAIL:") -> {
-                Log.w(TAG, "QGL apply failed: $output")
-                lastAppliedConfig = null
-            }
-            else -> {
-                Log.w(TAG, "Unexpected QGL output: $output")
-                lastAppliedConfig = null
-            }
-        }
+        processSwitchResult(output)
     }
 
     private fun runShellScript(script: String): String {
@@ -337,7 +452,6 @@ class QGLAccessibilityService : AccessibilityService() {
                 val reader = BufferedReader(InputStreamReader(process.errorStream))
                 val buf = CharArray(1024)
                 while (reader.read(buf) != -1) {
-                    // drain only — discard
                 }
             } catch (_: IOException) {
             }
@@ -451,7 +565,9 @@ class QGLAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
-        Log.d(TAG, "AccessibilityService destroyed — closing persistent shell")
+        Log.d(TAG, "AccessibilityService destroyed — closing connections")
+        daemonConn?.disconnect()
+        daemonConn = null
         synchronized(shellLock) {
             try {
                 shellStdin?.writeBytes("exit\n")

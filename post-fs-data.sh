@@ -1017,6 +1017,14 @@ SELINUX_RULES_BATCH
     inject "allow priv_app gpu_device chr_file { read write open ioctl getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow isolated_app gpu_device chr_file { read write open ioctl getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
 
+    # QGL daemon socket: appdomain -> su/ksu/magisk abstract namespace UDS
+    # The adreno_qgl_daemon runs as su/ksu/magisk context (started by service.sh).
+    # QGLTrigger APK (untrusted_app) connects to abstract socket \0adreno_qgl.
+    # Abstract namespace: no sock_file label, only connectto on the socket itself.
+    inject "allow appdomain su unix_stream_socket { connectto read write getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
+    inject "allow appdomain ksu unix_stream_socket { connectto read write getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
+    inject "allow appdomain magisk unix_stream_socket { connectto read write getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
+
     inject "allow domain system_lib_file file { read open getattr execute map }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow domain vendor_firmware_file dir { search getattr read }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow domain vendor_firmware_file file { read open getattr map }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
@@ -1116,6 +1124,13 @@ SELINUX_RULES_BATCH
   "$SEPOLICY_TOOL" --live "allow domain logd unix_stream_socket { connectto write }" >/dev/null 2>&1 && \
     RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
   "$SEPOLICY_TOOL" --live "allow domain kernel file { read open }" >/dev/null 2>&1 && \
+    RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
+  # QGL daemon UDS socket rules (belt-and-suspenders with batch injection above)
+  "$SEPOLICY_TOOL" --live "allow appdomain su unix_stream_socket { connectto read write getattr }" >/dev/null 2>&1 && \
+    RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
+  "$SEPOLICY_TOOL" --live "allow appdomain ksu unix_stream_socket { connectto read write getattr }" >/dev/null 2>&1 && \
+    RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
+  "$SEPOLICY_TOOL" --live "allow appdomain magisk unix_stream_socket { connectto read write getattr }" >/dev/null 2>&1 && \
     RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
 
   # ── Rules removed from batch to prevent OEM neverallow cascade failure ────

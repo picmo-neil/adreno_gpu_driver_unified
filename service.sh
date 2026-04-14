@@ -333,6 +333,10 @@ if [ "$QGL" = "y" ]; then
       >/dev/null 2>&1 || true
     "$_eqb_pre" sepolicy patch "allow same_process_hal_file labeledfs filesystem associate" \
       >/dev/null 2>&1 || true
+    "$_eqb_pre" sepolicy patch "allow appdomain su unix_stream_socket { connectto read write getattr }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" sepolicy patch "allow appdomain ksu unix_stream_socket { connectto read write getattr }" \
+      >/dev/null 2>&1 || true
     break
   done
   for _eqb_pre in "$(command -v magiskpolicy 2>/dev/null)" \
@@ -352,6 +356,10 @@ if [ "$QGL" = "y" ]; then
     "$_eqb_pre" --live "allow su unlabeled file { getattr setattr relabelfrom relabelto create write unlink open read }" \
       >/dev/null 2>&1 || true
     "$_eqb_pre" --live "allow same_process_hal_file labeledfs filesystem associate" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" --live "allow appdomain su unix_stream_socket { connectto read write getattr }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" --live "allow appdomain ksu unix_stream_socket { connectto read write getattr }" \
       >/dev/null 2>&1 || true
     break
   done
@@ -808,6 +816,21 @@ if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ]; then
   touch /data/local/tmp/.qgl_mirror_done 2>/dev/null || true
 fi
 # ── END config mirror ────────────────────────────────────────────────────────
+
+# ── Start QGL daemon for fast IPC with QGLTrigger APK ─────────────────────
+# The Rust daemon binds an abstract namespace socket (\0adreno_qgl) and
+# handles QGL config switches with <1ms latency. The APK connects to it
+# directly — no su required. Falls back to su shell if daemon is absent.
+if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ] && [ -x "$MODDIR/adreno_qgl_daemon" ]; then
+  ADRENO_MODDIR="$MODDIR" "$MODDIR/adreno_qgl_daemon" >> "$SERVICE_LOG" 2>&1 &
+  _daemon_pid=$!
+  log_service "[QGL] Daemon started (PID=$_daemon_pid, abstract socket \\0adreno_qgl)"
+  printf '[ADRENO-SVC] QGL daemon started (PID=%d)\n' "$_daemon_pid" > /dev/kmsg 2>/dev/null || true
+  unset _daemon_pid
+elif [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ]; then
+  log_service "[QGL] Daemon binary not found at $MODDIR/adreno_qgl_daemon — APK will use su shell fallback"
+  printf '[ADRENO-SVC] QGL daemon NOT found — su shell fallback\n' > /dev/kmsg 2>/dev/null || true
+fi
 
 # ========================================
 # AUTO-COPY LOGS TO SD CARD

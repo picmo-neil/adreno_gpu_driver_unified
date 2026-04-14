@@ -21,6 +21,7 @@ on:
       - 'webroot/**'
       - 'apply_qgl.sh'
       - 'QGLTrigger/**'
+      - 'daemon/**'
       - 'AGENTS.md'
       - '.context/**'
   workflow_dispatch:
@@ -44,7 +45,59 @@ permissions:
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 1: Build QGL Trigger APK
+  # Job 1: Build QGL Daemon (Rust → ARM64 Android binary)
+  # ────────────────────────────────────────────────────────────────────────────
+  build-daemon:
+    name: Build QGL Daemon (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android NDK
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "ndk;27.0.12077973"
+          echo "Available NDKs:"
+          ls -d ${ANDROID_HOME}/ndk/* 2>/dev/null || echo "No NDK found"
+
+      - name: Build daemon
+        id: daemon_build
+        working-directory: daemon
+        run: |
+          NDK_HOME=$(ls -d ${ANDROID_HOME}/ndk/* | head -1)
+          echo "Using NDK: ${NDK_HOME}"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+          if cargo build --release --target aarch64-linux-android; then
+            cp target/aarch64-linux-android/release/adreno_qgl_daemon ../adreno_qgl_daemon
+            chmod 755 ../adreno_qgl_daemon
+            ls -lh ../adreno_qgl_daemon
+            file ../adreno_qgl_daemon || true
+            echo "success=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Rust daemon build failed"
+            echo "success=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload daemon binary
+        if: steps.daemon_build.outputs.success == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: qgl-daemon-binary
+          path: adreno_qgl_daemon
+          retention-days: 30
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 2: Build QGL Trigger APK
   # ────────────────────────────────────────────────────────────────────────────
   build-apk:
     name: Build QGL Trigger APK
@@ -147,7 +200,7 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   assemble:
     name: Assemble Module Zip
-    needs: build-apk
+    needs: [build-apk, build-daemon]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout module repo
@@ -163,6 +216,13 @@ jobs:
           path: apk-staging
         continue-on-error: true
 
+      - name: Download QGL Daemon binary
+        uses: actions/download-artifact@v8
+        with:
+          name: qgl-daemon-binary
+          path: daemon-staging
+        continue-on-error: true
+
       - name: Copy APK to repo root
         run: |
           if [ -f "apk-staging/QGLTrigger.apk" ]; then
@@ -170,6 +230,16 @@ jobs:
             echo "QGLTrigger.apk copied to repo root"
           else
             echo "::warning::QGLTrigger.apk not available — module will not include the APK"
+          fi
+
+      - name: Copy daemon binary to repo root
+        run: |
+          if [ -f "daemon-staging/adreno_qgl_daemon" ]; then
+            cp daemon-staging/adreno_qgl_daemon ./adreno_qgl_daemon
+            chmod 755 ./adreno_qgl_daemon
+            echo "adreno_qgl_daemon copied to repo root"
+          else
+            echo "::warning::adreno_qgl_daemon not available — module will not include the daemon"
           fi
 
       - name: Determine version
@@ -246,6 +316,15 @@ jobs:
             echo "  + QGLTrigger.apk ($(du -h QGLTrigger.apk | cut -f1))"
           else
             echo "  ! QGLTrigger.apk — NOT INCLUDED (APK build failed or not triggered)"
+          fi
+
+          # ── QGL Daemon binary (optional) ─────────────────────────────────────
+          if [ -f "adreno_qgl_daemon" ]; then
+            cp adreno_qgl_daemon "${S}/adreno_qgl_daemon"
+            chmod 755 "${S}/adreno_qgl_daemon"
+            echo "  + adreno_qgl_daemon ($(du -h adreno_qgl_daemon | cut -f1))"
+          else
+            echo "  ! adreno_qgl_daemon — NOT INCLUDED (Rust build failed or not triggered)"
           fi
 
           # Update version in module.prop inside staging
