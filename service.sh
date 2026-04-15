@@ -337,6 +337,8 @@ if [ "$QGL" = "y" ]; then
       >/dev/null 2>&1 || true
     "$_eqb_pre" sepolicy patch "allow appdomain ksu unix_stream_socket { connectto read write getattr }" \
       >/dev/null 2>&1 || true
+    "$_eqb_pre" sepolicy patch "allow appdomain init unix_stream_socket { connectto read write getattr }" \
+      >/dev/null 2>&1 || true
     break
   done
   for _eqb_pre in "$(command -v magiskpolicy 2>/dev/null)" \
@@ -360,6 +362,8 @@ if [ "$QGL" = "y" ]; then
     "$_eqb_pre" --live "allow appdomain su unix_stream_socket { connectto read write getattr }" \
       >/dev/null 2>&1 || true
     "$_eqb_pre" --live "allow appdomain ksu unix_stream_socket { connectto read write getattr }" \
+      >/dev/null 2>&1 || true
+    "$_eqb_pre" --live "allow appdomain init unix_stream_socket { connectto read write getattr }" \
       >/dev/null 2>&1 || true
     break
   done
@@ -439,54 +443,137 @@ fi
 # applies per-app QGL configs via apply_qgl.sh <package_name>.
 # Only installs when QGL=y AND QGL_PERAPP=y. Uses pm install -g to grant
 # all declared permissions (including BIND_ACCESSIBILITY_SERVICE).
-# Root/superuser is granted by the user via their root manager UI on first use.
-# This matches LYB Kernel Manager's exact behavior.
+# Root/superuser is granted automatically on Magisk/APatch, manually on KSU.
+# OEM accessibility bypass: pm grant WRITE_SECURE_SETTINGS + appops + retry loop.
 if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ] && [ -f "$MODDIR/QGLTrigger.apk" ]; then
-  _qgl_apk_pkg="io.github.adreno.qgl.trigger"
-  _qgl_apk_version=$(dumpsys package "$_qgl_apk_pkg" 2>/dev/null | grep versionName | head -1 | sed 's/.*versionName=//;s/ .*//' | tr -d ' \r\n')
+  _acc_pkg="io.github.adreno.qgl.trigger"
+  _acc_comp="io.github.adreno.qgl.trigger/.QGLAccessibilityService"
+
+  # Step 1: Install APK if not present
+  _qgl_apk_version=$(dumpsys package "$_acc_pkg" 2>/dev/null | grep versionName | head -1 | sed 's/.*versionName=//;s/ .*//' | tr -d ' \r\n')
   if [ -n "$_qgl_apk_version" ]; then
     log_service "[QGL] QGLTrigger APK already installed (v$_qgl_apk_version)"
   else
     log_service "[QGL] Installing QGLTrigger APK..."
     pm install -g --user 0 "$MODDIR/QGLTrigger.apk" 2>/dev/null && \
-      log_service "[QGL] QGLTrigger APK installed — enabling accessibility service..." || \
-      log_service "[QGL] QGLTrigger APK install FAILED — user must install manually"
+      log_service "[QGL] QGLTrigger APK installed" || \
+      log_service "[QGL] QGLTrigger APK install FAILED"
   fi
+  unset _qgl_apk_version
 
-  # Enable Accessibility Service from root shell
-  _acc_comp="io.github.adreno.qgl.trigger/.QGLAccessibilityService"
-  _current=$(settings get secure enabled_accessibility_services 2>/dev/null || true)
-  case "$_current" in
-    *"$_acc_comp"*)
-      log_service "[QGL] Accessibility service already enabled"
+  # Step 2: Grant WRITE_SECURE_SETTINGS (critical OEM bypass)
+  # pm install resets runtime permissions, so grant after every install.
+  # From root shell (uid=0), this works on HyperOS/OneUI/ColorOS.
+  pm grant "$_acc_pkg" android.permission.WRITE_SECURE_SETTINGS 2>/dev/null && \
+    log_service "[QGL] WRITE_SECURE_SETTINGS granted" || \
+    log_service "[QGL] WRITE_SECURE_SETTINGS grant failed (non-fatal)"
+
+  # Step 3: Clear Android 13+ restricted settings block for sideloaded APKs
+  # On AOSP 13+, AccessibilityManagerService rejects programmatic enabling of
+  # sideloaded apps unless this appops flag is set.
+  appops set "$_acc_pkg" ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null || true
+
+  # Step 4: OEM-specific: temporarily disable security scanner for clean write
+  _oem_mfr=$(getprop ro.product.manufacturer 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  case "$_oem_mfr" in
+    xiaomi|redmi|poco)
+      am force-stop com.miui.securitycenter 2>/dev/null || true
       ;;
-    ""|null)
-      settings put secure enabled_accessibility_services "$_acc_comp" 2>/dev/null && \
-        log_service "[QGL] Accessibility service enabled (first service)" || \
-        log_service "[QGL] Could not enable accessibility — user must enable manually in Settings > Accessibility"
-      ;;
-    *)
-      settings put secure enabled_accessibility_services "${_current}:${_acc_comp}" 2>/dev/null && \
-        log_service "[QGL] Accessibility service appended to enabled list" || \
-        log_service "[QGL] Could not append accessibility service"
+    oppo|realme|oneplus)
+      am force-stop com.coloros.safecenter 2>/dev/null || true
+      am force-stop com.realme.safecenter 2>/dev/null || true
+      settings put global color_os_permission_monitor 0 2>/dev/null || true
       ;;
   esac
-  settings put secure accessibility_enabled 1 2>/dev/null || true
+  unset _oem_mfr
 
-  # Auto-grant root to QGLTrigger APK so the AccessibilityService can use su
-  _apk_pkg="io.github.adreno.qgl.trigger"
-  _apk_uid=$(awk -v pkg="$_apk_pkg" '$1 == pkg {print $2; exit}' /data/system/packages.list 2>/dev/null || true)
+  # Step 5: Enable accessibility service
+  # _write_acc: writes the setting + forces AccessibilityManagerService to re-bind.
+  # On AOSP, `settings put secure` updates the DB but AMS may not re-scan
+  # until the enabled toggle is cycled. The toggle (0→1) triggers
+  # AccessibilityManagerService.onSettingsChanged() which re-binds all services.
+  _write_acc() {
+    _cur=$(settings get secure enabled_accessibility_services 2>/dev/null || echo "")
+    case "$_cur" in
+      *"$_acc_comp"*) ;;
+      ""|null)
+        settings put secure enabled_accessibility_services "$_acc_comp" 2>/dev/null
+        ;;
+      *)
+        settings put secure enabled_accessibility_services "${_cur}:${_acc_comp}" 2>/dev/null
+        ;;
+    esac
+    # Force AMS to re-bind: toggle accessibility_enabled off then on.
+    # This is the key step that makes it work on AOSP — without it,
+    # AMS sees the setting change but doesn't bind the new service.
+    settings put secure accessibility_enabled 0 2>/dev/null || true
+    sleep 1
+    settings put secure accessibility_enabled 1 2>/dev/null || true
+  }
+
+  # Also try `cmd accessibility` as an alternative (available on Android 11+)
+  _cmd_acc() {
+    cmd accessibility set-enabled-services --user 0 "$_acc_comp" 2>/dev/null && return 0
+    return 1
+  }
+
+  # Try both approaches
+  _write_acc
+  _cmd_acc 2>/dev/null || true
+  log_service "[QGL] Accessibility enable attempt 1"
+
+  # Step 6: Verify service is actually bound, retry if not
+  # On AOSP, `dumpsys accessibility` shows bound services. If our service
+  # isn't in the bound list, the settings write didn't take effect.
+  _acc_retry=0
+  _acc_delay=3
+  while [ "$_acc_retry" -lt 8 ]; do
+    sleep "$_acc_delay"
+    # Check both: settings value AND actual bound state
+    _in_settings=$(settings get secure enabled_accessibility_services 2>/dev/null || echo "")
+    _is_bound=$(dumpsys accessibility 2>/dev/null | grep -c "$_acc_comp" || echo "0")
+    case "$_in_settings" in
+      *"$_acc_comp"*)
+        if [ "$_is_bound" -ge 1 ]; then
+          log_service "[QGL] Accessibility confirmed bound (retry $_acc_retry)"
+          break
+        fi
+        # Setting is present but service not bound — force re-bind
+        _write_acc
+        log_service "[QGL] Accessibility in settings but not bound, re-binding (retry $_acc_retry)"
+        ;;
+      *)
+        # Setting was cleared (OEM scanner or AOSP validation)
+        _write_acc
+        _cmd_acc 2>/dev/null || true
+        log_service "[QGL] Accessibility re-enabled (retry $_acc_retry/8)"
+        ;;
+    esac
+    _acc_retry=$((_acc_retry + 1))
+    _acc_delay=$((_acc_delay + 2))
+  done
+  _acc_final_bound=$(dumpsys accessibility 2>/dev/null | grep -c "$_acc_comp" || echo "0")
+  if [ "$_acc_final_bound" -ge 1 ]; then
+    log_service "[QGL] Accessibility successfully bound after retries"
+  else
+    log_service "[QGL] WARNING: Accessibility NOT bound after 8 retries — daemon fallback will handle app switches"
+  fi
+  unset _acc_retry _acc_delay _in_settings _is_bound _acc_final_bound
+
+  # Step 7: Auto-grant root to QGLTrigger APK (for su shell fallback)
+  _apk_uid=$(awk -v pkg="$_acc_pkg" '$1 == pkg {print $2; exit}' /data/system/packages.list 2>/dev/null || true)
   if [ -n "$_apk_uid" ] && [ "$_apk_uid" -gt 0 ] 2>/dev/null; then
     if [ -f /data/adb/magisk.db ]; then
-      if magisk --sqlite "INSERT OR REPLACE INTO policies (uid,policy,until,logging,notification) VALUES($_apk_uid,1,0,1,1);" 2>/dev/null; then
-        log_service "[QGL] Root granted to $_apk_pkg (uid=$_apk_uid) via Magisk"
-      elif sqlite3 /data/adb/magisk.db "INSERT OR REPLACE INTO policies (uid,policy,until,logging,notification) VALUES($_apk_uid,1,0,1,1);" 2>/dev/null; then
-        log_service "[QGL] Root granted to $_apk_pkg (uid=$_apk_uid) via sqlite3"
+      # policy=2 means ALLOW (policy=1 means DENY — was a critical bug, fixed)
+      if magisk --sqlite "INSERT OR REPLACE INTO policies (uid,policy,until,logging,notification) VALUES($_apk_uid,2,0,1,1);" 2>/dev/null; then
+        log_service "[QGL] Root granted to $_acc_pkg (uid=$_apk_uid) via Magisk"
+      elif sqlite3 /data/adb/magisk.db "INSERT OR REPLACE INTO policies (uid,policy,until,logging,notification) VALUES($_apk_uid,2,0,1,1);" 2>/dev/null; then
+        log_service "[QGL] Root granted to $_acc_pkg (uid=$_apk_uid) via sqlite3"
       else
         log_service "[QGL] Could not auto-grant root via Magisk — user must grant manually"
       fi
     elif [ -f /data/adb/ap/package_config ]; then
-      if ! grep -qF "$_apk_pkg" /data/adb/ap/package_config 2>/dev/null; then
+      if ! grep -qF "$_acc_pkg" /data/adb/ap/package_config 2>/dev/null; then
         _needs_header=false
         if [ ! -s /data/adb/ap/package_config ] || ! head -1 /data/adb/ap/package_config 2>/dev/null | grep -q 'pkg'; then
           _needs_header=true
@@ -494,15 +581,15 @@ if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ] && [ -f "$MODDIR/QGLTrigger.apk" 
         if [ "$_needs_header" = "true" ]; then
           printf 'pkg,exclude,allow,uid,to_uid,sctx\n' >> /data/adb/ap/package_config 2>/dev/null || true
         fi
-        printf '%s,0,1,%s,0,u:r:magisk:s0\n' "$_apk_pkg" "$_apk_uid" >> /data/adb/ap/package_config 2>/dev/null && \
-          log_service "[QGL] Root granted to $_apk_pkg (uid=$_apk_uid) via APatch (takes effect on next boot)" || \
+        printf '%s,0,1,%s,0,u:r:magisk:s0\n' "$_acc_pkg" "$_apk_uid" >> /data/adb/ap/package_config 2>/dev/null && \
+          log_service "[QGL] Root granted to $_acc_pkg (uid=$_apk_uid) via APatch (takes effect on next boot)" || \
           log_service "[QGL] Could not auto-grant root via APatch"
         unset _needs_header
       else
-        log_service "[QGL] $_apk_pkg already in APatch package_config"
+        log_service "[QGL] $_acc_pkg already in APatch package_config"
       fi
     else
-      echo "QGL: KernelSU detected — cannot auto-grant root. Grant root to io.github.adreno.qgl.trigger via KSU Manager." > /dev/kmsg 2>/dev/null || true
+      printf '[ADRENO-SVC] QGL: KernelSU — cannot auto-grant root. Grant via KSU Manager.\n' > /dev/kmsg 2>/dev/null || true
       _notice_dir="/sdcard/Adreno_Driver"
       mkdir -p "$_notice_dir" 2>/dev/null || true
       echo "Grant root to QGLTrigger (io.github.adreno.qgl.trigger) via KSU Manager app." > "$_notice_dir/NOTICE_KSU_MANUAL_ROOT_REQUIRED.txt" 2>/dev/null || true
@@ -510,10 +597,60 @@ if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ] && [ -f "$MODDIR/QGLTrigger.apk" 
       unset _notice_dir
     fi
   else
-    log_service "[QGL] Could not find UID for $_apk_pkg — user must grant root manually"
+    log_service "[QGL] Could not find UID for $_acc_pkg — user must grant root manually"
   fi
-  unset _apk_pkg _apk_uid
-  unset _qgl_apk_pkg _qgl_apk_version _acc_comp _current
+  unset _apk_uid
+
+  # Step 8: Generate system packages list for the daemon
+  # The Rust daemon reads this to determine which apps are system apps
+  # when QGL_SYSTEM_APPS=n (skip QGL for system apps).
+  pm list packages -s 2>/dev/null | sed 's/package://' > /data/local/tmp/qgl_system_packages.txt 2>/dev/null || true
+  log_service "[QGL] System packages list generated ($(wc -l < /data/local/tmp/qgl_system_packages.txt 2>/dev/null || echo '?') packages)"
+
+  # Step 9: Accessibility watchdog — re-enable once if OEM scanner clears it
+  # Monitors for 5 minutes (10 checks at 30s intervals). Re-enables at most ONCE.
+  # If lost again after re-enable, exits and daemon fallback takes over.
+  _watchdog_accessibility() {
+    local _wd_pkg="io.github.adreno.qgl.trigger"
+    local _wd_comp="$_wd_pkg/.QGLAccessibilityService"
+    local _wd_reenabled=false
+    local _wd_checks=0
+    local _wd_max_checks=10
+    while [ "$_wd_checks" -lt "$_wd_max_checks" ]; do
+      sleep 30
+      _wd_checks=$((_wd_checks + 1))
+      if ! dumpsys accessibility 2>/dev/null | grep -q "$_wd_comp"; then
+        if [ "$_wd_reenabled" = "false" ]; then
+          log_service "[QGL-WATCHDOG] Accessibility lost (check $_wd_checks/$_wd_max_checks), re-enabling (one-shot)..."
+          pm grant "$_wd_pkg" android.permission.WRITE_SECURE_SETTINGS 2>/dev/null || true
+          appops set "$_wd_pkg" ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null || true
+          local _wd_cur
+          _wd_cur=$(settings get secure enabled_accessibility_services 2>/dev/null || echo "")
+          case "$_wd_cur" in
+            *"$_wd_comp"*) ;;
+            ""|null) settings put secure enabled_accessibility_services "$_wd_comp" 2>/dev/null ;;
+            *) settings put secure enabled_accessibility_services "${_wd_cur}:${_wd_comp}" 2>/dev/null ;;
+          esac
+          settings put secure accessibility_enabled 0 2>/dev/null || true
+          sleep 1
+          settings put secure accessibility_enabled 1 2>/dev/null || true
+          cmd accessibility set-enabled-services --user 0 "$_wd_comp" 2>/dev/null || true
+          _wd_reenabled=true
+        else
+          log_service "[QGL-WATCHDOG] Accessibility lost again after re-enable (check $_wd_checks/$_wd_max_checks), daemon fallback will handle"
+          break
+        fi
+      else
+        if [ "$_wd_reenabled" = "true" ]; then
+          log_service "[QGL-WATCHDOG] Accessibility restored after re-enable (check $_wd_checks/$_wd_max_checks)"
+        fi
+      fi
+    done
+    log_service "[QGL-WATCHDOG] Monitoring complete (ran $_wd_checks checks, re-enabled: $_wd_reenabled)"
+  }
+  _watchdog_accessibility &
+
+  unset _acc_pkg _acc_comp
 fi
 
 # CRITICAL FIX: Reset the boot_attempts counter HERE — immediately after

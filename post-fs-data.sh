@@ -1024,6 +1024,7 @@ SELINUX_RULES_BATCH
     inject "allow appdomain su unix_stream_socket { connectto read write getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow appdomain ksu unix_stream_socket { connectto read write getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow appdomain magisk unix_stream_socket { connectto read write getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
+    inject "allow appdomain init unix_stream_socket { connectto read write getattr }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
 
     inject "allow domain system_lib_file file { read open getattr execute map }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
     inject "allow domain vendor_firmware_file dir { search getattr read }" && RULES_SUCCESS=$((RULES_SUCCESS + 1)) || RULES_FAILED=$((RULES_FAILED + 1))
@@ -1131,6 +1132,8 @@ SELINUX_RULES_BATCH
   "$SEPOLICY_TOOL" --live "allow appdomain ksu unix_stream_socket { connectto read write getattr }" >/dev/null 2>&1 && \
     RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
   "$SEPOLICY_TOOL" --live "allow appdomain magisk unix_stream_socket { connectto read write getattr }" >/dev/null 2>&1 && \
+    RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
+  "$SEPOLICY_TOOL" --live "allow appdomain init unix_stream_socket { connectto read write getattr }" >/dev/null 2>&1 && \
     RULES_SUCCESS=$((RULES_SUCCESS + 1)) || true
 
   # ── Rules removed from batch to prevent OEM neverallow cascade failure ────

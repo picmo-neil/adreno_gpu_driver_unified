@@ -89,6 +89,8 @@ allow untrusted_app vendor_sysfs_kgsl_gpuclk file { read open getattr }
 # QGLTrigger APK (untrusted_app) connects to the abstract socket \0adreno_qgl.
 # Abstract namespace: no sock_file label needed, only connectto on the socket itself.
 # appdomain covers all app domains (untrusted_app, system_app, platform_app, etc.).
-allow appdomain su unix_stream_socket { connectto read write getattr }
-allow appdomain ksu unix_stream_socket { connectto read write getattr }
-allow appdomain magisk unix_stream_socket { connectto read write getattr }
+# getopt: needed by daemon for SO_PEERCRED; getattr: needed by client for getsockopt.
+# Daemon runs as su/ksu/magisk - init rule NOT needed (daemon never runs as init).
+allow appdomain su unix_stream_socket { connectto read write getattr getopt }
+allow appdomain ksu unix_stream_socket { connectto read write getattr getopt }
+allow appdomain magisk unix_stream_socket { connectto read write getattr getopt }

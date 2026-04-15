@@ -20,9 +20,10 @@ import java.io.InputStreamReader
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
 
 private const val TAG = "QGLTrigger"
-private const val DEBOUNCE_MS = 2000L
+private const val DEBOUNCE_MS = 500L
 private const val NOTIFICATION_CHANNEL_ID = "qgl_trigger_channel"
 private const val NOTIFICATION_ID = 1001
 private const val QGL_TARGET = "/data/vendor/gpu/qgl_config.txt"
@@ -40,6 +41,7 @@ class DaemonConnection {
     private var socket: LocalSocket? = null
     private var writer: DataOutputStream? = null
     private var reader: BufferedReader? = null
+    private val ioLock = ReentrantLock()
 
     fun connect(): Boolean {
         disconnect()
@@ -66,14 +68,17 @@ class DaemonConnection {
     fun sendCommand(cmd: String): String {
         val w = writer ?: return "FAIL:disconnected"
         val r = reader ?: return "FAIL:disconnected"
+        ioLock.lock()
         return try {
-            w.writeBytes("$cmd\n")
+            w.write("$cmd\n".toByteArray(Charsets.UTF_8))
             w.flush()
             r.readLine() ?: "FAIL:null_response"
         } catch (e: IOException) {
             Log.d(TAG, "Daemon send failed: ${e.message}")
             disconnect()
             "FAIL:io_error"
+        } finally {
+            ioLock.unlock()
         }
     }
 
@@ -183,9 +188,9 @@ class QGLAccessibilityService : AccessibilityService() {
         return try {
             val appInfo = packageManager.getApplicationInfo(packageName, 0)
             (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-        } catch (_: PackageManager.NameNotFoundException) {
-            true
-        }
+            } catch (_: PackageManager.NameNotFoundException) {
+                false
+            }
     }
 
     private fun isQGLSystemAppsEnabled(): Boolean {

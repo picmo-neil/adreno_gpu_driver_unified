@@ -5613,11 +5613,23 @@ async function checkQGLApkStatus() {
     const statusEl = document.getElementById('qglApkStatus');
     const installBtn = document.getElementById('btnInstallQGLApk');
     const uninstallBtn = document.getElementById('btnUninstallQGLApk');
+    const panel = document.getElementById('qglStatusPanel');
     if (!statusEl) return;
+
+    let apkInstalled = false;
+    let accActive = false;
+    let accInSettings = false;
+    let daemonRunning = false;
+    let daemonMode = '';
+    let daemonLastPkg = '';
+    let daemonQglStatus = '';
+    let qglConfigExists = false;
+    let qglConfigSize = 0;
+
     try {
         const res = await exec('pm list packages io.github.adreno.qgl.trigger 2>/dev/null');
-        const isInstalled = res && res.stdout && res.stdout.includes('io.github.adreno.qgl.trigger');
-        if (isInstalled) {
+        apkInstalled = res && res.stdout && res.stdout.includes('io.github.adreno.qgl.trigger');
+        if (apkInstalled) {
             statusEl.textContent = currentTranslations.installed || 'Installed';
             statusEl.className = 'badge badge-success';
             if (installBtn) installBtn.style.display = 'none';
@@ -5631,6 +5643,188 @@ async function checkQGLApkStatus() {
     } catch (e) {
         statusEl.textContent = currentTranslations.checkingStatus || 'Checking...';
         statusEl.className = 'badge';
+    }
+
+    if (!apkInstalled) {
+        if (panel) panel.style.display = 'none';
+        return;
+    }
+
+    try {
+        const accRes = await exec('dumpsys accessibility 2>/dev/null | grep -c "QGLAccessibilityService"');
+        accActive = accRes && accRes.stdout && parseInt(accRes.stdout.trim()) > 0;
+    } catch (e) {}
+
+    if (!accActive) {
+        try {
+            const settingsRes = await exec('settings get secure enabled_accessibility_services 2>/dev/null');
+            accInSettings = settingsRes && settingsRes.stdout && settingsRes.stdout.includes('QGLAccessibilityService');
+        } catch (e) {}
+    }
+
+    try {
+        const daemonRes = await exec('pidof adreno_qgl_daemon 2>/dev/null');
+        daemonRunning = daemonRes && daemonRes.stdout && daemonRes.stdout.trim().length > 0;
+    } catch (e) {}
+
+    if (daemonRunning) {
+        try {
+            const stateRes = await exec('cat /data/local/tmp/qgl_daemon_state.txt 2>/dev/null');
+            if (stateRes && stateRes.stdout) {
+                const lines = stateRes.stdout.trim().split('\n');
+                const stateMap = {};
+                for (const line of lines) {
+                    const eq = line.indexOf('=');
+                    if (eq > 0) stateMap[line.substring(0, eq)] = line.substring(eq + 1);
+                }
+                daemonMode = stateMap['mode'] || '';
+                daemonLastPkg = stateMap['last_pkg'] || '';
+                daemonQglStatus = stateMap['qgl_status'] || '';
+            }
+        } catch (e) {}
+    }
+
+    try {
+        const qglRes = await exec('stat /data/vendor/gpu/qgl_config.txt 2>/dev/null && echo EXISTS || echo MISSING');
+        qglConfigExists = qglRes && qglRes.stdout && qglRes.stdout.includes('EXISTS');
+    } catch (e) {}
+
+    if (!panel) return;
+    panel.style.display = 'block';
+
+    const accEl = document.getElementById('qglAccStatus');
+    const daemonEl = document.getElementById('qglDaemonRow');
+    const modeEl = document.getElementById('qglSwitchMode');
+    const fallbackEl = document.getElementById('qglFallback');
+    const configEl = document.getElementById('qglConfigState');
+    const lastAppEl = document.getElementById('qglLastApp');
+
+    if (accEl) {
+        if (accActive) {
+            accEl.textContent = 'Active';
+            accEl.className = 'qgl-status-value sv-ok';
+        } else if (accInSettings) {
+            accEl.textContent = 'Pending (not bound)';
+            accEl.className = 'qgl-status-value sv-warn';
+        } else {
+            accEl.textContent = 'Disabled';
+            accEl.className = 'qgl-status-value sv-err';
+        }
+    }
+
+    if (daemonEl) {
+        if (daemonRunning) {
+            daemonEl.textContent = 'Running';
+            daemonEl.className = 'qgl-status-value sv-ok';
+        } else {
+            daemonEl.textContent = 'Stopped';
+            daemonEl.className = 'qgl-status-value sv-err';
+        }
+    }
+
+    if (modeEl) {
+        if (daemonRunning && daemonMode) {
+            modeEl.textContent = daemonMode === 'apk' ? 'APK → Daemon' : 'Logcat → Daemon';
+            modeEl.className = 'qgl-status-value sv-ok';
+        } else if (accActive) {
+            modeEl.textContent = 'APK → Shell';
+            modeEl.className = 'qgl-status-value sv-warn';
+        } else {
+            modeEl.textContent = 'None';
+            modeEl.className = 'qgl-status-value sv-err';
+        }
+    }
+
+    if (fallbackEl) {
+        if (daemonRunning && accActive) {
+            fallbackEl.textContent = 'Daemon (APK connected)';
+            fallbackEl.className = 'qgl-status-value sv-ok';
+        } else if (daemonRunning && !accActive) {
+            fallbackEl.textContent = 'Daemon (logcat fallback)';
+            fallbackEl.className = 'qgl-status-value sv-warn';
+        } else if (accActive) {
+            fallbackEl.textContent = 'su shell';
+            fallbackEl.className = 'qgl-status-value sv-warn';
+        } else {
+            fallbackEl.textContent = 'No fallback active';
+            fallbackEl.className = 'qgl-status-value sv-err';
+        }
+    }
+
+    if (configEl) {
+        if (daemonRunning && daemonQglStatus) {
+            if (daemonQglStatus === 'active') {
+                configEl.textContent = qglConfigExists ? 'Applied' : 'Applied (file missing)';
+                configEl.className = qglConfigExists ? 'qgl-status-value sv-ok' : 'qgl-status-value sv-err';
+            } else if (daemonQglStatus === 'none') {
+                configEl.textContent = 'Removed (no QGL)';
+                configEl.className = 'qgl-status-value sv-neutral';
+            } else {
+                configEl.textContent = 'Error';
+                configEl.className = 'qgl-status-value sv-err';
+            }
+        } else if (qglConfigExists) {
+            configEl.textContent = 'Present (unknown state)';
+            configEl.className = 'qgl-status-value sv-neutral';
+        } else {
+            configEl.textContent = 'No config file';
+            configEl.className = 'qgl-status-value sv-neutral';
+        }
+    }
+
+    if (lastAppEl) {
+        if (daemonLastPkg) {
+            lastAppEl.textContent = daemonLastPkg;
+            lastAppEl.className = 'qgl-status-value sv-neutral';
+        } else {
+            lastAppEl.textContent = '—';
+            lastAppEl.className = 'qgl-status-value sv-neutral';
+        }
+    }
+}
+    } catch (e) {
+        statusEl.textContent = currentTranslations.checkingStatus || 'Checking...';
+        statusEl.className = 'badge';
+    }
+
+    if (accStatusEl) {
+        try {
+            const accRes = await exec('dumpsys accessibility 2>/dev/null | grep -c "QGLAccessibilityService"');
+            const accBound = accRes && accRes.stdout && parseInt(accRes.stdout.trim()) > 0;
+            if (accBound) {
+                accStatusEl.textContent = 'A11y: Active';
+                accStatusEl.className = 'badge badge-success';
+            } else {
+                const settingsRes = await exec('settings get secure enabled_accessibility_services 2>/dev/null');
+                const inSettings = settingsRes && settingsRes.stdout && settingsRes.stdout.includes('QGLAccessibilityService');
+                if (inSettings) {
+                    accStatusEl.textContent = 'A11y: Pending';
+                    accStatusEl.className = 'badge badge-warning';
+                } else {
+                    accStatusEl.textContent = 'A11y: Off';
+                    accStatusEl.className = 'badge badge-danger';
+                }
+            }
+        } catch (e) {
+            accStatusEl.textContent = 'A11y: ?';
+            accStatusEl.className = 'badge';
+        }
+    }
+
+    if (daemonStatusEl) {
+        try {
+            const daemonRes = await exec('pidof adreno_qgl_daemon 2>/dev/null');
+            if (daemonRes && daemonRes.stdout && daemonRes.stdout.trim()) {
+                daemonStatusEl.textContent = 'Daemon: Running';
+                daemonStatusEl.className = 'badge badge-success';
+            } else {
+                daemonStatusEl.textContent = 'Daemon: Off';
+                daemonStatusEl.className = 'badge badge-danger';
+            }
+        } catch (e) {
+            daemonStatusEl.textContent = 'Daemon: ?';
+            daemonStatusEl.className = 'badge';
+        }
     }
 }
 
