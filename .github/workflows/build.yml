@@ -145,6 +145,19 @@ jobs:
             -validity 10000 \
             -dname "CN=QGL Trigger,O=Adreno,C=US" 2>&1
 
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          VERSION_CODE=$(date +%y%m%d)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "Version: ${VERSION} (${VERSION_CODE})"
+
       - name: Build APK
         id: build
         run: |
@@ -158,7 +171,9 @@ jobs:
           echo ""
           
           # Build with full error output - capture everything
-          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee /tmp/gradle-build.log
+          ./gradlew assembleRelease --no-daemon --stacktrace \
+            -PVERSION_NAME="${{ steps.version.outputs.version }}" \
+            -PVERSION_CODE="${{ steps.version.outputs.version_code }}" 2>&1 | tee /tmp/gradle-build.log
           BUILD_EXIT=${PIPESTATUS[0]}
           
           if [ $BUILD_EXIT -ne 0 ]; then

@@ -1337,6 +1337,29 @@ if [ -f "$TMPDIR/QGLTrigger.apk" ]; then
     FILES_FAILED=$((FILES_FAILED + 1))
     log_only "ERROR: Failed to copy QGLTrigger.apk"
   fi
+
+  _acc_pkg="io.github.adreno.qgl.trigger"
+  _installed_ver=$(dumpsys package "$_acc_pkg" 2>/dev/null | grep versionName | head -1 | sed 's/.*versionName=//;s/ .*//' | tr -d ' \r\n')
+  if [ -n "$_installed_ver" ]; then
+    _module_ver=""
+    if [ -f "$TMPDIR/module.prop" ]; then
+      _module_ver=$(grep '^version=' "$TMPDIR/module.prop" 2>/dev/null | head -1 | sed 's/version=//' | tr -d ' \r\n')
+    elif [ -f "$MODPATH/module.prop" ]; then
+      _module_ver=$(grep '^version=' "$MODPATH/module.prop" 2>/dev/null | head -1 | sed 's/version=//' | tr -d ' \r\n')
+    fi
+    if [ -n "$_module_ver" ] && [ "$_installed_ver" != "$_module_ver" ]; then
+      ui_print "[!] QGLTrigger APK version mismatch: installed=$_installed_ver, module=$_module_ver"
+      ui_print "    Old APK will be uninstalled; new version installs on next boot"
+      log_only "QGLTrigger version mismatch: installed=$_installed_ver module=$_module_ver — marking for reinstall"
+      touch "$MODPATH/.qgl_apk_needs_reinstall" 2>/dev/null || true
+    else
+      ui_print "[OK] QGLTrigger APK version matches module ($_installed_ver)"
+      log_only "QGLTrigger version OK: installed=$_installed_ver matches module"
+    fi
+  else
+    log_only "QGLTrigger APK not currently installed — will install on boot"
+  fi
+  unset _acc_pkg _installed_ver _module_ver
 fi
 
 if [ $FILES_FAILED -gt 0 ]; then

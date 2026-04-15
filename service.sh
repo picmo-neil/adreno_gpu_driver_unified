@@ -449,9 +449,27 @@ if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ] && [ -f "$MODDIR/QGLTrigger.apk" 
   _acc_pkg="io.github.adreno.qgl.trigger"
   _acc_comp="io.github.adreno.qgl.trigger/.QGLAccessibilityService"
 
-  # Step 1: Install APK if not present
+  # Step 1: Install/update APK
   _qgl_apk_version=$(dumpsys package "$_acc_pkg" 2>/dev/null | grep versionName | head -1 | sed 's/.*versionName=//;s/ .*//' | tr -d ' \r\n')
-  if [ -n "$_qgl_apk_version" ]; then
+  _qgl_module_version=$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | head -1 | sed 's/version=//' | tr -d ' \r\n')
+  _qgl_needs_reinstall=false
+  if [ -f "$MODDIR/.qgl_apk_needs_reinstall" ]; then
+    _qgl_needs_reinstall=true
+    rm -f "$MODDIR/.qgl_apk_needs_reinstall" 2>/dev/null || true
+  fi
+  if [ -n "$_qgl_apk_version" ] && [ -n "$_qgl_module_version" ] && [ "$_qgl_apk_version" != "$_qgl_module_version" ]; then
+    log_service "[QGL] QGLTrigger APK version mismatch: installed=v$_qgl_apk_version, module=v$_qgl_module_version — updating"
+    _qgl_needs_reinstall=true
+  fi
+  if [ "$_qgl_needs_reinstall" = "true" ]; then
+    log_service "[QGL] Uninstalling old QGLTrigger APK..."
+    pm uninstall "$_acc_pkg" 2>/dev/null || true
+    sleep 1
+    log_service "[QGL] Installing updated QGLTrigger APK (v$_qgl_module_version)..."
+    pm install -g --user 0 "$MODDIR/QGLTrigger.apk" 2>/dev/null && \
+      log_service "[QGL] QGLTrigger APK updated" || \
+      log_service "[QGL] QGLTrigger APK update FAILED"
+  elif [ -n "$_qgl_apk_version" ]; then
     log_service "[QGL] QGLTrigger APK already installed (v$_qgl_apk_version)"
   else
     log_service "[QGL] Installing QGLTrigger APK..."
@@ -459,7 +477,7 @@ if [ "$QGL" = "y" ] && [ "$QGL_PERAPP" = "y" ] && [ -f "$MODDIR/QGLTrigger.apk" 
       log_service "[QGL] QGLTrigger APK installed" || \
       log_service "[QGL] QGLTrigger APK install FAILED"
   fi
-  unset _qgl_apk_version
+  unset _qgl_apk_version _qgl_module_version _qgl_needs_reinstall
 
   # Step 2: Grant WRITE_SECURE_SETTINGS (critical OEM bypass)
   # pm install resets runtime permissions, so grant after every install.

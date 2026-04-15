@@ -183,6 +183,16 @@ rm -f /data/vendor/gpu/.adreno_qgl_owner 2>/dev/null || true
 echo "✓ QGL owner marker removed"
 echo ""
 
+# ========================================
+# UNINSTALL QGL TRIGGER APK
+# ========================================
+echo "Uninstalling QGL Trigger APK..."
+pm uninstall io.github.adreno.qgl.trigger 2>/dev/null || true
+rm -f /data/local/tmp/qgl_daemon_state.txt 2>/dev/null || true
+rm -f /data/local/tmp/qgl_system_packages.txt 2>/dev/null || true
+echo "✓ QGL Trigger APK uninstalled"
+echo ""
+
 echo "========================================"
 echo "Uninstall Complete!"
 echo "========================================"
